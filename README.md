@@ -108,7 +108,7 @@ Stores:
 │   ├── llm_client.py
 │   ├── executor.py
 │   ├── permissions.py
-│   └── prompt.txt
+│   └── prompt.py
 ├── workspace/
 │   ├── downloads/
 │   └── temp/
