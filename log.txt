@@ -1,0 +1,11 @@
+
+CMD:
+ls -F
+OUT:
+api.keys
+core/
+game/
+log.txt
+memories.txt
+workspace/
+<<<END_OF_COMMAND_OUTPUT>>>
