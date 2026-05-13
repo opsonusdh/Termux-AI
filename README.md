@@ -351,5 +351,5 @@ Use responsibly.
 # Final note
 - I made the project way before I knew about openclaw (it wasn't released then)
 - I'm uploading this now 'cause I need your help
-- I will integrated this AI into another project of mine ![Termux-TUI](https://github.com/opsonusdh/Termux-TUI)
+- I will integrated this AI into another project of mine [Termux-TUI](https://github.com/opsonusdh/Termux-TUI)
 - Hope you'll help with your generosity.
