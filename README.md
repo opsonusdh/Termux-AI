@@ -1,346 +1,440 @@
 # Terminal Autonomous AI Agent (Termux)
 
-A sandboxed autonomous AI agent for Termux powered by Gemini.
+A terminal-native autonomous AI agent for Termux powered by Gemini through the OpenAI-compatible API interface.
 
-The agent can:
-- reason step-by-step
-- execute shell commands
-- inspect files
-- create projects
-- search the internet
-- maintain memory
-- operate inside a restricted filesystem sandbox
+This project is **not** a regex-driven shell parser anymore.  
+It uses **native tool calling** inside the runtime, with internal orchestration for command execution, memory retrieval, and filesystem-safe actions.
 
-Unlike normal chatbots, this system behaves like a terminal-capable reasoning agent with controlled autonomy.
+The agent is designed to behave like a practical terminal assistant that can reason, inspect, remember, and act inside a constrained Termux environment.
 
 ---
 
-# Features
+## What the agent can do
 
-## Autonomous Shell Execution
-The AI can generate and execute bash commands automatically.
-
-Example:
-
-```bash
-grep -R "exam" ~/ai_root
-```
-
-Command outputs are fed back into the reasoning loop.
+- reason over tasks step by step
+- call tools internally
+- execute shell commands through a validated runtime tool
+- inspect files and directories
+- maintain persistent structured memory
+- retrieve relevant memories when needed
+- render markdown cleanly in the terminal
+- interact with supported Termux APIs
+- work inside a sandboxed filesystem model
 
 ---
 
-## Sandboxed File System
+## Important architecture note
 
-The AI operates inside:
+The agent **does not** rely on old-style `bash-run` blocks or command extraction from model text.
+
+That older design has been replaced by:
+
+- native tool calling
+- internal tool dispatch
+- validated command execution
+- direct result feedback into the model loop
+
+So the model does **not** output shell blocks for the runtime to scrape.  
+The runtime calls tools directly and manages the loop internally.
+
+---
+
+## Features
+
+### Native Tool Calling
+
+The assistant uses tools such as:
+
+- `run_code`
+- `save_memory`
+- `retrieve_memory`
+
+These are handled by the runtime, not by parsing markdown command fences.
+
+---
+
+## Sandboxed Filesystem
+
+The AI operates around:
 
 ```text
-~/ai_root
+~/Termux-AI
 ```
-
-### Permissions
+### Permission model
 
 | Action | Allowed |
 |---|---|
-| Read any file | ✅ |
-| Write inside `~/ai_root` | ✅ |
-| Modify `~/ai_root/core` | ❌ Requires permission |
-| Modify outside `~/ai_root` | ❌ Requires permission |
+| Read files anywhere | ✅ |
+| Write/delete inside `~/Termux-AI/workspace` | ✅ |
+| Modify `~/Termux-AI/core` | ❌ Requires permission |
+| Modify outside `~/Termux-AI` | ❌ Requires permission |
+| Dangerous system commands | ❌ Requires permission |
 
-This prevents accidental self-modification and dangerous system changes.
+The permission system is:
+- path-aware
+- workspace-aware
+- context-sensitive
 
----
+instead of relying purely on naive keyword matching.
 
-## Multi-Step Reasoning Loop
+Safe autonomous actions inside the workspace are allowed automatically.
 
-The AI can:
-1. think
-2. execute commands
-3. inspect outputs
-4. retry
-5. refine answers
+Examples:
+- downloading files
+- deleting temporary files
+- generating projects
+- media processing
+- local experimentation
 
-until it becomes confident enough to respond.
-
----
-
-## Gemini SDK Integration
-
-Uses:
-- `google-genai`
-- Gemini 2.5 Flash
-
-Supports:
-- API key rotation
-- retry handling
-- overload recovery
-- tool calling
+Protected areas and risky operations still require confirmation.
 
 ---
 
-## Memory System
+## Persistent Memory
 
-### `memories.txt`
-Persistent long-term memory.
-
-Stores:
-- summaries
-- important discoveries
-- reusable information
-
-### `log.txt`
-Stores:
-- commands
-- outputs
-- execution history
-
----
-
-# Project Structure
+The agent stores durable memory in:
 
 ```text
-~/ai_root/
-├── api.keys
-├── memories.txt
-├── log.txt
-├── core/
-│   ├── interface.py
-│   ├── llm_client.py
-│   ├── executor.py
-│   ├── permissions.py
-│   └── prompt.py
-├── workspace/
-│   ├── downloads/
-│   └── temp/
+~/Termux-AI/memories.txt
 ```
+Memory supports:
+- structured entries
+- priorities
+- tags
+- semantic retrieval
+- automatic injection into prompts
+- tool-based saving and retrieval
+
+The memory system is intended for stable knowledge such as:
+- user preferences
+- workflow habits
+- project details
+- instructions
+- recurring environment facts
 
 ---
 
-# Components
+## Semantic Memory Retrieval
 
-## `interface.py`
+The agent does not blindly dump the whole memory file into context.
+
+Instead, it retrieves relevant memories using:
+- keyword scoring
+- category matching
+- priority weighting
+- heap-based ranking
+
+This keeps memory retrieval focused and useful.
+
+---
+
+## Markdown Terminal Renderer
+
+The response renderer formats terminal output with ANSI styling.
+
+It supports:
+- headings
+- bold text
+- italic text
+- inline code
+- fenced code blocks
+- bullets
+- numbered lists
+- dividers
+- readable color styling
+
+This keeps assistant output usable in Termux without raw markdown clutter leaking through.
+
+---
+
+## Termux API Integration
+
+The agent can use supported local tools such as:
+- `termux-media-player`
+- other installed Termux utilities
+
+This is handled as part of the runtime tool system, not as fake text instructions.
+
+---
+
+## Project structure
+
+```text
+~/Termux-AI $ tree
+.
+├── CONTRIBUTING.md
+├── LICENSE
+├── README.md
+├── api.keys
+├── core
+│   ├── __main__.py
+│   ├── __pycache__
+│   ├── interface.py
+│   ├── llm_client.py
+│   ├── memory_store.py
+│   ├── permissions.py
+│   ├── prompt.py
+│   └── renderer.py
+├── log.txt
+├── memories.txt
+└── workspace
+```
+---
+## Components
+
+### `interface.py`
 
 Main terminal interface.
 
 Responsibilities:
 - user interaction
-- AI loop
-- command extraction
-- feeding outputs back to the model
+- conversation loop
+- displaying output
+- passing prompts into the model runtime
 
 ---
 
-## `llm_client.py`
+### `llm_client.py`
+
+Core inference engine.
 
 Handles:
-- Gemini API
-- SDK integration
-- retries
+- Gemini API access through the OpenAI-compatible endpoint
 - tool calling
-- key rotation
+- retries
+- overload recovery
+- API key rotation
+- automatic memory injection
 
 ---
 
-## `executor.py`
+### `memory_store.py`
 
-Executes shell commands safely.
+Persistent memory subsystem.
 
-Features:
-- timeout handling
-- logging
-- execution output capture
-- sandbox validation
+Handles:
+- parsing memory records
+- semantic retrieval
+- memory scoring
+- top-k selection
+- saving structured memories
 
 ---
 
-## `permissions.py`
+### `permissions.py`
 
 Sandbox enforcement layer.
 
-Blocks:
-- privileged commands
-- interactive tools
-- writes outside sandbox
-- modifications to `core/`
+Responsibilities:
+- path checks
+- workspace protection
+- permission prompts for risky operations
+- command validation
 
 ---
 
-## `prompt.txt`
+### `renderer.py`
 
-Behavior tuning layer for the AI.
+ANSI markdown renderer.
 
-Can be modified without changing source code.
+Responsibilities:
+- formatting responses
+- code block display
+- list formatting
+- inline markdown styling
+- terminal readability
 
 ---
 
-# Installation
+### `prompt.py`
 
-## Install Python
+Behavior tuning layer.
+
+Contains the system prompt and agent behavior rules.
+
+---
+
+## Setup
+
+### Install Python dependencies
 
 ```bash
-pkg install python, rust
+pkg install python rust
+pip install openai
 ```
-
 ---
-
-## Install dependencies
-
-```bash
-export ANDROID_API_LEVEL=34
-pip install google-genai
-```
-
----
-
-# Setup
-
-## Create API keys file
+### Create API keys file
 
 Create:
 
 ```text
-~/ai_root/api.keys
+~/Termux-AI/api.keys
 ```
 
 Example:
 
 ```text
-AIza....
-AIza....
+AIza...
+AIza...
 ```
 
-One key per line.
+One API key per line.
+
+The runtime automatically rotates keys when:
+- rate limits occur
+- temporary overloads happen
+- provider-side failures appear
 
 ---
 
-# Running
+## Running
 
-Move into the core directory:
+From the project root:
 
 ```bash
-cd ~/ai_root/core
+cd ~/Termux-AI
+python core
 ```
 
-Start the agent:
-
-```bash
-python interface.py
-```
+Or run the module directly, depending on how your `__main__.py` is wired.
 
 ---
 
-# Example Session
+## Example session
 
-## User
-
-```text
-YOU > create a cli snake game
-```
-
-## AI
+### User
 
 ```text
-[Thinking(1)]
+YOU > create a small cli project
 ```
 
-```bash
-mkdir -p ~/ai_root/game
-```
+### Agent
 
-```text
-[Executing commands]
-```
-
-```text
-<<<END_OF_COMMAND_OUTPUT>>>
-```
-
-The AI continues building the project autonomously.
+The AI:
+- inspects context
+- plans the task
+- calls tools internally
+- creates files in `~/Termux-AI/workspace`
+- validates outputs
+- returns a formatted answer
 
 ---
 
-# Safety Model
+## Security model
 
-The project uses a layered security model.
+### Protected core
 
-## Trust Zones
+```text
+~/Termux-AI/core
+```
 
-### 1. `core/`
-Protected system logic.
+Contains the runtime logic and protected source code.
 
-AI cannot modify without permission.
+Modification requires explicit permission.
 
 ---
 
-### 2. `ai_root/`
-Writable workspace.
+### Workspace
 
-AI can:
+```text
+~/Termux-AI/workspace
+```
+
+Safe writable zone for:
+- generated files
+- downloads
+- experiments
+- temporary project artifacts
+
+The AI may:
 - create files
-- run code
-- manage projects
+- download content
+- delete temporary artifacts
+- generate projects
+- run experiments
+
+without requiring permission.
+
+This allows the agent to:
+- use `yt-dlp`
+- process media with `ffmpeg`
+- generate scripts
+- create temporary build artifacts
+- run local automation workflows
+
+without repeatedly interrupting the user for confirmation.
 
 ---
 
-### 3. System
-Read-only external environment.
+### External system
 
-AI may inspect files but cannot modify them automatically.
+The system may be inspected, but protected or risky actions require confirmation.
 
----
-
-# Design Goals
-
-- autonomous but controlled
-- inspectable execution
-- terminal-native
-- lightweight
-- local-first
-- extensible
-- safe enough for experimentation
+Examples:
+- modifying system directories
+- killing unrelated processes
+- accessing privileged device APIs
+- altering protected runtime files
 
 ---
 
-# Current Limitations
+## Current capabilities
 
-- no streaming responses
+- autonomous shell execution
+- semantic memory retrieval
+- long-term memory persistence
+- markdown terminal rendering
+- native tool calling
+- multi-step reasoning
+- filesystem management
+- media playback
+- Termux API integration
+- retry-based recovery
+- structured permissions
+- API key rotation
+
+---
+
+## Current limitations
+
+- no streaming output yet
 - no async execution
-- limited shell parsing
-- context can grow large
-- no token optimization yet
-- no GUI
+- limited shell parsing heuristics
+- long contexts can still grow large
+- no vector embeddings yet
+- no rollback or snapshot system
 
 ---
 
-# Future Ideas
+## Future ideas
 
-- web search tools
-- package install approval system
-- self-repair mode
-- plugin system
-- voice interface
 - vector memory
-- multi-agent support
+- streaming responses
+- background tasks
+- voice interface
+- plugin system
+- execution rollback
 - command confidence scoring
-- execution rollback system
+- multi-agent coordination
 
 ---
 
-# Philosophy
+## Philosophy
 
-This project is not trying to simulate AGI.
+This project is not trying to fake general intelligence.
 
-It is a practical autonomous terminal agent:
-- constrained
-- inspectable
+It is a practical autonomous terminal agent designed to be:
 - useful
-- recoverable when it inevitably does something creatively stupid
+- inspectable
+- constrained
+- recoverable
+- extensible
 
-Because giving an LLM shell access without boundaries is less “innovation” and more “digital natural selection”.
+The goal is controlled autonomy, not chaotic shell possession.
 
 ---
 
-# License
+## License
 
 MIT License
 
@@ -348,8 +442,9 @@ Use responsibly.
 
 ---
 
-# Final note
-- I made the project way before I knew about openclaw (it wasn't released then)
-- I'm uploading this now 'cause I need your help
-- I will integrated this AI into another project of mine [Termux-TUI](https://github.com/opsonusdh/Termux-TUI)
-- Hope you'll help with your generosity.
+## Final note
+
+- This project was started before OpenClaw existed.
+- It has since evolved into a native tool-calling agent.
+- It is intended to integrate with other Termux projects, including Termux-TUI.
+- Improvements, suggestions, and testing are welcome.

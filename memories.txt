@@ -1,1 +1,9 @@
-Learned: If --help does not work, trying -h is better than using which or making the bin ls
+# memories.txt — Termux-AI persistent memory
+# Format: [type][tags][priority] text
+#
+# type     : preference | instruction | project | fact | workflow
+# tags     : comma-separated keywords for retrieval
+# priority : 1-10  (10 = always surface, e.g. shutdown rules)
+#
+[preference][shell,help,commands,flag][9] If --help fails, try -h before using which or inspecting the binary.
+[instruction][shutdown,process,kill,close][10] When told to close yourself, find and kill the Python process after saying goodbye.
