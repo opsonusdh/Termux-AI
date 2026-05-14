@@ -1,0 +1,1 @@
+Learned: If --help does not work, trying -h is better than using which or making the bin ls

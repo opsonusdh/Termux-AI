@@ -46,6 +46,7 @@ def run_code(bash: str) -> str:
         return f"[BLOCKED] {reason}"
 
     try:
+        print(f"\033[90m[EXECUTINGTG] {bash}\033[0m")
         result = subprocess.run(
             bash,
             shell=True,
@@ -59,12 +60,15 @@ def run_code(bash: str) -> str:
 
         if err:
             if out:
+                print("\033[90m[OUT] \n"+out + "\n\033[31m[ERR]\n" + err+"\033[0m")
                 return out + "\n[ERR]\n" + err
+            print("\033[31m[ERR]\n" + err+"\033[0m")
             return "[ERR]\n" + err
-
+        print(f"\033[90m[OUT]\n{out}\033[0m")
         return out
 
     except Exception as e:
+        print("\033[31m[EXCEPTION]\n"+e+"\033[0m")
         return f"[EXCEPTION] {e}"
 
 

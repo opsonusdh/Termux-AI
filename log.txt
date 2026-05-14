@@ -9,3 +9,39 @@ log.txt
 memories.txt
 workspace/
 <<<END_OF_COMMAND_OUTPUT>>>
+
+CMD:
+ls -la ~/ai_root
+OUT:
+total 42
+drwx------.  5 u0_a389 u0_a389 3440 May 13 08:52 .
+drwx------. 36 u0_a389 u0_a389 4096 May 13 09:21 ..
+drwx------.  7 u0_a389 u0_a389 3440 May 13 08:54 .git
+-rw-------.  1 u0_a389 u0_a389   21 May 13 08:30 .gitignore
+-rw-------.  1 u0_a389 u0_a389 1066 May 13 08:52 LICENSE
+-rw-------.  1 u0_a389 u0_a389 4558 May 13 08:53 README.md
+-rw-------.  1 u0_a389 u0_a389  200 May 13 08:12 api.keys
+drwx------.  3 u0_a389 u0_a389 3440 May 13 08:13 core
+-rw-------.  1 u0_a389 u0_a389  121 May 13 10:08 log.txt
+-rw-------.  1 u0_a389 u0_a389    0 May 13 07:24 memories.txt
+drwx------.  4 u0_a389 u0_a389 3440 May 13 07:24 workspace
+<<<END_OF_COMMAND_OUTPUT>>>
+
+CMD:
+ls -F
+OUT:
+LICENSE
+README.md
+api.keys
+core/
+log.txt
+memories.txt
+workspace/
+<<<END_OF_COMMAND_OUTPUT>>>
+
+CMD:
+echo "Hello from your AI agent!" > ~/ai_root/workspace/demo.txt
+cat ~/ai_root/workspace/demo.txt
+OUT:
+Hello from your AI agent!
+<<<END_OF_COMMAND_OUTPUT>>>
