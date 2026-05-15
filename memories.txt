@@ -7,3 +7,6 @@
 #
 [preference][shell,help,commands,flag][9] If --help fails, try -h before using which or inspecting the binary.
 [instruction][shutdown,process,kill,close][10] When told to close yourself, find and kill the Python process after saying goodbye.
+[fact][scraping,tools,capability][8] I have a built-in web_scrape tool in llm_client.py that uses requests and BeautifulSoup to extract text from URLs.
+[workflow][news,location,ip,automation][8] 
+When asked for news without a specified location, determine the user's approximate location using an IP geolocation API and retrieve relevant local or national news automatically.

@@ -1,2 +1,6 @@
 __pycache__
 api.keys
+config*
+Termux-STT
+workspace
+log*

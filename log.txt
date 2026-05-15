@@ -45,3 +45,8 @@ cat ~/ai_root/workspace/demo.txt
 OUT:
 Hello from your AI agent!
 <<<END_OF_COMMAND_OUTPUT>>>
+[run_code] echo "Current directory: $(pwd)"
+echo "Memory file status: $(ls -l ~/ai_root/memories.txt 2>/dev/null || echo 'Not found')"
+[OUT] Current directory: /data/data/com.termux/files/home/ai_root
+Memory file status: -rw-r--r--. 1 u0_a389 u0_a389 887 May 15 11:34 /data/data/com.termux/files/home/ai_root/memories.txt[run_code] date; uptime[OUT] Sat May 16 01:25:07 IST 2026
+ 01:25:07 up 7 days, 14:53,  load average: 16.65, 17.13, 16.36[run_code] curl -s wttr.in?format="%m+%M"[OUT] 🌑 28[run_code] pkill -f "python.*llm_client.py" || kill $PPID[OUT] [run_code] kill -9 $(pgrep -f "python.*llm_client.py")[OUT] [run_code] pkill -9 -f "python.*main.py" || pkill -9 -f "python.*llm_client.py" || exit[OUT] [run_code] python -c "import os, signal; os.kill(os.getppid(), signal.SIGTERM); os._exit(0)"
