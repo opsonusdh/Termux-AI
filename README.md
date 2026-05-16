@@ -1,4 +1,4 @@
-# Terminal Autonomous AI Agent (Termux)
+dependenciesythonython Terminal Autonomous AI Agent (Termux)
 
 A terminal-native autonomous AI agent for Termux powered by Gemini through the OpenAI-compatible API interface.
 
@@ -256,7 +256,7 @@ Contains the system prompt and agent behavior rules.
 
 ## Setup
 
-### Install Python dependencies
+### Install dependencies
 ```bash
 pkg install git
 ```
@@ -268,6 +268,8 @@ bash setup.sh
 ```
 For voice detection support you can add my another repo [Termux-STT](https://github.com/opsonusdh/Termux-STT/):
 ```bash
+pkg install mpv
+pip install edge-tts
 git clone https://github.com/opsonusdh/Termux-STT/
 cd Termux-STT
 bash setup.sh
