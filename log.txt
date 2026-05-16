@@ -49,4 +49,3959 @@ Hello from your AI agent!
 echo "Memory file status: $(ls -l ~/ai_root/memories.txt 2>/dev/null || echo 'Not found')"
 [OUT] Current directory: /data/data/com.termux/files/home/ai_root
 Memory file status: -rw-r--r--. 1 u0_a389 u0_a389 887 May 15 11:34 /data/data/com.termux/files/home/ai_root/memories.txt[run_code] date; uptime[OUT] Sat May 16 01:25:07 IST 2026
- 01:25:07 up 7 days, 14:53,  load average: 16.65, 17.13, 16.36[run_code] curl -s wttr.in?format="%m+%M"[OUT] 🌑 28[run_code] pkill -f "python.*llm_client.py" || kill $PPID[OUT] [run_code] kill -9 $(pgrep -f "python.*llm_client.py")[OUT] [run_code] pkill -9 -f "python.*main.py" || pkill -9 -f "python.*llm_client.py" || exit[OUT] [run_code] python -c "import os, signal; os.kill(os.getppid(), signal.SIGTERM); os._exit(0)"
+ 01:25:07 up 7 days, 14:53,  load average: 16.65, 17.13, 16.36[run_code] curl -s wttr.in?format="%m+%M"[OUT] 🌑 28[run_code] pkill -f "python.*llm_client.py" || kill $PPID[OUT] [run_code] kill -9 $(pgrep -f "python.*llm_client.py")[OUT] [run_code] pkill -9 -f "python.*main.py" || pkill -9 -f "python.*llm_client.py" || exit[OUT] [run_code] python -c "import os, signal; os.kill(os.getppid(), signal.SIGTERM); os._exit(0)"[run_code] kill -9 $(ps -ef | grep python | grep llm_client.py | grep -v grep | awk '{print $2}')[ERR] /data/data/com.termux/files/usr/bin/sh: 1: kill: Usage: kill [-s sigspec | -signum | -sigspec] [pid | job]... or
+kill -l [exitstatus][run_code] pgrep -f llm_client.py | xargs kill -9[OUT] [run_code] command -v termux-tts-speak || command -v espeak || command -v flite[OUT] /data/data/com.termux/files/usr/bin/termux-tts-speak[run_code] termux-tts-speak "The emergence of autonomous terminal-native agents represents a significant shift in how we interact with mobile computing environments like Termux. By bridging the gap between high-level reasoning and low-level system access, these agents transform a handheld device from a simple communication tool into a powerful, automated workstation capable of complex task execution. As large language models become more integrated with specialized environments, the boundaries between human intent and machine execution begin to blur, allowing for seamless automation of file management, system administration, and data processing. This evolution highlights the potential for truly portable intelligence, where the constraints of traditional user interfaces are replaced by the flexibility of the command line, enabling a new era of productivity that is both locally grounded and globally connected through the vast ecosystem of open-source utilities and terminal-driven workflows."[save_memory] text:Whenever the user says 'Good morning', provide the current time, news, and weather report., type:instruction tags:routine,greeting,morning,news,weather,time priority:8[OK][run_code] date && curl -s https://ipapi.co/json/[OUT] Sat May 16 10:33:54 IST 2026
+{
+    "ip": "2409:40e0:100e:1267:8000::",
+    "network": "2409:40e0:1000::/36",
+    "version": "IPv6",
+    "city": "Kolkata",
+    "region": "West Bengal",
+    "region_code": "WB",
+    "country": "IN",
+    "country_name": "India",
+    "country_code": "IN",
+    "country_code_iso3": "IND",
+    "country_capital": "New Delhi",
+    "country_tld": ".in",
+    "continent_code": "AS",
+    "in_eu": false,
+    "postal": "700029",
+    "latitude": 22.5643,
+    "longitude": 88.3693,
+    "timezone": "Asia/Kolkata",
+    "utc_offset": "+0530",
+    "country_calling_code": "+91",
+    "currency": "INR",
+    "currency_name": "Rupee",
+    "languages": "en-IN,hi,bn,te,mr,ta,ur,gu,kn,ml,or,pa,as,bh,sat,ks,ne,sd,kok,doi,mni,sit,sa,fr,lus,inc",
+    "country_area": 3287590.0,
+    "country_population": 1352617328,
+    "asn": "AS55836",
+    "org": "Reliance Jio Infocomm Limited"
+}[run_code] curl -s "wttr.in/Kolkata?format=3" && curl -s "https://news.google.com/rss/search?q=top+news+India+today&hl=en-IN&gl=IN&ceid=IN:en" | grep -oP '(?<=<title>).*?(?=</title>)' | head -n 6 | tail -n 5[OUT] kolkata: 🌫️  +32°C
+Google News
+School assembly news headlines today- May 16: Top national, sports and world news curated for you - India Today
+School assembly news headlines today- May 14: Top national, sports and world news curated for you - India Today
+Top news of the day | February 8, 2026 - The Hindu
+Seeman News - The Times of India[web_scrape] URL:https://www.ndtv.com/latest selector:None[ERROR] {e}[run_code] curl -s "wttr.in/Kolkata?format=%c+%t+%w" && echo "" && curl -s "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en" | grep -oP '(?<=<title>).*?(?=</title>)' | head -n 8 | tail -n 6[OUT] 🌫️  +32°C ↗24km/h
+"Thought He Could Hide": Trump Says Top ISIS Leader Abu-Bilal Killed - NDTV
+CBI nabs alleged mastermind behind NEET-UG 2026 chemistry paper leak - The Hindu
+India deepens defence, energy ties with UAE during PM Modi visit - Reuters
+Bhojshala Case: MP High Court Rejects Arguments Claiming Disputed Site Is Jain Temple - Live Law
+Trump Warns Taiwan Against Independence Moves After Xi Summit: Why It Matters - News18
+LU teacher offers to leak exam paper to girl student in exchange of ‘favours’ - The Times of India[run_code] cat ~/ai_root/log.txt[OUT] CMD:
+ls -F
+OUT:
+api.keys
+core/
+game/
+log.txt
+memories.txt
+workspace/
+<<<END_OF_COMMAND_OUTPUT>>>
+
+CMD:
+ls -la ~/ai_root
+OUT:
+total 42
+drwx------.  5 u0_a389 u0_a389 3440 May 13 08:52 .
+drwx------. 36 u0_a389 u0_a389 4096 May 13 09:21 ..
+drwx------.  7 u0_a389 u0_a389 3440 May 13 08:54 .git
+-rw-------.  1 u0_a389 u0_a389   21 May 13 08:30 .gitignore
+-rw-------.  1 u0_a389 u0_a389 1066 May 13 08:52 LICENSE
+-rw-------.  1 u0_a389 u0_a389 4558 May 13 08:53 README.md
+-rw-------.  1 u0_a389 u0_a389  200 May 13 08:12 api.keys
+drwx------.  3 u0_a389 u0_a389 3440 May 13 08:13 core
+-rw-------.  1 u0_a389 u0_a389  121 May 13 10:08 log.txt
+-rw-------.  1 u0_a389 u0_a389    0 May 13 07:24 memories.txt
+drwx------.  4 u0_a389 u0_a389 3440 May 13 07:24 workspace
+<<<END_OF_COMMAND_OUTPUT>>>
+
+CMD:
+ls -F
+OUT:
+LICENSE
+README.md
+api.keys
+core/
+log.txt
+memories.txt
+workspace/
+<<<END_OF_COMMAND_OUTPUT>>>
+
+CMD:
+echo "Hello from your AI agent!" > ~/ai_root/workspace/demo.txt
+cat ~/ai_root/workspace/demo.txt
+OUT:
+Hello from your AI agent!
+<<<END_OF_COMMAND_OUTPUT>>>
+[run_code] echo "Current directory: $(pwd)"
+echo "Memory file status: $(ls -l ~/ai_root/memories.txt 2>/dev/null || echo 'Not found')"
+[OUT] Current directory: /data/data/com.termux/files/home/ai_root
+Memory file status: -rw-r--r--. 1 u0_a389 u0_a389 887 May 15 11:34 /data/data/com.termux/files/home/ai_root/memories.txt[run_code] date; uptime[OUT] Sat May 16 01:25:07 IST 2026
+ 01:25:07 up 7 days, 14:53,  load average: 16.65, 17.13, 16.36[run_code] curl -s wttr.in?format="%m+%M"[OUT] 🌑 28[run_code] pkill -f "python.*llm_client.py" || kill $PPID[OUT] [run_code] kill -9 $(pgrep -f "python.*llm_client.py")[OUT] [run_code] pkill -9 -f "python.*main.py" || pkill -9 -f "python.*llm_client.py" || exit[OUT] [run_code] python -c "import os, signal; os.kill(os.getppid(), signal.SIGTERM); os._exit(0)"[run_code] kill -9 $(ps -ef | grep python | grep llm_client.py | grep -v grep | awk '{print $2}')[ERR] /data/data/com.termux/files/usr/bin/sh: 1: kill: Usage: kill [-s sigspec | -signum | -sigspec] [pid | job]... or
+kill -l [exitstatus][run_code] pgrep -f llm_client.py | xargs kill -9[OUT] [run_code] command -v termux-tts-speak || command -v espeak || command -v flite[OUT] /data/data/com.termux/files/usr/bin/termux-tts-speak[run_code] termux-tts-speak "The emergence of autonomous terminal-native agents represents a significant shift in how we interact with mobile computing environments like Termux. By bridging the gap between high-level reasoning and low-level system access, these agents transform a handheld device from a simple communication tool into a powerful, automated workstation capable of complex task execution. As large language models become more integrated with specialized environments, the boundaries between human intent and machine execution begin to blur, allowing for seamless automation of file management, system administration, and data processing. This evolution highlights the potential for truly portable intelligence, where the constraints of traditional user interfaces are replaced by the flexibility of the command line, enabling a new era of productivity that is both locally grounded and globally connected through the vast ecosystem of open-source utilities and terminal-driven workflows."[save_memory] text:Whenever the user says 'Good morning', provide the current time, news, and weather report., type:instruction tags:routine,greeting,morning,news,weather,time priority:8[OK][run_code] date && curl -s https://ipapi.co/json/[OUT] Sat May 16 10:33:54 IST 2026
+{
+    "ip": "2409:40e0:100e:1267:8000::",
+    "network": "2409:40e0:1000::/36",
+    "version": "IPv6",
+    "city": "Kolkata",
+    "region": "West Bengal",
+    "region_code": "WB",
+    "country": "IN",
+    "country_name": "India",
+    "country_code": "IN",
+    "country_code_iso3": "IND",
+    "country_capital": "New Delhi",
+    "country_tld": ".in",
+    "continent_code": "AS",
+    "in_eu": false,
+    "postal": "700029",
+    "latitude": 22.5643,
+    "longitude": 88.3693,
+    "timezone": "Asia/Kolkata",
+    "utc_offset": "+0530",
+    "country_calling_code": "+91",
+    "currency": "INR",
+    "currency_name": "Rupee",
+    "languages": "en-IN,hi,bn,te,mr,ta,ur,gu,kn,ml,or,pa,as,bh,sat,ks,ne,sd,kok,doi,mni,sit,sa,fr,lus,inc",
+    "country_area": 3287590.0,
+    "country_population": 1352617328,
+    "asn": "AS55836",
+    "org": "Reliance Jio Infocomm Limited"
+}[run_code] curl -s "wttr.in/Kolkata?format=3" && curl -s "https://news.google.com/rss/search?q=top+news+India+today&hl=en-IN&gl=IN&ceid=IN:en" | grep -oP '(?<=<title>).*?(?=</title>)' | head -n 6 | tail -n 5[OUT] kolkata: 🌫️  +32°C
+Google News
+School assembly news headlines today- May 16: Top national, sports and world news curated for you - India Today
+School assembly news headlines today- May 14: Top national, sports and world news curated for you - India Today
+Top news of the day | February 8, 2026 - The Hindu
+Seeman News - The Times of India[web_scrape] URL:https://www.ndtv.com/latest selector:None[ERROR] {e}[run_code] curl -s "wttr.in/Kolkata?format=%c+%t+%w" && echo "" && curl -s "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en" | grep -oP '(?<=<title>).*?(?=</title>)' | head -n 8 | tail -n 6[OUT] 🌫️  +32°C ↗24km/h
+"Thought He Could Hide": Trump Says Top ISIS Leader Abu-Bilal Killed - NDTV
+CBI nabs alleged mastermind behind NEET-UG 2026 chemistry paper leak - The Hindu
+India deepens defence, energy ties with UAE during PM Modi visit - Reuters
+Bhojshala Case: MP High Court Rejects Arguments Claiming Disputed Site Is Jain Temple - Live Law
+Trump Warns Taiwan Against Independence Moves After Xi Summit: Why It Matters - News18
+LU teacher offers to leak exam paper to girl student in exchange of ‘favours’ - The Times of India[run_code] cat ~/ai_root/log.txt[run_code] ls -R ~/ai_root[OUT] /data/data/com.termux/files/home/ai_root:
+CONTRIBUTING.md
+LICENSE
+README.md
+Termux-STT
+api.keys
+config.json
+core
+log.txt
+memories.txt
+workspace
+
+/data/data/com.termux/files/home/ai_root/Termux-STT:
+LICENCE.md
+README.md
+main.py
+requirements.txt
+setup.sh
+whisper.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp:
+AUTHORS
+CMakeLists.txt
+LICENSE
+Makefile
+README.md
+README_sycl.md
+bindings
+build
+build-xcframework.sh
+ci
+close-issue.yml
+cmake
+examples
+ggml
+grammars
+include
+models
+samples
+scripts
+src
+tests
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings:
+CMakeLists.txt
+go
+java
+javascript
+ruby
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go:
+LICENSE
+Makefile
+README.md
+doc.go
+examples
+go.mod
+go.sum
+params.go
+pkg
+samples
+whisper.go
+whisper_test.go
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go/examples:
+go-model-download
+go-whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go/examples/go-model-download:
+context.go
+main.go
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go/examples/go-whisper:
+color.go
+flags.go
+main.go
+process.go
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go/pkg:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go/pkg/whisper:
+consts.go
+context.go
+context_test.go
+doc.go
+interface.go
+model.go
+model_test.go
+util_test.go
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/go/samples:
+jfk.wav
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java:
+README.md
+build.gradle
+gradle
+gradle.properties
+gradlew
+gradlew.bat
+settings.gradle
+src
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/gradle:
+wrapper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/gradle/wrapper:
+gradle-wrapper.jar
+gradle-wrapper.properties
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src:
+main
+test
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java:
+io
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io:
+github
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github:
+ggerganov
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov:
+whispercpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov/whispercpp:
+WhisperConstants.java
+WhisperContext.java
+WhisperCpp.java
+WhisperCppJnaLibrary.java
+bean
+callbacks
+ggml
+model
+params
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov/whispercpp/bean:
+WhisperSegment.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov/whispercpp/callbacks:
+GgmlAbortCallback.java
+WhisperEncoderBeginCallback.java
+WhisperLogitsFilterCallback.java
+WhisperNewSegmentCallback.java
+WhisperProgressCallback.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov/whispercpp/ggml:
+GgmlTensor.java
+GgmlType.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov/whispercpp/model:
+EModel.java
+WhisperModel.java
+WhisperModelLoader.java
+WhisperState.java
+WhisperTokenData.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/main/java/io/github/ggerganov/whispercpp/params:
+BeamSearchParams.java
+CBool.java
+GreedyParams.java
+WhisperAhead.java
+WhisperAheads.java
+WhisperContextParams.java
+WhisperFilters.java
+WhisperFullParams.java
+WhisperHParams.java
+WhisperSamplingStrategy.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/test:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/test/java:
+io
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/test/java/io:
+github
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/test/java/io/github:
+ggerganov
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/test/java/io/github/ggerganov:
+whispercpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/java/src/test/java/io/github/ggerganov/whispercpp:
+WhisperCppTest.java
+WhisperJnaLibraryTest.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/javascript:
+CMakeLists.txt
+README.md
+emscripten.cpp
+libwhisper.worker.js
+package-tmpl.json
+package.json
+whisper.js
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby:
+README.md
+Rakefile
+ext
+extsources.rb
+lib
+sig
+test
+whispercpp.gemspec
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/ext:
+dependencies.rb
+dependencies_for_windows.rb
+extconf.rb
+options.rb
+options_for_windows.rb
+ruby_whisper.c
+ruby_whisper.h
+ruby_whisper_context.c
+ruby_whisper_context_params.c
+ruby_whisper_error.c
+ruby_whisper_model.c
+ruby_whisper_params.c
+ruby_whisper_segment.c
+ruby_whisper_token.c
+ruby_whisper_transcribe.cpp
+ruby_whisper_vad_context.c
+ruby_whisper_vad_context_detect.cpp
+ruby_whisper_vad_params.c
+ruby_whisper_vad_segment.c
+ruby_whisper_vad_segments.c
+sources
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/ext/sources:
+CMakeGraphVizOptions.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/lib:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/lib/whisper:
+context.rb
+model
+segment.rb
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/lib/whisper/model:
+uri.rb
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/sig:
+whisper.rbs
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/test:
+helper.rb
+jfk_reader
+test_callback.rb
+test_context_params.rb
+test_error.rb
+test_model.rb
+test_package.rb
+test_params.rb
+test_segment.rb
+test_token.rb
+test_vad.rb
+test_vad_context.rb
+test_vad_params.rb
+test_vad_segment.rb
+test_vad_segments.rb
+test_whisper.rb
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/bindings/ruby/test/jfk_reader:
+extconf.rb
+jfk_reader.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build:
+CMakeCache.txt
+CMakeFiles
+CTestTestfile.cmake
+DartConfiguration.tcl
+Makefile
+Testing
+bin
+cmake_install.cmake
+compile_commands.json
+examples
+ggml
+src
+tests
+whisper-config.cmake
+whisper-version.cmake
+whisper.pc
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles:
+4.3.2
+CMakeConfigureLog.yaml
+CMakeDirectoryInformation.cmake
+CMakeRuleHashes.txt
+CMakeScratch
+CTestScript.cmake
+Continuous.dir
+ContinuousBuild.dir
+ContinuousConfigure.dir
+ContinuousCoverage.dir
+ContinuousMemCheck.dir
+ContinuousStart.dir
+ContinuousSubmit.dir
+ContinuousTest.dir
+ContinuousUpdate.dir
+Experimental.dir
+ExperimentalBuild.dir
+ExperimentalConfigure.dir
+ExperimentalCoverage.dir
+ExperimentalMemCheck.dir
+ExperimentalStart.dir
+ExperimentalSubmit.dir
+ExperimentalTest.dir
+ExperimentalUpdate.dir
+FindOpenMP
+InstallScripts.json
+Makefile.cmake
+Makefile2
+Nightly.dir
+NightlyBuild.dir
+NightlyConfigure.dir
+NightlyCoverage.dir
+NightlyMemCheck.dir
+NightlyMemoryCheck.dir
+NightlyStart.dir
+NightlySubmit.dir
+NightlyTest.dir
+NightlyUpdate.dir
+TargetDirectories.txt
+cmake.check_cache
+pkgRedirects
+progress.marks
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/4.3.2:
+CMakeASMCompiler.cmake
+CMakeCCompiler.cmake
+CMakeCXXCompiler.cmake
+CMakeDetermineCompilerABI_C.bin
+CMakeDetermineCompilerABI_CXX.bin
+CMakeSystem.cmake
+CompilerIdASM
+CompilerIdC
+CompilerIdCXX
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/4.3.2/CompilerIdASM:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/4.3.2/CompilerIdC:
+CMakeCCompilerId.c
+a.out
+tmp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/4.3.2/CompilerIdC/tmp:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/4.3.2/CompilerIdCXX:
+CMakeCXXCompilerId.cpp
+a.out
+tmp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/4.3.2/CompilerIdCXX/tmp:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/CMakeScratch:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/Continuous.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousBuild.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousConfigure.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousCoverage.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousMemCheck.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousStart.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousSubmit.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousTest.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ContinuousUpdate.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/Experimental.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalBuild.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalConfigure.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalCoverage.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalMemCheck.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalStart.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalSubmit.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalTest.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/ExperimentalUpdate.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/FindOpenMP:
+ompver_C.bin
+ompver_CXX.bin
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/Nightly.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyBuild.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyConfigure.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyCoverage.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyMemCheck.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyMemoryCheck.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyStart.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlySubmit.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyTest.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/NightlyUpdate.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/CMakeFiles/pkgRedirects:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/Testing:
+Temporary
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/Testing/Temporary:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/bin:
+bench
+main
+test-vad
+test-vad-full
+whisper-bench
+whisper-cli
+whisper-quantize
+whisper-server
+whisper-vad-speech-segments
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+bench
+cli
+cmake_install.cmake
+deprecation-warning
+libcommon.a
+quantize
+server
+vad-speech-segments
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/CMakeFiles:
+CMakeDirectoryInformation.cmake
+common.dir
+progress.marks
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/CMakeFiles/common.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+cmake_clean_target.cmake
+common-ggml.cpp.o
+common-ggml.cpp.o.d
+common-whisper.cpp.o
+common-whisper.cpp.o.d
+common.cpp.o
+common.cpp.o.d
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+grammar-parser.cpp.o
+grammar-parser.cpp.o.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/bench:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/bench/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+whisper-bench.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/bench/CMakeFiles/whisper-bench.dir:
+DependInfo.cmake
+bench.cpp.o
+bench.cpp.o.d
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/cli:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/cli/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+whisper-cli.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/cli/CMakeFiles/whisper-cli.dir:
+DependInfo.cmake
+build.make
+cli.cpp.o
+cli.cpp.o.d
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/deprecation-warning:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/deprecation-warning/CMakeFiles:
+CMakeDirectoryInformation.cmake
+bench.dir
+main.dir
+progress.marks
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/deprecation-warning/CMakeFiles/bench.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+deprecation-warning.cpp.o
+deprecation-warning.cpp.o.d
+flags.make
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/deprecation-warning/CMakeFiles/main.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+deprecation-warning.cpp.o
+deprecation-warning.cpp.o.d
+flags.make
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/quantize:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/quantize/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+whisper-quantize.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/quantize/CMakeFiles/whisper-quantize.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+quantize.cpp.o
+quantize.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/server:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/server/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+whisper-server.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/server/CMakeFiles/whisper-server.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+server.cpp.o
+server.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/vad-speech-segments:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/vad-speech-segments/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+whisper-vad-speech-segments.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/examples/vad-speech-segments/CMakeFiles/whisper-vad-speech-segments.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+speech.cpp.o
+speech.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml:
+CMakeFiles
+Makefile
+cmake_install.cmake
+ggml-config.cmake
+ggml-version.cmake
+src
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src:
+CMakeFiles
+Makefile
+cmake_install.cmake
+ggml-cpu
+libggml-base.so
+libggml-base.so.0
+libggml-base.so.0.11.1
+libggml-cpu.so
+libggml-cpu.so.0
+libggml-cpu.so.0.11.1
+libggml.so
+libggml.so.0
+libggml.so.0.11.1
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles:
+CMakeDirectoryInformation.cmake
+ggml-base.dir
+ggml-cpu.dir
+ggml.dir
+progress.marks
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml-base.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+ggml-alloc.c.o
+ggml-alloc.c.o.d
+ggml-backend-meta.cpp.o
+ggml-backend-meta.cpp.o.d
+ggml-backend.cpp.o
+ggml-backend.cpp.o.d
+ggml-opt.cpp.o
+ggml-opt.cpp.o.d
+ggml-quants.c.o
+ggml-quants.c.o.d
+ggml-threading.cpp.o
+ggml-threading.cpp.o.d
+ggml.c.o
+ggml.c.o.d
+ggml.cpp.o
+ggml.cpp.o.d
+gguf.cpp.o
+gguf.cpp.o.d
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml-cpu.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+ggml-cpu
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu:
+amx
+arch
+binary-ops.cpp.o
+binary-ops.cpp.o.d
+ggml-cpu.c.o
+ggml-cpu.c.o.d
+ggml-cpu.cpp.o
+ggml-cpu.cpp.o.d
+hbm.cpp.o
+hbm.cpp.o.d
+ops.cpp.o
+ops.cpp.o.d
+quants.c.o
+quants.c.o.d
+repack.cpp.o
+repack.cpp.o.d
+traits.cpp.o
+traits.cpp.o.d
+unary-ops.cpp.o
+unary-ops.cpp.o.d
+vec.cpp.o
+vec.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/amx:
+amx.cpp.o
+amx.cpp.o.d
+mmq.cpp.o
+mmq.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/arch:
+arm
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml-cpu.dir/ggml-cpu/arch/arm:
+quants.c.o
+quants.c.o.d
+repack.cpp.o
+repack.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/CMakeFiles/ggml.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+ggml-backend-dl.cpp.o
+ggml-backend-dl.cpp.o.d
+ggml-backend-reg.cpp.o
+ggml-backend-reg.cpp.o.d
+link.d
+link.txt
+progress.make
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/ggml-cpu:
+CMakeFiles
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/ggml/src/ggml-cpu/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/src:
+CMakeFiles
+Makefile
+cmake_install.cmake
+libwhisper.so
+libwhisper.so.1
+libwhisper.so.1.8.4
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/src/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+whisper.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/src/CMakeFiles/whisper.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+whisper.cpp.o
+whisper.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/tests:
+CMakeFiles
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/tests/CMakeFiles:
+CMakeDirectoryInformation.cmake
+progress.marks
+test-vad-full.dir
+test-vad.dir
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/tests/CMakeFiles/test-vad-full.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+test-vad-full.cpp.o
+test-vad-full.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/build/tests/CMakeFiles/test-vad.dir:
+DependInfo.cmake
+build.make
+cmake_clean.cmake
+compiler_depend.make
+compiler_depend.ts
+depend.make
+flags.make
+link.d
+link.txt
+progress.make
+test-vad.cpp.o
+test-vad.cpp.o.d
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ci:
+README.md
+run.sh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/cmake:
+DefaultTargetOptions.cmake
+FindFFmpeg.cmake
+arm64-apple-clang.cmake
+arm64-windows-llvm.cmake
+build-info.cmake
+git-vars.cmake
+riscv64-spacemit-linux-gnu-gcc.cmake
+whisper-config.cmake.in
+whisper.pc.in
+x64-windows-llvm.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples:
+CMakeLists.txt
+addon.node
+bench
+bench.wasm
+cli
+coi-serviceworker.js
+command
+command.wasm
+common-ggml.cpp
+common-ggml.h
+common-sdl.cpp
+common-sdl.h
+common-whisper.cpp
+common-whisper.h
+common.cpp
+common.h
+deprecation-warning
+ffmpeg-transcode.cpp
+generate-karaoke.sh
+grammar-parser.cpp
+grammar-parser.h
+helpers.js
+json.hpp
+livestream.sh
+lsp
+miniaudio.h
+python
+quantize
+server
+server.py
+stb_vorbis.c
+stream
+stream.wasm
+sycl
+talk-llama
+twitch.sh
+vad-speech-segments
+wchess
+whisper.android
+whisper.android.java
+whisper.nvim
+whisper.objc
+whisper.swiftui
+whisper.wasm
+yt-wsp.sh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/addon.node:
+CMakeLists.txt
+README.md
+__test__
+addon.cpp
+index.js
+package.json
+vad-example.js
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/addon.node/__test__:
+whisper.spec.js
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/bench:
+CMakeLists.txt
+README.md
+bench.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/bench.wasm:
+CMakeLists.txt
+README.md
+emscripten.cpp
+index-tmpl.html
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/cli:
+CMakeLists.txt
+README.md
+cli.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/command:
+CMakeLists.txt
+README.md
+command.cpp
+commands.txt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/command.wasm:
+CMakeLists.txt
+README.md
+emscripten.cpp
+index-tmpl.html
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/deprecation-warning:
+CMakeLists.txt
+README.md
+deprecation-warning.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/lsp:
+CMakeLists.txt
+README.md
+lsp.cpp
+whisper.vim
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/python:
+test_whisper_processor.py
+whisper_processor.py
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/quantize:
+CMakeLists.txt
+README.md
+quantize.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/server:
+CMakeLists.txt
+README.md
+bench.js
+httplib.h
+server.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/stream:
+CMakeLists.txt
+README.md
+stream.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/stream.wasm:
+CMakeLists.txt
+README.md
+emscripten.cpp
+index-tmpl.html
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/sycl:
+CMakeLists.txt
+README.md
+build.sh
+ls-sycl-device.cpp
+run-whisper.sh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/talk-llama:
+CMakeLists.txt
+README.md
+eleven-labs.py
+llama-adapter.cpp
+llama-adapter.h
+llama-arch.cpp
+llama-arch.h
+llama-batch.cpp
+llama-batch.h
+llama-chat.cpp
+llama-chat.h
+llama-context.cpp
+llama-context.h
+llama-cparams.cpp
+llama-cparams.h
+llama-ext.h
+llama-grammar.cpp
+llama-grammar.h
+llama-graph.cpp
+llama-graph.h
+llama-hparams.cpp
+llama-hparams.h
+llama-impl.cpp
+llama-impl.h
+llama-io.cpp
+llama-io.h
+llama-kv-cache-iswa.cpp
+llama-kv-cache-iswa.h
+llama-kv-cache.cpp
+llama-kv-cache.h
+llama-kv-cells.h
+llama-memory-hybrid-iswa.cpp
+llama-memory-hybrid-iswa.h
+llama-memory-hybrid.cpp
+llama-memory-hybrid.h
+llama-memory-recurrent.cpp
+llama-memory-recurrent.h
+llama-memory.cpp
+llama-memory.h
+llama-mmap.cpp
+llama-mmap.h
+llama-model-loader.cpp
+llama-model-loader.h
+llama-model-saver.cpp
+llama-model-saver.h
+llama-model.cpp
+llama-model.h
+llama-quant.cpp
+llama-quant.h
+llama-sampler.cpp
+llama-sampler.h
+llama-vocab.cpp
+llama-vocab.h
+llama.cpp
+llama.h
+models
+prompts
+speak
+speak.bat
+speak.ps1
+talk-llama.cpp
+unicode-data.cpp
+unicode-data.h
+unicode.cpp
+unicode.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/talk-llama/models:
+afmoe.cpp
+apertus.cpp
+arcee.cpp
+arctic.cpp
+arwkv7.cpp
+baichuan.cpp
+bailingmoe.cpp
+bailingmoe2.cpp
+bert.cpp
+bitnet.cpp
+bloom.cpp
+chameleon.cpp
+chatglm.cpp
+codeshell.cpp
+cogvlm.cpp
+cohere2.cpp
+command-r.cpp
+dbrx.cpp
+deci.cpp
+deepseek.cpp
+deepseek2.cpp
+deepseek2ocr.cpp
+delta-net-base.cpp
+dots1.cpp
+dream.cpp
+ernie4-5-moe.cpp
+ernie4-5.cpp
+eurobert.cpp
+exaone-moe.cpp
+exaone.cpp
+exaone4.cpp
+falcon-h1.cpp
+falcon.cpp
+gemma-embedding.cpp
+gemma.cpp
+gemma2.cpp
+gemma3.cpp
+gemma3n.cpp
+gemma4.cpp
+glm-dsa.cpp
+glm4-moe.cpp
+glm4.cpp
+gpt2.cpp
+gptneox.cpp
+granite-hybrid.cpp
+granite-moe.cpp
+granite.cpp
+grok.cpp
+grovemoe.cpp
+hunyuan-dense.cpp
+hunyuan-moe.cpp
+hunyuan-vl.cpp
+internlm2.cpp
+jais.cpp
+jais2.cpp
+jamba.cpp
+jina-bert-v2.cpp
+jina-bert-v3.cpp
+kimi-linear.cpp
+lfm2.cpp
+lfm2moe.cpp
+llada-moe.cpp
+llada.cpp
+llama-embed.cpp
+llama.cpp
+llama4.cpp
+maincoder.cpp
+mamba-base.cpp
+mamba.cpp
+mamba2.cpp
+mimo2.cpp
+minicpm.cpp
+minicpm3.cpp
+minimax-m2.cpp
+mistral3.cpp
+mistral4.cpp
+models.h
+modern-bert.cpp
+mpt.cpp
+nemotron-h-moe.cpp
+nemotron-h.cpp
+nemotron.cpp
+neo-bert.cpp
+nomic-bert-moe.cpp
+nomic-bert.cpp
+olmo.cpp
+olmo2.cpp
+olmoe.cpp
+openai-moe.cpp
+openelm.cpp
+orion.cpp
+paddleocr.cpp
+pangu-embed.cpp
+phi2.cpp
+phi3.cpp
+phimoe.cpp
+plamo.cpp
+plamo2.cpp
+plamo3.cpp
+plm.cpp
+qwen.cpp
+qwen2.cpp
+qwen2moe.cpp
+qwen2vl.cpp
+qwen3.cpp
+qwen35.cpp
+qwen35moe.cpp
+qwen3moe.cpp
+qwen3next.cpp
+qwen3vl.cpp
+qwen3vlmoe.cpp
+refact.cpp
+rnd1.cpp
+rwkv6-base.cpp
+rwkv6.cpp
+rwkv6qwen2.cpp
+rwkv7-base.cpp
+rwkv7.cpp
+seed-oss.cpp
+smallthinker.cpp
+smollm3.cpp
+stablelm.cpp
+starcoder.cpp
+starcoder2.cpp
+step35.cpp
+t5.cpp
+t5encoder.cpp
+wavtokenizer-dec.cpp
+xverse.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/talk-llama/prompts:
+talk-alpaca.txt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/vad-speech-segments:
+CMakeLists.txt
+README.md
+speech.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess:
+CMakeLists.txt
+README.md
+libwchess
+wchess.cmd
+wchess.wasm
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/libwchess:
+CMakeLists.txt
+Chessboard.cpp
+Chessboard.h
+WChess.cpp
+WChess.h
+test-chessboard.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.cmd:
+CMakeLists.txt
+wchess.cmd.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm:
+CMakeLists.txt
+chessboardjs-1.0.0
+index-tmpl.html
+jquery-3.7.1.min.js
+wchess.wasm.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0:
+css
+img
+js
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0/css:
+chessboard-1.0.0.css
+chessboard-1.0.0.min.css
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0/img:
+chesspieces
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0/img/chesspieces:
+wikipedia
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0/img/chesspieces/wikipedia:
+bB.png
+bK.png
+bN.png
+bP.png
+bQ.png
+bR.png
+wB.png
+wK.png
+wN.png
+wP.png
+wQ.png
+wR.png
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0/js:
+chessboard-1.0.0
+chessboard-1.0.0.js
+chessboard-1.0.0.min.js
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/wchess/wchess.wasm/chessboardjs-1.0.0/js/chessboard-1.0.0:
+CHANGELOG.md
+LICENSE.md
+README.md
+package.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android:
+README.md
+app
+build.gradle
+gradle
+gradle.properties
+gradlew
+gradlew.bat
+lib
+settings.gradle
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app:
+build.gradle
+proguard-rules.pro
+src
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src:
+androidTest
+main
+test
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/androidTest:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/androidTest/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/androidTest/java/com:
+whispercppdemo
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/androidTest/java/com/whispercppdemo:
+ExampleInstrumentedTest.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main:
+AndroidManifest.xml
+java
+res
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com:
+whispercppdemo
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com/whispercppdemo:
+MainActivity.kt
+media
+recorder
+ui
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com/whispercppdemo/media:
+RiffWaveHelper.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com/whispercppdemo/recorder:
+Recorder.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com/whispercppdemo/ui:
+main
+theme
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com/whispercppdemo/ui/main:
+MainScreen.kt
+MainScreenViewModel.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/java/com/whispercppdemo/ui/theme:
+Color.kt
+Theme.kt
+Type.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/res:
+drawable
+mipmap-anydpi
+values
+xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/res/drawable:
+ic_launcher_background.xml
+ic_launcher_foreground.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/res/mipmap-anydpi:
+ic_launcher.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/res/values:
+strings.xml
+themes.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/main/res/xml:
+backup_rules.xml
+data_extraction_rules.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/test:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/test/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/test/java/com:
+whispercppdemo
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/app/src/test/java/com/whispercppdemo:
+ExampleUnitTest.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/gradle:
+wrapper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/gradle/wrapper:
+gradle-wrapper.jar
+gradle-wrapper.properties
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib:
+build.gradle
+src
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src:
+main
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main:
+AndroidManifest.xml
+java
+jni
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main/java/com:
+whispercpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main/java/com/whispercpp:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main/java/com/whispercpp/whisper:
+LibWhisper.kt
+WhisperCpuConfig.kt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main/jni:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android/lib/src/main/jni/whisper:
+CMakeLists.txt
+jni.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java:
+README.md
+README_files
+app
+build.gradle
+gradle
+gradle.properties
+gradlew
+gradlew.bat
+settings.gradle
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/README_files:
+1.jpg
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app:
+build.gradle
+proguard-rules.pro
+src
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src:
+androidTest
+main
+test
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest/java/com:
+litongjava
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest/java/com/litongjava:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest/java/com/litongjava/whisper:
+android
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest/java/com/litongjava/whisper/android:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/androidTest/java/com/litongjava/whisper/android/java:
+ExampleInstrumentedTest.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main:
+AndroidManifest.xml
+assets
+java
+jni
+res
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/assets:
+logback.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com:
+litongjava
+whispercpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper:
+android
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java:
+MainActivity.java
+app
+bean
+services
+single
+task
+utils
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java/app:
+App.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java/bean:
+WhisperSegment.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java/services:
+WhisperService.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java/single:
+LocalWhisper.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java/task:
+LoadModelTask.java
+TranscriptionTask.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/litongjava/whisper/android/java/utils:
+AssetUtils.java
+WaveEncoder.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/whispercpp:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/whispercpp/java:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/java/com/whispercpp/java/whisper:
+CpuInfo.java
+WhisperContext.java
+WhisperCpuConfig.java
+WhisperLib.java
+WhisperUtils.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/jni:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/jni/whisper:
+CMakeLists.txt
+jni.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res:
+drawable
+drawable-v24
+layout
+mipmap-anydpi-v26
+mipmap-hdpi
+mipmap-mdpi
+mipmap-xhdpi
+mipmap-xxhdpi
+mipmap-xxxhdpi
+values
+values-night
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/drawable:
+ic_launcher_background.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/drawable-v24:
+ic_launcher_foreground.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/layout:
+activity_main.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/mipmap-anydpi-v26:
+ic_launcher.xml
+ic_launcher_round.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/mipmap-hdpi:
+ic_launcher.png
+ic_launcher_round.png
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/mipmap-mdpi:
+ic_launcher.png
+ic_launcher_round.png
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/mipmap-xhdpi:
+ic_launcher.png
+ic_launcher_round.png
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/mipmap-xxhdpi:
+ic_launcher.png
+ic_launcher_round.png
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/mipmap-xxxhdpi:
+ic_launcher.png
+ic_launcher_round.png
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/values:
+colors.xml
+strings.xml
+themes.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/main/res/values-night:
+themes.xml
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test/java:
+com
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test/java/com:
+litongjava
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test/java/com/litongjava:
+whisper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test/java/com/litongjava/whisper:
+android
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test/java/com/litongjava/whisper/android:
+java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/app/src/test/java/com/litongjava/whisper/android/java:
+ExampleUnitTest.java
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/gradle:
+wrapper
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.android.java/gradle/wrapper:
+gradle-wrapper.jar
+gradle-wrapper.properties
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.nvim:
+README.md
+whisper.nvim
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc:
+README.md
+whisper.objc
+whisper.objc.xcodeproj
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc:
+AppDelegate.h
+AppDelegate.m
+Assets.xcassets
+Base.lproj
+Info.plist
+SceneDelegate.h
+SceneDelegate.m
+ViewController.h
+ViewController.m
+main.m
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc/Assets.xcassets:
+AccentColor.colorset
+AppIcon.appiconset
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc/Assets.xcassets/AccentColor.colorset:
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc/Assets.xcassets/AppIcon.appiconset:
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc/Base.lproj:
+LaunchScreen.storyboard
+Main.storyboard
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc.xcodeproj:
+project.pbxproj
+project.xcworkspace
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc.xcodeproj/project.xcworkspace:
+contents.xcworkspacedata
+xcshareddata
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.objc/whisper.objc.xcodeproj/project.xcworkspace/xcshareddata:
+IDEWorkspaceChecks.plist
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui:
+README.md
+whisper.cpp.swift
+whisper.swiftui.demo
+whisper.swiftui.xcodeproj
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.cpp.swift:
+LibWhisper.swift
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo:
+Models
+Resources
+Supporting files
+UI
+Utils
+WhisperCppDemoApp.swift
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Models:
+Model.swift
+WhisperState.swift
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Resources:
+models
+samples
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Resources/models:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Resources/samples:
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Supporting files:
+Assets.xcassets
+Preview Content
+WhisperCppDemo.entitlements
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Supporting files/Assets.xcassets:
+AccentColor.colorset
+AppIcon.appiconset
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Supporting files/Assets.xcassets/AccentColor.colorset:
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Supporting files/Assets.xcassets/AppIcon.appiconset:
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Supporting files/Preview Content:
+Preview Assets.xcassets
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Supporting files/Preview Content/Preview Assets.xcassets:
+Contents.json
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/UI:
+ContentView.swift
+DownloadButton.swift
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.demo/Utils:
+Recorder.swift
+RiffWaveUtils.swift
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.xcodeproj:
+project.pbxproj
+project.xcworkspace
+xcshareddata
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.xcodeproj/project.xcworkspace:
+xcshareddata
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.xcodeproj/project.xcworkspace/xcshareddata:
+IDEWorkspaceChecks.plist
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.xcodeproj/xcshareddata:
+xcschemes
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.swiftui/whisper.swiftui.xcodeproj/xcshareddata/xcschemes:
+WhisperCppDemo.xcscheme
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/examples/whisper.wasm:
+CMakeLists.txt
+README.md
+emscripten.cpp
+index-tmpl.html
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml:
+CMakeLists.txt
+cmake
+include
+src
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/cmake:
+FindNCCL.cmake
+GitVars.cmake
+common.cmake
+ggml-config.cmake.in
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/include:
+ggml-alloc.h
+ggml-backend.h
+ggml-blas.h
+ggml-cann.h
+ggml-cpp.h
+ggml-cpu.h
+ggml-cuda.h
+ggml-hexagon.h
+ggml-metal.h
+ggml-opencl.h
+ggml-openvino.h
+ggml-opt.h
+ggml-rpc.h
+ggml-sycl.h
+ggml-virtgpu.h
+ggml-vulkan.h
+ggml-webgpu.h
+ggml-zdnn.h
+ggml-zendnn.h
+ggml.h
+gguf.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src:
+CMakeLists.txt
+ggml-alloc.c
+ggml-backend-dl.cpp
+ggml-backend-dl.h
+ggml-backend-impl.h
+ggml-backend-meta.cpp
+ggml-backend-reg.cpp
+ggml-backend.cpp
+ggml-blas
+ggml-cann
+ggml-common.h
+ggml-cpu
+ggml-cuda
+ggml-hexagon
+ggml-hip
+ggml-impl.h
+ggml-metal
+ggml-musa
+ggml-opencl
+ggml-openvino
+ggml-opt.cpp
+ggml-quants.c
+ggml-quants.h
+ggml-rpc
+ggml-sycl
+ggml-threading.cpp
+ggml-threading.h
+ggml-virtgpu
+ggml-vulkan
+ggml-webgpu
+ggml-zdnn
+ggml-zendnn
+ggml.c
+ggml.cpp
+gguf.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-blas:
+CMakeLists.txt
+ggml-blas.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cann:
+CMakeLists.txt
+acl_tensor.cpp
+acl_tensor.h
+aclnn_ops.cpp
+aclnn_ops.h
+common.h
+ggml-cann.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu:
+CMakeLists.txt
+amx
+arch
+arch-fallback.h
+binary-ops.cpp
+binary-ops.h
+cmake
+common.h
+ggml-cpu-impl.h
+ggml-cpu.c
+ggml-cpu.cpp
+hbm.cpp
+hbm.h
+kleidiai
+llamafile
+ops.cpp
+ops.h
+quants.c
+quants.h
+repack.cpp
+repack.h
+simd-gemm.h
+simd-mappings.h
+spacemit
+traits.cpp
+traits.h
+unary-ops.cpp
+unary-ops.h
+vec.cpp
+vec.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/amx:
+amx.cpp
+amx.h
+common.h
+mmq.cpp
+mmq.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch:
+arm
+loongarch
+powerpc
+riscv
+s390
+wasm
+x86
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/arm:
+cpu-feats.cpp
+quants.c
+repack.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/loongarch:
+quants.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/powerpc:
+cpu-feats.cpp
+quants.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/riscv:
+cpu-feats.cpp
+quants.c
+repack.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/s390:
+cpu-feats.cpp
+quants.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/wasm:
+quants.c
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/arch/x86:
+cpu-feats.cpp
+quants.c
+repack.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/cmake:
+FindSIMD.cmake
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/kleidiai:
+kernels.cpp
+kernels.h
+kleidiai.cpp
+kleidiai.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/llamafile:
+sgemm.cpp
+sgemm.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cpu/spacemit:
+ime.cpp
+ime.h
+ime1_kernels.cpp
+ime_kernels.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cuda:
+CMakeLists.txt
+acc.cu
+acc.cuh
+add-id.cu
+add-id.cuh
+allreduce.cu
+allreduce.cuh
+arange.cu
+arange.cuh
+argmax.cu
+argmax.cuh
+argsort.cu
+argsort.cuh
+binbcast.cu
+binbcast.cuh
+clamp.cu
+clamp.cuh
+common.cuh
+concat.cu
+concat.cuh
+conv-transpose-1d.cu
+conv-transpose-1d.cuh
+conv2d-dw.cu
+conv2d-dw.cuh
+conv2d-transpose.cu
+conv2d-transpose.cuh
+conv2d.cu
+conv2d.cuh
+convert.cu
+convert.cuh
+count-equal.cu
+count-equal.cuh
+cp-async.cuh
+cpy-utils.cuh
+cpy.cu
+cpy.cuh
+cross-entropy-loss.cu
+cross-entropy-loss.cuh
+cumsum.cu
+cumsum.cuh
+dequantize.cuh
+diag.cu
+diag.cuh
+diagmask.cu
+diagmask.cuh
+fattn-common.cuh
+fattn-mma-f16.cuh
+fattn-tile.cu
+fattn-tile.cuh
+fattn-vec.cuh
+fattn-wmma-f16.cu
+fattn-wmma-f16.cuh
+fattn.cu
+fattn.cuh
+fill.cu
+fill.cuh
+gated_delta_net.cu
+gated_delta_net.cuh
+getrows.cu
+getrows.cuh
+ggml-cuda.cu
+gla.cu
+gla.cuh
+im2col.cu
+im2col.cuh
+mean.cu
+mean.cuh
+mma.cuh
+mmf.cu
+mmf.cuh
+mmid.cu
+mmid.cuh
+mmq.cu
+mmq.cuh
+mmvf.cu
+mmvf.cuh
+mmvq.cu
+mmvq.cuh
+norm.cu
+norm.cuh
+opt-step-adamw.cu
+opt-step-adamw.cuh
+opt-step-sgd.cu
+opt-step-sgd.cuh
+out-prod.cu
+out-prod.cuh
+pad.cu
+pad.cuh
+pad_reflect_1d.cu
+pad_reflect_1d.cuh
+pool2d.cu
+pool2d.cuh
+quantize.cu
+quantize.cuh
+reduce_rows.cuh
+roll.cu
+roll.cuh
+rope.cu
+rope.cuh
+scale.cu
+scale.cuh
+set-rows.cu
+set-rows.cuh
+set.cu
+set.cuh
+snake.cu
+snake.cuh
+softcap.cu
+softcap.cuh
+softmax.cu
+softmax.cuh
+solve_tri.cu
+solve_tri.cuh
+ssm-conv.cu
+ssm-conv.cuh
+ssm-scan.cu
+ssm-scan.cuh
+sum.cu
+sum.cuh
+sumrows.cu
+sumrows.cuh
+template-instances
+top-k.cu
+top-k.cuh
+topk-moe.cu
+topk-moe.cuh
+tri.cu
+tri.cuh
+tsembd.cu
+tsembd.cuh
+unary.cu
+unary.cuh
+upscale.cu
+upscale.cuh
+vecdotq.cuh
+vendors
+wkv.cu
+wkv.cuh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cuda/template-instances:
+fattn-mma-f16-instance-ncols1_1-ncols2_16.cu
+fattn-mma-f16-instance-ncols1_1-ncols2_32.cu
+fattn-mma-f16-instance-ncols1_1-ncols2_8.cu
+fattn-mma-f16-instance-ncols1_16-ncols2_1.cu
+fattn-mma-f16-instance-ncols1_16-ncols2_2.cu
+fattn-mma-f16-instance-ncols1_16-ncols2_4.cu
+fattn-mma-f16-instance-ncols1_2-ncols2_16.cu
+fattn-mma-f16-instance-ncols1_2-ncols2_32.cu
+fattn-mma-f16-instance-ncols1_2-ncols2_4.cu
+fattn-mma-f16-instance-ncols1_2-ncols2_8.cu
+fattn-mma-f16-instance-ncols1_32-ncols2_1.cu
+fattn-mma-f16-instance-ncols1_32-ncols2_2.cu
+fattn-mma-f16-instance-ncols1_4-ncols2_16.cu
+fattn-mma-f16-instance-ncols1_4-ncols2_2.cu
+fattn-mma-f16-instance-ncols1_4-ncols2_4.cu
+fattn-mma-f16-instance-ncols1_4-ncols2_8.cu
+fattn-mma-f16-instance-ncols1_64-ncols2_1.cu
+fattn-mma-f16-instance-ncols1_8-ncols2_1.cu
+fattn-mma-f16-instance-ncols1_8-ncols2_2.cu
+fattn-mma-f16-instance-ncols1_8-ncols2_4.cu
+fattn-mma-f16-instance-ncols1_8-ncols2_8.cu
+fattn-tile-instance-dkq112-dv112.cu
+fattn-tile-instance-dkq128-dv128.cu
+fattn-tile-instance-dkq192-dv128.cu
+fattn-tile-instance-dkq256-dv256.cu
+fattn-tile-instance-dkq320-dv256.cu
+fattn-tile-instance-dkq40-dv40.cu
+fattn-tile-instance-dkq512-dv512.cu
+fattn-tile-instance-dkq576-dv512.cu
+fattn-tile-instance-dkq64-dv64.cu
+fattn-tile-instance-dkq72-dv72.cu
+fattn-tile-instance-dkq80-dv80.cu
+fattn-tile-instance-dkq96-dv96.cu
+fattn-vec-instance-bf16-bf16.cu
+fattn-vec-instance-bf16-f16.cu
+fattn-vec-instance-bf16-q4_0.cu
+fattn-vec-instance-bf16-q4_1.cu
+fattn-vec-instance-bf16-q5_0.cu
+fattn-vec-instance-bf16-q5_1.cu
+fattn-vec-instance-bf16-q8_0.cu
+fattn-vec-instance-f16-bf16.cu
+fattn-vec-instance-f16-f16.cu
+fattn-vec-instance-f16-q4_0.cu
+fattn-vec-instance-f16-q4_1.cu
+fattn-vec-instance-f16-q5_0.cu
+fattn-vec-instance-f16-q5_1.cu
+fattn-vec-instance-f16-q8_0.cu
+fattn-vec-instance-q4_0-bf16.cu
+fattn-vec-instance-q4_0-f16.cu
+fattn-vec-instance-q4_0-q4_0.cu
+fattn-vec-instance-q4_0-q4_1.cu
+fattn-vec-instance-q4_0-q5_0.cu
+fattn-vec-instance-q4_0-q5_1.cu
+fattn-vec-instance-q4_0-q8_0.cu
+fattn-vec-instance-q4_1-bf16.cu
+fattn-vec-instance-q4_1-f16.cu
+fattn-vec-instance-q4_1-q4_0.cu
+fattn-vec-instance-q4_1-q4_1.cu
+fattn-vec-instance-q4_1-q5_0.cu
+fattn-vec-instance-q4_1-q5_1.cu
+fattn-vec-instance-q4_1-q8_0.cu
+fattn-vec-instance-q5_0-bf16.cu
+fattn-vec-instance-q5_0-f16.cu
+fattn-vec-instance-q5_0-q4_0.cu
+fattn-vec-instance-q5_0-q4_1.cu
+fattn-vec-instance-q5_0-q5_0.cu
+fattn-vec-instance-q5_0-q5_1.cu
+fattn-vec-instance-q5_0-q8_0.cu
+fattn-vec-instance-q5_1-bf16.cu
+fattn-vec-instance-q5_1-f16.cu
+fattn-vec-instance-q5_1-q4_0.cu
+fattn-vec-instance-q5_1-q4_1.cu
+fattn-vec-instance-q5_1-q5_0.cu
+fattn-vec-instance-q5_1-q5_1.cu
+fattn-vec-instance-q5_1-q8_0.cu
+fattn-vec-instance-q8_0-bf16.cu
+fattn-vec-instance-q8_0-f16.cu
+fattn-vec-instance-q8_0-q4_0.cu
+fattn-vec-instance-q8_0-q4_1.cu
+fattn-vec-instance-q8_0-q5_0.cu
+fattn-vec-instance-q8_0-q5_1.cu
+fattn-vec-instance-q8_0-q8_0.cu
+generate_cu_files.py
+mmf-instance-ncols_1.cu
+mmf-instance-ncols_10.cu
+mmf-instance-ncols_11.cu
+mmf-instance-ncols_12.cu
+mmf-instance-ncols_13.cu
+mmf-instance-ncols_14.cu
+mmf-instance-ncols_15.cu
+mmf-instance-ncols_16.cu
+mmf-instance-ncols_2.cu
+mmf-instance-ncols_3.cu
+mmf-instance-ncols_4.cu
+mmf-instance-ncols_5.cu
+mmf-instance-ncols_6.cu
+mmf-instance-ncols_7.cu
+mmf-instance-ncols_8.cu
+mmf-instance-ncols_9.cu
+mmq-instance-iq1_s.cu
+mmq-instance-iq2_s.cu
+mmq-instance-iq2_xs.cu
+mmq-instance-iq2_xxs.cu
+mmq-instance-iq3_s.cu
+mmq-instance-iq3_xxs.cu
+mmq-instance-iq4_nl.cu
+mmq-instance-iq4_xs.cu
+mmq-instance-mxfp4.cu
+mmq-instance-nvfp4.cu
+mmq-instance-q1_0.cu
+mmq-instance-q2_k.cu
+mmq-instance-q3_k.cu
+mmq-instance-q4_0.cu
+mmq-instance-q4_1.cu
+mmq-instance-q4_k.cu
+mmq-instance-q5_0.cu
+mmq-instance-q5_1.cu
+mmq-instance-q5_k.cu
+mmq-instance-q6_k.cu
+mmq-instance-q8_0.cu
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-cuda/vendors:
+cuda.h
+hip.h
+musa.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-hexagon:
+CMakeLists.txt
+ggml-hexagon.cpp
+htp
+htp-drv.cpp
+htp-drv.h
+libdl.h
+libggml-htp.inf
+op-desc.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-hexagon/htp:
+CMakeLists.txt
+act-ops.c
+argsort-ops.c
+binary-ops.c
+cmake-toolchain.cmake
+cpy-ops.c
+cumsum-ops.c
+diag-ops.c
+fill-ops.c
+flash-attn-ops.c
+gated-delta-net-ops.c
+get-rows-ops.c
+hex-dma.c
+hex-dma.h
+hex-dump.h
+hex-fastdiv.h
+hex-utils.h
+hmx-flash-attn-ops.c
+hmx-matmul-ops.c
+hmx-ops.h
+hmx-profile.h
+hmx-queue.c
+hmx-queue.h
+hmx-utils.h
+htp-ctx.h
+htp-ops.h
+htp_iface.idl
+hvx-arith.h
+hvx-base.h
+hvx-copy.h
+hvx-div.h
+hvx-dump.h
+hvx-exp.h
+hvx-floor.h
+hvx-inverse.h
+hvx-reduce.h
+hvx-repl.h
+hvx-scale.h
+hvx-sigmoid.h
+hvx-sqrt.h
+hvx-types.h
+hvx-utils.h
+main.c
+matmul-ops.c
+repeat-ops.c
+rope-ops.c
+set-rows-ops.c
+softmax-ops.c
+solve-tri-ops.c
+ssm-conv.c
+sum-rows-ops.c
+unary-ops.c
+vtcm-utils.h
+worker-pool.c
+worker-pool.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-hip:
+CMakeLists.txt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-metal:
+CMakeLists.txt
+ggml-metal-common.cpp
+ggml-metal-common.h
+ggml-metal-context.h
+ggml-metal-context.m
+ggml-metal-device.cpp
+ggml-metal-device.h
+ggml-metal-device.m
+ggml-metal-impl.h
+ggml-metal-ops.cpp
+ggml-metal-ops.h
+ggml-metal.cpp
+ggml-metal.metal
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-musa:
+CMakeLists.txt
+mudnn.cu
+mudnn.cuh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-opencl:
+CMakeLists.txt
+ggml-opencl.cpp
+kernels
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-opencl/kernels:
+add.cl
+add_id.cl
+argsort.cl
+clamp.cl
+concat.cl
+conv2d.cl
+conv2d_f16_f32.cl
+cpy.cl
+cumsum.cl
+cvt.cl
+diag.cl
+diag_mask_inf.cl
+div.cl
+embed_kernel.py
+exp.cl
+expm1.cl
+fill.cl
+flash_attn_f16.cl
+flash_attn_f32.cl
+flash_attn_f32_f16.cl
+gelu.cl
+gemm_moe_mxfp4_f32.cl
+gemm_moe_mxfp4_f32_ns.cl
+gemm_moe_q4_0_f32_ns.cl
+gemm_moe_q4_1_f32_ns.cl
+gemm_moe_q5_0_f32_ns.cl
+gemm_moe_q5_1_f32_ns.cl
+gemm_noshuffle_iq4_nl_f32.cl
+gemm_noshuffle_q4_0_f32.cl
+gemm_noshuffle_q4_1_f32.cl
+gemm_noshuffle_q4_k_f32.cl
+gemm_noshuffle_q5_k_f32.cl
+gemm_noshuffle_q6_k_f32.cl
+gemm_noshuffle_q8_0_f32.cl
+gemm_xmem_f16_f32_os8.cl
+gemv_moe_mxfp4_f32.cl
+gemv_moe_mxfp4_f32_ns.cl
+gemv_moe_q4_0_f32_ns.cl
+gemv_moe_q4_1_f32_ns.cl
+gemv_moe_q5_0_f32_ns.cl
+gemv_moe_q5_1_f32_ns.cl
+gemv_noshuffle_iq4_nl_f32.cl
+gemv_noshuffle_q4_0_f32.cl
+gemv_noshuffle_q4_0_f32_spec.cl
+gemv_noshuffle_q4_1_f32.cl
+gemv_noshuffle_q4_k_f32.cl
+gemv_noshuffle_q5_k_f32.cl
+gemv_noshuffle_q6_k_f32.cl
+gemv_noshuffle_q8_0_f32.cl
+get_rows.cl
+glu.cl
+group_norm.cl
+im2col_f16.cl
+im2col_f32.cl
+l2_norm.cl
+mean.cl
+moe_reorder_b.cl
+moe_sort_by_expert.cl
+mul.cl
+mul_mat_f16_f32.cl
+mul_mm_f16_f32_kq_kqv.cl
+mul_mm_f16_f32_l4_lm.cl
+mul_mm_f32_f32_l4_lm.cl
+mul_mm_iq4_nl_f32_l4_lm.cl
+mul_mm_q4_0_f32_l4_lm.cl
+mul_mm_q4_1_f32_l4_lm.cl
+mul_mm_q4_k_f32_l4_lm.cl
+mul_mm_q5_k_f32_l4_lm.cl
+mul_mm_q6_k_f32_l4_lm.cl
+mul_mm_q8_0_f32_l4_lm.cl
+mul_mv_f16_f16.cl
+mul_mv_f16_f32.cl
+mul_mv_f16_f32_1row.cl
+mul_mv_f16_f32_l4.cl
+mul_mv_f32_f32.cl
+mul_mv_id_mxfp4_f32.cl
+mul_mv_id_mxfp4_f32_flat.cl
+mul_mv_id_q4_0_f32_8x_flat.cl
+mul_mv_id_q8_0_f32.cl
+mul_mv_id_q8_0_f32_flat.cl
+mul_mv_iq4_nl_f32.cl
+mul_mv_iq4_nl_f32_flat.cl
+mul_mv_mxfp4_f32.cl
+mul_mv_mxfp4_f32_flat.cl
+mul_mv_q4_0_f32.cl
+mul_mv_q4_0_f32_1d_16x_flat.cl
+mul_mv_q4_0_f32_1d_8x_flat.cl
+mul_mv_q4_0_f32_8x_flat.cl
+mul_mv_q4_0_f32_v.cl
+mul_mv_q4_1_f32.cl
+mul_mv_q4_1_f32_flat.cl
+mul_mv_q4_k_f32.cl
+mul_mv_q4_k_f32_flat.cl
+mul_mv_q5_k_f32.cl
+mul_mv_q5_k_f32_flat.cl
+mul_mv_q6_k_f32.cl
+mul_mv_q6_k_f32_flat.cl
+mul_mv_q8_0_f32.cl
+mul_mv_q8_0_f32_flat.cl
+neg.cl
+norm.cl
+pad.cl
+relu.cl
+repeat.cl
+rms_norm.cl
+rope.cl
+scale.cl
+set_rows.cl
+sigmoid.cl
+silu.cl
+softmax_4_f16.cl
+softmax_4_f32.cl
+softmax_f16.cl
+softmax_f32.cl
+softplus.cl
+solve_tri.cl
+sqr.cl
+sqrt.cl
+ssm_conv.cl
+sub.cl
+sum_rows.cl
+tanh.cl
+transpose.cl
+tri.cl
+tsembd.cl
+upscale.cl
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-openvino:
+CMakeLists.txt
+ggml-decoder.cpp
+ggml-decoder.h
+ggml-openvino-extra.cpp
+ggml-openvino-extra.h
+ggml-openvino.cpp
+ggml-quants.cpp
+ggml-quants.h
+openvino
+utils.cpp
+utils.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-openvino/openvino:
+decoder.h
+frontend.cpp
+frontend.h
+input_model.cpp
+input_model.h
+node_context.h
+op
+op_table.cpp
+op_table.h
+pass
+rt_info
+translate_session.cpp
+translate_session.h
+utils.cpp
+utils.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-openvino/openvino/op:
+cont.cpp
+cpy.cpp
+flash_attn_ext.cpp
+get_rows.cpp
+glu_geglu.cpp
+glu_swiglu.cpp
+mulmat.cpp
+permute.cpp
+reshape.cpp
+rms_norm.cpp
+rope.cpp
+scale.cpp
+set_rows.cpp
+softmax.cpp
+transpose.cpp
+unary_gelu.cpp
+unary_silu.cpp
+view.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-openvino/openvino/pass:
+fuse_to_sdpa.cpp
+fuse_to_sdpa.h
+mark_decompression_convert_constant_folding.h
+squeeze_matmul.cpp
+squeeze_matmul.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-openvino/openvino/rt_info:
+weightless_caching_attributes.hpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-rpc:
+CMakeLists.txt
+ggml-rpc.cpp
+transport.cpp
+transport.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-sycl:
+CMakeLists.txt
+add-id.cpp
+add-id.hpp
+backend.hpp
+binbcast.cpp
+binbcast.hpp
+common.cpp
+common.hpp
+concat.cpp
+concat.hpp
+conv.cpp
+conv.hpp
+convert.cpp
+convert.hpp
+count-equal.cpp
+count-equal.hpp
+cpy.cpp
+cpy.hpp
+cumsum.cpp
+cumsum.hpp
+dequantize.hpp
+diag.cpp
+diag.hpp
+dmmv.cpp
+dmmv.hpp
+dpct
+element_wise.cpp
+element_wise.hpp
+fattn-buffers.cpp
+fattn-buffers.hpp
+fattn-common.hpp
+fattn-tile.cpp
+fattn-tile.hpp
+fattn-vec.hpp
+fattn.cpp
+fattn.hpp
+fill.cpp
+fill.hpp
+gated_delta_net.cpp
+gated_delta_net.hpp
+gemm.hpp
+getrows.cpp
+getrows.hpp
+ggml-sycl.cpp
+gla.cpp
+gla.hpp
+im2col.cpp
+im2col.hpp
+mmq.cpp
+mmq.hpp
+mmvq.cpp
+mmvq.hpp
+norm.cpp
+norm.hpp
+outprod.cpp
+outprod.hpp
+pad.cpp
+pad.hpp
+pad_reflect_1d.cpp
+pad_reflect_1d.hpp
+presets.hpp
+quantize.hpp
+quants.hpp
+repeat_back.cpp
+repeat_back.hpp
+roll.cpp
+roll.hpp
+rope.cpp
+rope.hpp
+set.cpp
+set.hpp
+set_rows.cpp
+set_rows.hpp
+softmax.cpp
+softmax.hpp
+solve_tri.cpp
+solve_tri.hpp
+ssm_conv.cpp
+ssm_conv.hpp
+ssm_scan.cpp
+ssm_scan.hpp
+sycl_hw.cpp
+sycl_hw.hpp
+template-instances
+tsembd.cpp
+tsembd.hpp
+type.hpp
+upscale.cpp
+upscale.hpp
+vecdotq.hpp
+wkv.cpp
+wkv.hpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-sycl/dpct:
+helper.hpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-sycl/template-instances:
+fattn-tile-instance-dkq112-dv112.cpp
+fattn-tile-instance-dkq128-dv128.cpp
+fattn-tile-instance-dkq256-dv256.cpp
+fattn-tile-instance-dkq40-dv40.cpp
+fattn-tile-instance-dkq512-dv512.cpp
+fattn-tile-instance-dkq576-dv512.cpp
+fattn-tile-instance-dkq64-dv64.cpp
+fattn-tile-instance-dkq72-dv72.cpp
+fattn-tile-instance-dkq80-dv80.cpp
+fattn-tile-instance-dkq96-dv96.cpp
+fattn-vec-instance-f16-f16.cpp
+fattn-vec-instance-f16-q4_0.cpp
+fattn-vec-instance-f16-q4_1.cpp
+fattn-vec-instance-f16-q5_0.cpp
+fattn-vec-instance-f16-q5_1.cpp
+fattn-vec-instance-f16-q8_0.cpp
+fattn-vec-instance-q4_0-f16.cpp
+fattn-vec-instance-q4_0-q4_0.cpp
+fattn-vec-instance-q4_0-q4_1.cpp
+fattn-vec-instance-q4_0-q5_0.cpp
+fattn-vec-instance-q4_0-q5_1.cpp
+fattn-vec-instance-q4_0-q8_0.cpp
+fattn-vec-instance-q4_1-f16.cpp
+fattn-vec-instance-q4_1-q4_0.cpp
+fattn-vec-instance-q4_1-q4_1.cpp
+fattn-vec-instance-q4_1-q5_0.cpp
+fattn-vec-instance-q4_1-q5_1.cpp
+fattn-vec-instance-q4_1-q8_0.cpp
+fattn-vec-instance-q5_0-f16.cpp
+fattn-vec-instance-q5_0-q4_0.cpp
+fattn-vec-instance-q5_0-q4_1.cpp
+fattn-vec-instance-q5_0-q5_0.cpp
+fattn-vec-instance-q5_0-q5_1.cpp
+fattn-vec-instance-q5_0-q8_0.cpp
+fattn-vec-instance-q5_1-f16.cpp
+fattn-vec-instance-q5_1-q4_0.cpp
+fattn-vec-instance-q5_1-q4_1.cpp
+fattn-vec-instance-q5_1-q5_0.cpp
+fattn-vec-instance-q5_1-q5_1.cpp
+fattn-vec-instance-q5_1-q8_0.cpp
+fattn-vec-instance-q8_0-f16.cpp
+fattn-vec-instance-q8_0-q4_0.cpp
+fattn-vec-instance-q8_0-q4_1.cpp
+fattn-vec-instance-q8_0-q5_0.cpp
+fattn-vec-instance-q8_0-q5_1.cpp
+fattn-vec-instance-q8_0-q8_0.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-virtgpu:
+CMakeLists.txt
+apir_cs_ggml-rpc-front.cpp
+backend
+ggml-backend-buffer-type.cpp
+ggml-backend-buffer.cpp
+ggml-backend-device.cpp
+ggml-backend-reg.cpp
+ggml-backend.cpp
+ggml-remoting.h
+ggmlremoting_functions.yaml
+include
+regenerate_remoting.py
+virtgpu-apir.h
+virtgpu-forward-backend.cpp
+virtgpu-forward-buffer-type.cpp
+virtgpu-forward-buffer.cpp
+virtgpu-forward-device.cpp
+virtgpu-forward-impl.h
+virtgpu-forward.gen.h
+virtgpu-shm.cpp
+virtgpu-shm.h
+virtgpu-utils.cpp
+virtgpu-utils.h
+virtgpu.cpp
+virtgpu.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-virtgpu/backend:
+CMakeLists.txt
+apir_cs_ggml-rpc-back.cpp
+backend-convert.h
+backend-dispatched-backend.cpp
+backend-dispatched-buffer-type.cpp
+backend-dispatched-buffer.cpp
+backend-dispatched-device.cpp
+backend-dispatched.cpp
+backend-dispatched.gen.h
+backend-dispatched.h
+backend-virgl-apir.h
+backend.cpp
+shared
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-virtgpu/backend/shared:
+api_remoting.h
+apir_backend.gen.h
+apir_backend.h
+apir_cs.h
+apir_cs_ggml.h
+apir_cs_rpc.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-virtgpu/include:
+apir_hw.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-vulkan:
+CMakeLists.txt
+cmake
+ggml-vulkan.cpp
+vulkan-shaders
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-vulkan/cmake:
+host-toolchain.cmake.in
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders:
+CMakeLists.txt
+abs.comp
+acc.comp
+add.comp
+add1.comp
+add_id.comp
+arange.comp
+argmax.comp
+argsort.comp
+argsort_large.comp
+ceil.comp
+clamp.comp
+concat.comp
+contig_copy.comp
+conv2d_dw.comp
+conv2d_mm.comp
+conv_transpose_1d.comp
+copy.comp
+copy_from_quant.comp
+copy_to_quant.comp
+copy_transpose.comp
+cos.comp
+count_equal.comp
+count_experts.comp
+cumsum.comp
+cumsum_multipass1.comp
+cumsum_multipass2.comp
+dequant_f32.comp
+dequant_funcs.glsl
+dequant_funcs_cm2.glsl
+dequant_head.glsl
+dequant_iq1_m.comp
+dequant_iq1_s.comp
+dequant_iq2_s.comp
+dequant_iq2_xs.comp
+dequant_iq2_xxs.comp
+dequant_iq3_s.comp
+dequant_iq3_xxs.comp
+dequant_iq4_nl.comp
+dequant_iq4_xs.comp
+dequant_mxfp4.comp
+dequant_nvfp4.comp
+dequant_q1_0.comp
+dequant_q2_k.comp
+dequant_q3_k.comp
+dequant_q4_0.comp
+dequant_q4_1.comp
+dequant_q4_k.comp
+dequant_q5_0.comp
+dequant_q5_1.comp
+dequant_q5_k.comp
+dequant_q6_k.comp
+dequant_q8_0.comp
+diag.comp
+diag_mask_inf.comp
+div.comp
+elu.comp
+exp.comp
+feature-tests
+fill.comp
+flash_attn.comp
+flash_attn_base.glsl
+flash_attn_cm1.comp
+flash_attn_cm2.comp
+flash_attn_dequant.glsl
+flash_attn_mask_opt.comp
+flash_attn_mmq_funcs.glsl
+flash_attn_split_k_reduce.comp
+floor.comp
+gated_delta_net.comp
+geglu.comp
+geglu_erf.comp
+geglu_quick.comp
+gelu.comp
+gelu_erf.comp
+gelu_quick.comp
+generic_binary_head.glsl
+generic_head.glsl
+generic_unary_head.glsl
+get_rows.comp
+get_rows_quant.comp
+glu_head.glsl
+glu_main.glsl
+group_norm.comp
+hardsigmoid.comp
+hardswish.comp
+im2col.comp
+im2col_3d.comp
+l2_norm.comp
+leaky_relu.comp
+log.comp
+mul.comp
+mul_mat_split_k_reduce.comp
+mul_mat_vec.comp
+mul_mat_vec_base.glsl
+mul_mat_vec_iface.glsl
+mul_mat_vec_iq1_m.comp
+mul_mat_vec_iq1_s.comp
+mul_mat_vec_iq2_s.comp
+mul_mat_vec_iq2_xs.comp
+mul_mat_vec_iq2_xxs.comp
+mul_mat_vec_iq3_s.comp
+mul_mat_vec_iq3_xxs.comp
+mul_mat_vec_nc.comp
+mul_mat_vec_p021.comp
+mul_mat_vec_q2_k.comp
+mul_mat_vec_q3_k.comp
+mul_mat_vec_q4_k.comp
+mul_mat_vec_q5_k.comp
+mul_mat_vec_q6_k.comp
+mul_mat_vecq.comp
+mul_mat_vecq_funcs.glsl
+mul_mm.comp
+mul_mm_cm2.comp
+mul_mm_funcs.glsl
+mul_mm_id_funcs.glsl
+mul_mmq.comp
+mul_mmq_funcs.glsl
+mul_mmq_shmem_types.glsl
+multi_add.comp
+neg.comp
+norm.comp
+opt_step_adamw.comp
+opt_step_sgd.comp
+pad.comp
+pool2d.comp
+quantize_q8_1.comp
+reglu.comp
+relu.comp
+repeat.comp
+repeat_back.comp
+rms_norm.comp
+rms_norm_back.comp
+rms_norm_partials.comp
+roll.comp
+rope_funcs.glsl
+rope_head.glsl
+rope_multi.comp
+rope_neox.comp
+rope_norm.comp
+rope_params.glsl
+rope_vision.comp
+round.comp
+scale.comp
+sgn.comp
+sigmoid.comp
+silu.comp
+silu_back.comp
+sin.comp
+soft_max.comp
+soft_max_back.comp
+soft_max_large1.comp
+soft_max_large2.comp
+soft_max_large3.comp
+soft_max_large_common.glsl
+softplus.comp
+solve_tri.comp
+sqrt.comp
+square.comp
+ssm_conv.comp
+ssm_scan.comp
+step.comp
+sub.comp
+sum_rows.comp
+sum_rows.glsl
+swiglu.comp
+swiglu_oai.comp
+tanh.comp
+timestep_embedding.comp
+topk_argsort.comp
+topk_moe.comp
+topk_nary_search.comp
+tri.comp
+trunc.comp
+types.glsl
+upscale.comp
+utils.glsl
+vulkan-shaders-gen.cpp
+wkv6.comp
+wkv7.comp
+xielu.comp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders/feature-tests:
+bfloat16.comp
+coopmat.comp
+coopmat2.comp
+integer_dot.comp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-webgpu:
+CMakeLists.txt
+ggml-webgpu-shader-lib.hpp
+ggml-webgpu.cpp
+pre_wgsl.hpp
+wgsl-shaders
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-webgpu/wgsl-shaders:
+add_id.wgsl
+argmax.wgsl
+argsort.wgsl
+argsort_merge.wgsl
+binary.wgsl
+common_decls.tmpl
+concat.wgsl
+conv2d.wgsl
+cpy.wgsl
+cumsum.wgsl
+embed_wgsl.py
+flash_attn.wgsl
+flash_attn_tile.wgsl
+flash_attn_vec_blk.wgsl
+flash_attn_vec_reduce.wgsl
+flash_attn_vec_split.wgsl
+gated_delta_net.wgsl
+get_rows.wgsl
+glu.wgsl
+im2col.wgsl
+memset.wgsl
+mul_mat.wgsl
+mul_mat_decls.tmpl
+mul_mat_id.wgsl
+mul_mat_id_gather.wgsl
+mul_mat_id_vec.wgsl
+mul_mat_reg_tile.wgsl
+mul_mat_subgroup_matrix.wgsl
+mul_mat_vec.wgsl
+mul_mat_vec_acc.tmpl
+pad.wgsl
+repeat.wgsl
+rms_norm_mul.wgsl
+rope.wgsl
+row_norm.wgsl
+scale.wgsl
+set.wgsl
+set_rows.wgsl
+soft_max.wgsl
+solve_tri.wgsl
+ssm_conv.wgsl
+ssm_scan.wgsl
+sum_rows.wgsl
+unary.wgsl
+upscale.wgsl
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-zdnn:
+CMakeLists.txt
+common.hpp
+ggml-zdnn.cpp
+mmf.cpp
+mmf.hpp
+utils.cpp
+utils.hpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/ggml/src/ggml-zendnn:
+CMakeLists.txt
+ggml-zendnn.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/grammars:
+assistant.gbnf
+chess.gbnf
+colors.gbnf
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/include:
+whisper.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/models:
+README.md
+convert-h5-to-coreml.py
+convert-h5-to-ggml.py
+convert-pt-to-ggml.py
+convert-silero-vad-to-ggml.py
+convert-whisper-to-coreml.py
+convert-whisper-to-openvino.py
+download-coreml-model.sh
+download-ggml-model.cmd
+download-ggml-model.sh
+download-vad-model.cmd
+download-vad-model.sh
+for-tests-ggml-base.bin
+for-tests-ggml-base.en.bin
+for-tests-ggml-large.bin
+for-tests-ggml-medium.bin
+for-tests-ggml-medium.en.bin
+for-tests-ggml-small.bin
+for-tests-ggml-small.en.bin
+for-tests-ggml-tiny.bin
+for-tests-ggml-tiny.en.bin
+for-tests-silero-v6.2.0-ggml.bin
+generate-coreml-interface.sh
+generate-coreml-model.sh
+ggml-tiny.en.bin
+ggml_to_pt.py
+requirements-coreml.txt
+requirements-openvino.txt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/samples:
+README.md
+jfk.mp3
+jfk.wav
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/scripts:
+apple
+bench-all-gg.txt
+bench-all.sh
+bench-wts.sh
+bench.py
+build-info.sh
+convert-all.sh
+deploy-wasm.sh
+gen-authors.sh
+get-flags.mk
+quantize-all.sh
+sha-all.sh
+sync-ggml-am.sh
+sync-ggml.last
+sync-ggml.sh
+sync-llama.sh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/scripts/apple:
+validate-apps.sh
+validate-ios.sh
+validate-macos.sh
+validate-tvos.sh
+validate-visionos.sh
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/src:
+CMakeLists.txt
+coreml
+openvino
+whisper-arch.h
+whisper.cpp
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/src/coreml:
+whisper-compat.h
+whisper-compat.m
+whisper-decoder-impl.h
+whisper-decoder-impl.m
+whisper-encoder-impl.h
+whisper-encoder-impl.m
+whisper-encoder.h
+whisper-encoder.mm
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/src/openvino:
+whisper-openvino-encoder.cpp
+whisper-openvino-encoder.h
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/tests:
+CMakeLists.txt
+earnings21
+en-0-ref.txt
+en-1-ref.txt
+en-2-ref.txt
+es-0-ref.txt
+librispeech
+run-tests.sh
+test-c.c
+test-vad-full.cpp
+test-vad.cpp
+test-whisper.js
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/tests/earnings21:
+Makefile
+README.md
+eval.mk
+eval.py
+normalizers
+requirements.txt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/tests/earnings21/normalizers:
+LICENSE
+__init__.py
+basic.py
+english.json
+english.py
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/tests/librispeech:
+Makefile
+README.md
+eval.mk
+eval.py
+normalizers
+requirements.txt
+
+/data/data/com.termux/files/home/ai_root/Termux-STT/whisper.cpp/tests/librispeech/normalizers:
+LICENSE
+__init__.py
+basic.py
+english.json
+english.py
+
+/data/data/com.termux/files/home/ai_root/core:
+__main__.py
+__pycache__
+interface.py
+llm_client.py
+memory_store.py
+permissions.py
+prompt.py
+renderer.py
+tools.py
+
+/data/data/com.termux/files/home/ai_root/core/__pycache__:
+__main__.cpython-313.pyc
+interface.cpython-313.pyc
+llm_client.cpython-313.pyc
+memory_store.cpython-313.pyc
+permissions.cpython-313.pyc
+prompt.cpython-313.pyc
+renderer.cpython-313.pyc
+tools.cpython-313.pyc
+
+/data/data/com.termux/files/home/ai_root/workspace:
+speak.sh[run_code] cat ~/ai_root/core/tools.py[OUT] import os
+import subprocess
+import requests
+from bs4 import BeautifulSoup, NavigableString, Tag
+from urllib.parse import urljoin
+import html
+import shlex
+
+
+from permissions import validate_command
+from renderer import RED, GRAY, RESET, render_for_voice
+import memory_store
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+LOG_FILE = os.path.join(BASE_DIR, "log.txt")
+if not os.path.exists(LOG_FILE):
+    subprocess.run(["touch", LOG_FILE], shell=True)
+
+TOOLS_DESCRIPTION = \
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": (
+                "Execute shell commands inside the Termux environment. "
+                "Supports optional execution timeout in seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bash": {
+                        "type": "string",
+                        "description": "Shell command to execute"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum execution time in seconds before terminating "
+                            "the command. Use 0 for no timeout."
+                        ),
+                        "default": 0,
+                        "minimum": 0
+                    }
+                },
+                "required": ["bash"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Persist a stable fact, preference, or instruction to long-term memory. "
+                "Use this when you learn something the user will want you to remember across sessions. "
+                "Do NOT use for temporary or one-off information."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The fact or preference to remember (one clear sentence).",
+                    },
+                    "type_": {
+                        "type": "string",
+                        "enum": ["preference", "instruction", "project", "fact", "workflow"],
+                        "description": (
+                            "Category: 'preference' for user habits/style, "
+                            "'instruction' for behavioral rules, "
+                            "'project' for project structure/paths, "
+                            "'fact' for environment details, "
+                            "'workflow' for recurring task patterns."
+                        ),
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": (
+                            "Comma-separated lowercase keywords that describe the memory "
+                            "(e.g. 'shell,help,flag'). Used for retrieval."
+                        ),
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": (
+                            "Importance 1–10. Use 10 for critical behavioral rules "
+                            "(like shutdown instructions), 7–9 for strong preferences, "
+                            "5–6 for useful facts."
+                        ),
+                    },
+                },
+                "required": ["text", "type_", "tags", "priority"],
+            },
+        },
+    },
+    { 
+        "type": "function",
+        "function": {
+            "name": "retrieve_memory",
+            "description": (
+                "Search long-term memory for relevant stored facts, "
+                "preferences, instructions, workflows, or project details. "
+                "Use this when additional context from past interactions "
+                "may help answer the user's request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Natural language search query describing "
+                            "what memory to retrieve."
+                        ),
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum number of relevant memories to return."
+                        ),
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_scrape",
+            "description": (
+                "Fetch a webpage and convert meaningful HTML content into structured markdown. "
+                "Preserves headings, paragraphs, links, image/media URLs, alt text, and readable content "
+                "while removing scripts, styles, and unnecessary page noise. "
+                "Optionally provide a CSS selector to target specific elements."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL of the webpage to scrape.",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "Optional CSS selector to filter content (e.g., 'main', 'article', '.content').",
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+def run_code(bash: str, timeout=0) -> str:
+    """Execute shell commands in Termux after permission validation."""
+    with open(LOG_FILE, "a") as file:
+        file.write(f"[run_code] {bash}")
+        
+    allowed, reason = validate_command(bash)
+    if not allowed:
+        out = f"[BLOCKED] {reason}"
+        with open(LOG_FILE, "a") as file:
+            file.write(f"[OUT] {out}")
+        return out
+
+    try:
+        print(f"{GRAY}[EXECUTING] {bash}{RESET}")
+        if timeout != 0:
+            result = subprocess.run(
+                bash,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout
+            )
+        else:
+            result = subprocess.run(
+                bash,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+
+        if err:
+            if out:
+                print(
+                    f"{GRAY}[OUT]\n"
+                    + out
+                    + f"\n{RED}[ERR]\n"
+                    + err
+                    + f"{RESET}"
+                )
+                with open(LOG_FILE, "a") as file:
+                    file.write(f"[OUT] {out}")
+                    file.write(f"[ERR] {err}")
+                return out + "\n[ERR]\n" + err
+            print(f"{RED}[ERR]\n{err}{RESET}")
+            with open(LOG_FILE, "a") as file:
+                file.write(f"[ERR] {err}")
+            return "[ERR]\n" + err
+
+        print(f"{GRAY}[OUT]\n{out}{RESET}")
+        with open(LOG_FILE, "a") as file:
+            file.write(f"[OUT] {out}")
+        return out
+
+    except Exception as e:
+        print(f"{RED}[EXCEPTION]\n{e}{RESET}")
+        with open(LOG_FILE, "a") as file:
+             file.write(f"[EXC] {e}")
+        return f"[EXCEPTION] {e}"
+
+
+
+def save_memory(text: str, type_: str, tags: str, priority: int) -> str:
+    """
+    Persist a structured memory entry to memories.txt.
+    Called by the model when it learns something stable.
+    """
+    with open(LOG_FILE, "a") as file:
+        file.write(f"[save_memory] text:{text}, type:{type_} tags:{tags} priority:{priority}")
+    result = memory_store.save_memory(
+        text=text,
+        type_=type_,
+        tags=tags,
+        priority=priority,
+    )
+    if result.startswith("[ERROR"):
+        print(f"{RED}[MEMORY SAVE FAILED] {result}{RESET}")
+        with open(LOG_FILE, "a") as file:
+            file.write(f"[ERR]")
+        return result
+
+    print(f"{GRAY}[MEMORY SAVED] {result}{RESET}")
+    with open(LOG_FILE, "a") as file:
+         file.write(f"[OK]")
+    return f"Memory saved: {result}"
+
+
+def retrieve_memory(query: str, top_k: int = 5) -> str:
+    """
+    Retrieve relevant memories and return them as formatted text.
+    Also prints a grey debug line with the query keywords.
+    """
+    with open(LOG_FILE, "a") as file:
+        file.write(f"[retrive_memory] query:{query}, top_k:{top_k}")
+    keywords = sorted(memory_store._tokenize(query))
+    keyword_str = ", ".join(keywords) if keywords else "(none)"
+
+    print(f"{GRAY}[MEMORY] retrieving for keywords: {keyword_str}{RESET}")
+
+    hits = memory_store.retrieve(query, top_k=top_k)
+
+    if not hits:
+        with open(LOG_FILE, "a") as file:
+            file.write(f"[EMPTY]")
+        return "No relevant memories found."
+
+    lines = []
+    for entry in hits:
+        lines.append(f"[{entry.type}] {entry.text}")
+    
+    with open(LOG_FILE, "a") as file:
+        file.write(f"[OUT]\n{'\n'.join(lines)}")
+    return "\n".join(lines)
+
+
+
+def web_scrape(url: str, selector: str = None) -> str:
+    """
+    Fetch a webpage and convert the readable parts into markdown.
+    """
+    try:
+        print(f"{GRAY}[SCRAPING] {url}{RESET}")
+        with open(LOG_FILE, "a") as file:
+            file.write(f"[web_scrape] URL:{url} selector:{selector}")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/91.0 Safari/537.36"
+            )
+        }
+
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" not in content_type:
+            with open(LOG_FILE, "a") as file:
+                file.write(f"[ERROR] Unsupported content type: {content_type}")
+            return f"[ERROR] Unsupported content type: {content_type}"
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+
+        root = soup.select_one(selector) if selector else soup
+        if selector and not root:
+            with open(LOG_FILE, "a") as file:
+                file.write(f"[ERROR] Selector '{selector}' not found.")
+            return f"[ERROR] Selector '{selector}' not found."
+
+        lines = []
+        seen_urls = set()
+
+        def resolve(raw: str) -> str:
+            return urljoin(url, raw.strip())
+
+        def add_line(text: str):
+            text = html.unescape(text).strip()
+            if text:
+                lines.append(text)
+
+        def add_url(raw: str):
+            if not raw:
+                return
+            full = resolve(raw)
+            if full not in seen_urls:
+                seen_urls.add(full)
+                lines.append(f"URL: {full}")
+
+        def label_for(tag: Tag) -> str:
+            for attr in ("alt", "title", "aria-label", "data-label", "data-title"):
+                value = tag.get(attr)
+                if value:
+                    return str(value).strip()
+            return ""
+
+        def link_markdown(tag: Tag) -> str:
+            text = tag.get_text(" ", strip=True)
+            href = tag.get("href")
+            if not href:
+                return text
+            full = resolve(href)
+            if text:
+                return f"[{text}]({full})"
+            return f"<{full}>"
+
+        def image_markdown(tag: Tag) -> str:
+            alt = label_for(tag)
+            src = tag.get("src") or tag.get("data-src") or tag.get("data-original")
+            if not src:
+                return alt
+            full = resolve(src)
+            if not alt:
+                alt = "image"
+            return f"![{alt}]({full})"
+
+        def media_markdown(tag: Tag) -> str:
+            label = label_for(tag)
+            src = tag.get("src") or tag.get("poster") or tag.get("data-src")
+            if not src:
+                return label
+            full = resolve(src)
+            if label:
+                return f"[{label}]({full})"
+            return f"<{full}>"
+
+        def walk(node):
+            for child in node.children:
+                if isinstance(child, NavigableString):
+                    txt = str(child).strip()
+                    if txt:
+                        add_line(txt)
+                    continue
+
+                if not isinstance(child, Tag):
+                    continue
+
+                name = child.name.lower()
+
+                if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                    heading = child.get_text(" ", strip=True)
+                    if heading:
+                        level = int(name[1])
+                        add_line("#" * level + " " + heading)
+                        lines.append("")
+                    continue
+
+                if name == "a":
+                    add_line(link_markdown(child))
+                    continue
+
+                if name == "img":
+                    add_line(image_markdown(child))
+                    continue
+
+                if name in {"video", "audio", "source", "iframe", "embed"}:
+                    label = label_for(child)
+                    media = media_markdown(child)
+                    if label and media and label not in media:
+                        add_line(f"{label} {media}")
+                    else:
+                        add_line(media)
+                    continue
+
+                if name == "li":
+                    item = child.get_text(" ", strip=True)
+                    if item:
+                        add_line(f"- {item}")
+                    for sub in child.find_all(["a", "img", "video", "audio", "source"], recursive=True):
+                        if sub.name == "a":
+                            add_line(link_markdown(sub))
+                        elif sub.name == "img":
+                            add_line(image_markdown(sub))
+                        else:
+                            add_line(media_markdown(sub))
+                    continue
+
+                if name in {"p", "article", "section", "main", "div", "header", "footer", "aside"}:
+                    inner = child.get_text(" ", strip=True)
+                    if inner:
+                        add_line(inner)
+                        lines.append("")
+                    continue
+
+                if name in {"ul", "ol"}:
+                    walk(child)
+                    lines.append("")
+                    continue
+
+                walk(child)
+
+        walk(root)
+
+        # Clean up blank lines
+        cleaned = []
+        prev_blank = False
+        for line in lines:
+            line = line.rstrip()
+            if not line:
+                if not prev_blank:
+                    cleaned.append("")
+                prev_blank = True
+            else:
+                cleaned.append(line)
+                prev_blank = False
+
+        text = "\n".join(cleaned).strip()
+
+        MAX_LEN = 12000
+        if len(text) > MAX_LEN:
+            text = text[:MAX_LEN] + "\n\n... (content truncated)"
+        
+        with open(LOG_FILE, "a") as file:
+            file.write("[DONE]")
+        return text
+
+    except Exception as e:
+        print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
+        with open(LOG_FILE, "a") as file:
+            file.write("[ERROR] {e}")
+        return f"[ERROR] Scraping failed: {e}"
+
+
+
+
+def speak(text: str, debug=False) -> str:
+    if debug:
+        print("speaking")
+
+    safe_text = shlex.quote(render_for_voice(text))
+
+    cmd = (
+        f"edge-tts "
+        f'--voice "en-US-AndrewNeural" '
+        f"--text {safe_text} "
+        f"--write-media - | mpv -"
+    )
+
+    try:
+        out = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+
+        if debug:
+            print(out)
+
+        if out.stderr:
+            return out.stderr.strip()
+
+        return "OK"
+
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+        return "Interrupted"[run_code] tail -n 50 ~/ai_root/log.txt[OUT] MAX_LEN = 12000
+        if len(text) > MAX_LEN:
+            text = text[:MAX_LEN] + "\n\n... (content truncated)"
+        
+        with open(LOG_FILE, "a") as file:
+            file.write("[DONE]")
+        return text
+
+    except Exception as e:
+        print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
+        with open(LOG_FILE, "a") as file:
+            file.write("[ERROR] {e}")
+        return f"[ERROR] Scraping failed: {e}"
+
+
+
+
+def speak(text: str, debug=False) -> str:
+    if debug:
+        print("speaking")
+
+    safe_text = shlex.quote(render_for_voice(text))
+
+    cmd = (
+        f"edge-tts "
+        f'--voice "en-US-AndrewNeural" '
+        f"--text {safe_text} "
+        f"--write-media - | mpv -"
+    )
+
+    try:
+        out = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+
+        if debug:
+            print(out)
+
+        if out.stderr:
+            return out.stderr.strip()
+
+        return "OK"
+
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+        return "Interrupted"[run_code] tail -n 50 ~/ai_root/log.txt[run_code] # Find the Python process and terminate it as per instructions
+kill -9 $(pgrep -f "python")
+[OUT] [run_code] pkill -f "python.*llm_client.py" || exit 0[OUT] [run_code] ps -ef | grep python[OUT] u0_a389   2186 29772  0  1970 pts/0    00:00:00 /data/data/com.termux/files/usr/bin/sh -c ps -ef | grep python
+u0_a389   2188  2186  1  1970 pts/0    00:00:00 grep python
+u0_a389  29772  1334  1  1970 pts/0    00:00:11 python core/[run_code] kill 29772

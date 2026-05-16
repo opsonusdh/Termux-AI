@@ -4,3 +4,4 @@ config*
 Termux-STT
 workspace
 log*
+*.pyc

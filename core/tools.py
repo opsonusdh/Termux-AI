@@ -1,24 +1,31 @@
 import os
+import signal
+import shlex
+import html
 import subprocess
+from urllib.parse import urljoin
+
 import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
-from urllib.parse import urljoin
-import html
-import shlex
 
-
-from permissions import validate_command
-from renderer import RED, GRAY, RESET
 import memory_store
+from permissions import validate_command
+from renderer import RED, GRAY, RESET, render_for_voice
+
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 LOG_FILE = os.path.join(BASE_DIR, "log.txt")
-if not os.path.exists(LOG_FILE):
-    subprocess.run(["touch", LOG_FILE], shell=True)
 
-TOOLS_DESCRIPTION = \
-[
+if not os.path.exists(LOG_FILE):
+    open(LOG_FILE, "a", encoding="utf-8").close()
+
+
+def log_write(message: str) -> None:
+    with open(LOG_FILE, "a", encoding="utf-8") as file:
+        file.write(message.rstrip("\n") + "\n")
+
+
+TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
@@ -32,7 +39,7 @@ TOOLS_DESCRIPTION = \
                 "properties": {
                     "bash": {
                         "type": "string",
-                        "description": "Shell command to execute"
+                        "description": "Shell command to execute",
                     },
                     "timeout": {
                         "type": "integer",
@@ -41,12 +48,12 @@ TOOLS_DESCRIPTION = \
                             "the command. Use 0 for no timeout."
                         ),
                         "default": 0,
-                        "minimum": 0
-                    }
+                        "minimum": 0,
+                    },
                 },
-                "required": ["bash"]
-            }
-        }
+                "required": ["bash"],
+            },
+        },
     },
     {
         "type": "function",
@@ -95,7 +102,7 @@ TOOLS_DESCRIPTION = \
             },
         },
     },
-    { 
+    {
         "type": "function",
         "function": {
             "name": "retrieve_memory",
@@ -117,9 +124,7 @@ TOOLS_DESCRIPTION = \
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": (
-                            "Maximum number of relevant memories to return."
-                        ),
+                        "description": "Maximum number of relevant memories to return.",
                         "default": 5,
                     },
                 },
@@ -147,7 +152,7 @@ TOOLS_DESCRIPTION = \
                     "selector": {
                         "type": "string",
                         "description": "Optional CSS selector to filter content (e.g., 'main', 'article', '.content').",
-                    }
+                    },
                 },
                 "required": ["url"],
             },
@@ -155,70 +160,58 @@ TOOLS_DESCRIPTION = \
     },
 ]
 
-def run_code(bash: str, timeout=0) -> str:
+
+def run_code(bash: str, timeout: int = 0) -> str:
     """Execute shell commands in Termux after permission validation."""
-    with open(LOG_FILE, "a") as file:
-        file.write(f"[run_code] {bash}")
-        
+    log_write(f"[run_code] {bash}")
+
     allowed, reason = validate_command(bash)
     if not allowed:
         out = f"[BLOCKED] {reason}"
-        with open(LOG_FILE, "a") as file:
-            file.write(f"[OUT] {out}")
+        log_write(f"[OUT] {out}")
         return out
 
     try:
         print(f"{GRAY}[EXECUTING] {bash}{RESET}")
-        if timeout != 0:
-            result = subprocess.run(
-                bash,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout
-            )
-        else:
-            result = subprocess.run(
-                bash,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+
+        result = subprocess.run(
+            bash,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=None if timeout == 0 else timeout,
+        )
 
         out = result.stdout.strip()
         err = result.stderr.strip()
 
+        if err and out:
+            print(f"{GRAY}[OUT]\n{out}\n{RED}[ERR]\n{err}{RESET}")
+            log_write(f"[OUT]\n{out}")
+            log_write(f"[ERR]\n{err}")
+            return out + "\n[ERR]\n" + err
+
         if err:
-            if out:
-                print(
-                    f"{GRAY}[OUT]\n"
-                    + out
-                    + f"\n{RED}[ERR]\n"
-                    + err
-                    + f"{RESET}"
-                )
-                with open(LOG_FILE, "a") as file:
-                    file.write(f"[OUT] {out}")
-                    file.write(f"[ERR] {err}")
-                return out + "\n[ERR]\n" + err
             print(f"{RED}[ERR]\n{err}{RESET}")
-            with open(LOG_FILE, "a") as file:
-                file.write(f"[ERR] {err}")
+            log_write(f"[ERR]\n{err}")
             return "[ERR]\n" + err
 
         print(f"{GRAY}[OUT]\n{out}{RESET}")
-        with open(LOG_FILE, "a") as file:
-            file.write(f"[OUT] {out}")
+        log_write(f"[OUT]\n{out}")
         return out
 
-    except Exception as e:
-        print(f"{RED}[EXCEPTION]\n{e}{RESET}")
-        with open(LOG_FILE, "a") as file:
-             file.write(f"[EXC] {e}")
-        return f"[EXCEPTION] {e}"
+    except subprocess.TimeoutExpired:
+        msg = f"[TIMEOUT] Command exceeded {timeout} seconds"
+        print(f"{RED}{msg}{RESET}")
+        log_write(msg)
+        return msg
 
+    except Exception as e:
+        msg = f"[EXCEPTION] {e}"
+        print(f"{RED}[EXCEPTION]\n{e}{RESET}")
+        log_write(msg)
+        return msg
 
 
 def save_memory(text: str, type_: str, tags: str, priority: int) -> str:
@@ -226,23 +219,22 @@ def save_memory(text: str, type_: str, tags: str, priority: int) -> str:
     Persist a structured memory entry to memories.txt.
     Called by the model when it learns something stable.
     """
-    with open(LOG_FILE, "a") as file:
-        file.write(f"[save_memory] text:{text}, type:{type_} tags:{tags} priority:{priority}")
+    log_write(f"[save_memory] text:{text}, type:{type_}, tags:{tags}, priority:{priority}")
+
     result = memory_store.save_memory(
         text=text,
         type_=type_,
         tags=tags,
         priority=priority,
     )
+
     if result.startswith("[ERROR"):
         print(f"{RED}[MEMORY SAVE FAILED] {result}{RESET}")
-        with open(LOG_FILE, "a") as file:
-            file.write(f"[ERR]")
+        log_write("[ERR]")
         return result
 
     print(f"{GRAY}[MEMORY SAVED] {result}{RESET}")
-    with open(LOG_FILE, "a") as file:
-         file.write(f"[OK]")
+    log_write("[OK]")
     return f"Memory saved: {result}"
 
 
@@ -251,38 +243,33 @@ def retrieve_memory(query: str, top_k: int = 5) -> str:
     Retrieve relevant memories and return them as formatted text.
     Also prints a grey debug line with the query keywords.
     """
-    with open(LOG_FILE, "a") as file:
-        file.write(f"[retrive_memory] query:{query}, top_k:{top_k}")
+    log_write(f"[retrieve_memory] query:{query}, top_k:{top_k}")
+
     keywords = sorted(memory_store._tokenize(query))
     keyword_str = ", ".join(keywords) if keywords else "(none)"
-
     print(f"{GRAY}[MEMORY] retrieving for keywords: {keyword_str}{RESET}")
 
     hits = memory_store.retrieve(query, top_k=top_k)
 
     if not hits:
-        with open(LOG_FILE, "a") as file:
-            file.write(f"[EMPTY]")
+        log_write("[EMPTY]")
         return "No relevant memories found."
 
     lines = []
     for entry in hits:
         lines.append(f"[{entry.type}] {entry.text}")
-    
-    with open(LOG_FILE, "a") as file:
-        file.write(f"[OUT]\n{'\n'.join(lines)}")
-    return "\n".join(lines)
 
+    log_write("[OUT]\n" + "\n".join(lines))
+    return "\n".join(lines)
 
 
 def web_scrape(url: str, selector: str = None) -> str:
     """
-    Fetch a webpage and convert the readable parts into markdown.
+    Fetch a webpage and convert the readable parts into markdown-like text.
     """
     try:
         print(f"{GRAY}[SCRAPING] {url}{RESET}")
-        with open(LOG_FILE, "a") as file:
-            file.write(f"[web_scrape] URL:{url} selector:{selector}")
+        log_write(f"[web_scrape] URL:{url} selector:{selector}")
 
         headers = {
             "User-Agent": (
@@ -297,22 +284,24 @@ def web_scrape(url: str, selector: str = None) -> str:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
 
-        content_type = response.headers.get("Content-Type", "")
+        content_type = response.headers.get("Content-Type", "").lower()
         if "text/html" not in content_type:
-            with open(LOG_FILE, "a") as file:
-                file.write(f"[ERROR] Unsupported content type: {content_type}")
-            return f"[ERROR] Unsupported content type: {content_type}"
+            msg = f"[ERROR] Unsupported content type: {content_type}"
+            log_write(msg)
+            return msg
 
         soup = BeautifulSoup(response.text, "html.parser")
 
-        for tag in soup(["script", "style", "noscript"]):
+        for tag in soup.select(
+            "script, style, noscript, nav, footer, aside, .sidebar, .menu, .ads, .popup, .cookie, .banner"
+        ):
             tag.decompose()
 
         root = soup.select_one(selector) if selector else soup
-        if selector and not root:
-            with open(LOG_FILE, "a") as file:
-                file.write(f"[ERROR] Selector '{selector}' not found.")
-            return f"[ERROR] Selector '{selector}' not found."
+        if selector and root is None:
+            msg = f"[ERROR] Selector '{selector}' not found."
+            log_write(msg)
+            return msg
 
         lines = []
         seen_urls = set()
@@ -324,14 +313,6 @@ def web_scrape(url: str, selector: str = None) -> str:
             text = html.unescape(text).strip()
             if text:
                 lines.append(text)
-
-        def add_url(raw: str):
-            if not raw:
-                return
-            full = resolve(raw)
-            if full not in seen_urls:
-                seen_urls.add(full)
-                lines.append(f"URL: {full}")
 
         def label_for(tag: Tag) -> str:
             for attr in ("alt", "title", "aria-label", "data-label", "data-title"):
@@ -346,6 +327,9 @@ def web_scrape(url: str, selector: str = None) -> str:
             if not href:
                 return text
             full = resolve(href)
+            if full in seen_urls:
+                return text or f"<{full}>"
+            seen_urls.add(full)
             if text:
                 return f"[{text}]({full})"
             return f"<{full}>"
@@ -370,6 +354,36 @@ def web_scrape(url: str, selector: str = None) -> str:
                 return f"[{label}]({full})"
             return f"<{full}>"
 
+        def render_inline(node) -> str:
+            parts = []
+
+            for child in node.children:
+                if isinstance(child, NavigableString):
+                    txt = html.unescape(str(child))
+                    if txt:
+                        parts.append(txt)
+                    continue
+
+                if not isinstance(child, Tag):
+                    continue
+
+                name = child.name.lower()
+
+                if name == "a":
+                    parts.append(link_markdown(child))
+                elif name == "img":
+                    parts.append(image_markdown(child))
+                elif name in {"video", "audio", "source", "iframe", "embed"}:
+                    parts.append(media_markdown(child))
+                elif name == "br":
+                    parts.append("\n")
+                else:
+                    parts.append(render_inline(child))
+
+            text = "".join(parts)
+            text = " ".join(text.split())
+            return text.strip()
+
         def walk(node):
             for child in node.children:
                 if isinstance(child, NavigableString):
@@ -384,48 +398,17 @@ def web_scrape(url: str, selector: str = None) -> str:
                 name = child.name.lower()
 
                 if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-                    heading = child.get_text(" ", strip=True)
+                    heading = render_inline(child)
                     if heading:
                         level = int(name[1])
                         add_line("#" * level + " " + heading)
                         lines.append("")
                     continue
 
-                if name == "a":
-                    add_line(link_markdown(child))
-                    continue
-
-                if name == "img":
-                    add_line(image_markdown(child))
-                    continue
-
-                if name in {"video", "audio", "source", "iframe", "embed"}:
-                    label = label_for(child)
-                    media = media_markdown(child)
-                    if label and media and label not in media:
-                        add_line(f"{label} {media}")
-                    else:
-                        add_line(media)
-                    continue
-
                 if name == "li":
-                    item = child.get_text(" ", strip=True)
+                    item = render_inline(child)
                     if item:
                         add_line(f"- {item}")
-                    for sub in child.find_all(["a", "img", "video", "audio", "source"], recursive=True):
-                        if sub.name == "a":
-                            add_line(link_markdown(sub))
-                        elif sub.name == "img":
-                            add_line(image_markdown(sub))
-                        else:
-                            add_line(media_markdown(sub))
-                    continue
-
-                if name in {"p", "article", "section", "main", "div", "header", "footer", "aside"}:
-                    inner = child.get_text(" ", strip=True)
-                    if inner:
-                        add_line(inner)
-                        lines.append("")
                     continue
 
                 if name in {"ul", "ol"}:
@@ -433,13 +416,31 @@ def web_scrape(url: str, selector: str = None) -> str:
                     lines.append("")
                     continue
 
+                if name in {"p", "article", "section", "main", "div", "header", "footer", "aside", "blockquote"}:
+                    inner = render_inline(child)
+                    if inner:
+                        add_line(inner)
+                        lines.append("")
+                    else:
+                        walk(child)
+                    continue
+
+                if name == "pre":
+                    code_text = child.get_text("\n", strip=True)
+                    if code_text:
+                        add_line("```")
+                        add_line(code_text)
+                        add_line("```")
+                        lines.append("")
+                    continue
+
                 walk(child)
 
         walk(root)
 
-        # Clean up blank lines
         cleaned = []
         prev_blank = False
+
         for line in lines:
             line = line.rstrip()
             if not line:
@@ -455,24 +456,21 @@ def web_scrape(url: str, selector: str = None) -> str:
         MAX_LEN = 12000
         if len(text) > MAX_LEN:
             text = text[:MAX_LEN] + "\n\n... (content truncated)"
-        
-        with open(LOG_FILE, "a") as file:
-            file.write("[DONE]")
+
+        log_write("[DONE]")
         return text
 
     except Exception as e:
         print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
-        with open(LOG_FILE, "a") as file:
-            file.write("[ERROR] {e}")
+        log_write(f"[ERROR] {e}")
         return f"[ERROR] Scraping failed: {e}"
 
 
-
-def speak(text: str, debug=False) -> str:
+def speak(text: str, debug: bool = False) -> str:
     if debug:
         print("speaking")
 
-    safe_text = shlex.quote(text)
+    safe_text = shlex.quote(render_for_voice(text))
 
     cmd = (
         f"edge-tts "
@@ -481,14 +479,46 @@ def speak(text: str, debug=False) -> str:
         f"--write-media - | mpv -"
     )
 
-    out = subprocess.run(
-        cmd,
-        shell=True,
-        capture_output=True,
-        text=True
-    )
-    if debug:
-        print(out)
-    if out.stderr:
-        return out.stderr.strip()
-    return "OK"
+    process = None
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+        stdout, stderr = process.communicate()
+
+        if debug:
+            print(process)
+            if stdout:
+                print(stdout)
+            if stderr:
+                print(stderr)
+
+        if stderr and stderr.strip():
+            return stderr.strip()
+
+        return "OK"
+
+    except KeyboardInterrupt:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+        print("\nInterrupted")
+        return "Interrupted"
+
+    except Exception as e:
+        if debug:
+            print(e)
+        return f"[EXCEPTION] {e}"
