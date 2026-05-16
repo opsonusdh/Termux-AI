@@ -1,0 +1,34 @@
+[run_code] date
+[OUT]
+Sat May 16 14:51:52 IST 2026
+[run_code] ps -ef | grep python
+[OUT]
+u0_a389   7663 26675 14  1970 pts/0    00:00:04 python core/
+u0_a389   7896  7663  2  1970 pts/0    00:00:00 /data/data/com.termux/files/usr/bin/sh -c ps -ef | grep python
+u0_a389   7898  7896  2  1970 pts/0    00:00:00 grep python
+[run_code] kill 7663
+[retrieve_memory] query:how to make T, top_k:5
+[OUT]
+[instruction] When told to close yourself, find and kill the python process. To find use: ps -ef | grep python.
+[preference] If --help fails, try -h before using which or inspecting the binary.
+[fact] I have a built-in web_scrape tool in llm_client.py that uses requests and BeautifulSoup to extract text from URLs.
+[workflow] When asked for news without a specified location, determine the user's approximate location using an IP geolocation API and retrieve relevant local or national news automatically.
+[instruction] Whenever the user says 'Good morning', provide the current time, news, and weather report.
+[run_code] ls -F | grep -i "T"
+find . -maxdepth 2 -name "Makefile" -o -name "makefile"
+[OUT]
+CONTRIBUTING.md
+Termux-STT/
+log.txt
+memories.txt
+setup.sh
+[run_code] alias | grep "T"
+type T
+[OUT]
+T: not found
+[run_code] ps -ef | grep python
+[OUT]
+u0_a389  18221 10419  4  1970 pts/0    00:00:05 python core/
+u0_a389  18504 18221  2  1970 pts/0    00:00:00 /data/data/com.termux/files/usr/bin/sh -c ps -ef | grep python
+u0_a389  18506 18504  1  1970 pts/0    00:00:00 grep python
+[run_code] kill 18221
