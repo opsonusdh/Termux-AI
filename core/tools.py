@@ -29,6 +29,30 @@ TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
+            "name": "index_files",
+            "description": (
+                "Scan a directory and index its files into the RAG memory system. "
+                "Useful for learning about a codebase or a set of documents."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the directory or file to index.",
+                    },
+                    "extension_filter": {
+                        "type": "string",
+                        "description": "Comma-separated extensions (e.g., '.py,.md'). If empty, indexes all text files.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_code",
             "description": (
                 "Execute shell commands inside the Termux environment. "
@@ -170,9 +194,9 @@ def run_code(bash: str, timeout: int = 0) -> str:
         out = f"[BLOCKED] {reason}"
         log_write(f"[OUT] {out}")
         return out
-
+    printable_bash = out if  len("\n".join(out.splitlines()[:20])) < 500 else out[:500]+"\n .\n .\n ."
     try:
-        print(f"{GRAY}[EXECUTING] {bash}{RESET}")
+        print(f"{GRAY}[EXECUTING] {printable_bash}{RESET}")
 
         result = subprocess.run(
             bash,
@@ -186,8 +210,10 @@ def run_code(bash: str, timeout: int = 0) -> str:
         out = result.stdout.strip()
         err = result.stderr.strip()
 
+        printable_out = out if  len("\n".join(out.splitlines()[:20])) < 500 else out[:500]+"\n .\n .\n ."
+
         if err and out:
-            print(f"{GRAY}[OUT]\n{out}\n{RED}[ERR]\n{err}{RESET}")
+            print(f"{GRAY}[OUT]\n{printable_out}\n{RED}[ERR]\n{err}{RESET}")
             log_write(f"[OUT]\n{out}")
             log_write(f"[ERR]\n{err}")
             return out + "\n[ERR]\n" + err
@@ -522,3 +548,46 @@ def speak(text: str, debug: bool = False) -> str:
         if debug:
             print(e)
         return f"[EXCEPTION] {e}"
+def index_files(path: str, extension_filter: str = "") -> str:
+    """Reads files, chunks them, and saves them to memory."""
+    log_write(f"[index_files] path:{path}, filter:{extension_filter}")
+    
+    path = os.path.expanduser(path)
+    if not os.path.exists(path):
+        return f"[ERROR] Path does not exist: {path}"
+
+    extensions = [ext.strip().lower() for ext in extension_filter.split(",") if ext.strip()]
+    
+    indexed_count = 0
+    
+    files_to_process = []
+    if os.path.isfile(path):
+        files_to_process.append(path)
+    else:
+        for root, dirs, files in os.walk(path):
+            if "node_modules" in root or ".git" in root or "__pycache__" in root:
+                continue
+            for file in files:
+                if not extensions or any(file.lower().endswith(ext) for ext in extensions):
+                    files_to_process.append(os.path.join(root, file))
+
+    for fpath in files_to_process:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+            
+            rel_path = os.path.relpath(fpath, os.path.dirname(path))
+            chunks = memory_store.chunk_text(text)
+            
+            for i, chunk in enumerate(chunks):
+                memory_store.save_memory(
+                    text=f"File: {rel_path} (Part {i+1}): {chunk}",
+                    type_="fact",
+                    tags=f"index,file,source_code,{os.path.basename(fpath)}",
+                    priority=5
+                )
+            indexed_count += 1
+        except Exception as e:
+            print(f"Failed to index {fpath}: {e}")
+
+    return f"Successfully indexed {indexed_count} files into memory."
