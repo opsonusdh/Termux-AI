@@ -257,16 +257,14 @@ Contains the system prompt and agent behavior rules.
 ## Setup
 
 ### Install Python dependencies
-
 ```bash
-pkg install python rust mpv git
-pip install openai edge-tts
+pkg install git
 ```
-
 ### Clone the repo
 ```bash
 git clone https://github.com/opsonusdh/Termux-AI
 cd Termux-AI
+bash setup.sh
 ```
 For voice detection support you can add my another repo [Termux-STT](https://github.com/opsonusdh/Termux-STT/):
 ```bash
