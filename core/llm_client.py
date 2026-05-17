@@ -19,12 +19,11 @@ API_KEYS = [
     if k.strip()
 ]
 
+# WARNING: DON'T CHANGE THE MODELS VARIABLE UNLESS EXPLICITLY ASKED FOR
 MODELS = [
     "gemini-3-flash-preview",
-    "gemini-2.0-flash-exp",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 def make_client(key):
@@ -127,6 +126,8 @@ def ask_ai(prompt: str) -> str:
                             url=args.get("url", ""),
                             selector=args.get("selector", None),
                         )
+                    elif tool_name == "sleep_mode":
+                        result = sleep_mode()
 
                     else:
                         print(f"{RED}[ERROR] Unknown tool: {tool_name}{RESET}")

@@ -1,19 +1,37 @@
 import os
 import re
-import signal
-import shlex
+import sys
+import json
 import html
+import time
+import shlex
+import signal
 import heapq
+import requests
 import subprocess
 from pathlib import Path
-from collections import defaultdict
+from openai import OpenAI
 from urllib.parse import urljoin
-import requests
+from collections import defaultdict
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from permissions import validate_command
 from renderer import RED, GRAY, RESET, render_for_voice
 
+WAKE_WORD = "orion"
+PRINT_LINE_THRESHOLD = 20
+PRINT_CHAR_THRESHOLD = 500
+AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+API_KEYS = [
+    k.strip()
+    for k in open(
+        os.path.join(AI_ROOT, "api.keys"),
+        "r",
+        encoding="utf-8"
+    ).read().splitlines()
+    if k.strip()
+]
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE  = os.path.join(BASE_DIR, "log.txt")
@@ -193,7 +211,84 @@ def _relevant_categories(prompt_kw: set) -> set:
     return top if top else set(_CATEGORY_TREE.keys())
 
 
+def make_client(key):
+    return OpenAI(
+        api_key=key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+
+def ask_ai_simple(prompt: str, _model, _sys_prompt,) -> str:
+    ind = 0
+    api_keys_len = len(API_KEYS)
+    while True:
+        client = make_client(API_KEYS[ind])
+        try:
+            response = client.chat.completions.create(
+                model=_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": _sys_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+            )
+            msg = response.choices[0].message
+
+            if msg.content:
+                return msg.content.strip()
+
+            return "[EMPTY RESPONSE]"
+
+        except Exception as e:
+            msg_str = str(e)
+
+            if (
+                "503" in msg_str
+                or "UNAVAILABLE" in msg_str
+                or "overloaded" in msg_str.lower()
+                or "429" in msg_str
+                or "RESOURCE_EXHAUSTED" in msg_str
+                or "rate limit" in msg_str.lower()
+            ):
+
+                print(f"{RED}Model overloaded.{RESET}")
+                time.sleep(5)
+            elif "API_KEY_INVALID" in msg_str:
+                print(f"{RED}Invalid API key.{RESET}")
+            else:
+                raise
+
+            ind += 1
+            if ind >= api_keys_len:
+                ind = 0
+                
 #  Retrieve (separated budgets for primary vs indexed)
+def is_wake_relevant(text: str) -> bool:
+
+    sys_prompt = """
+You are a wake-word relevance classifier.
+
+The assistant name is Orion.
+
+Determine whether the speaker is directly addressing the assistant.
+
+Reply ONLY with:
+YES
+or
+NO
+"""
+    result = ask_ai_simple(
+        prompt=text,
+        _model="gemini-2.5-flash-lite",
+        _sys_prompt=sys_prompt,
+    )
+
+    return result.strip().upper().startswith("YES")
+
 
 def retrieve(
     prompt: str,
@@ -614,6 +709,25 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sleep_mode",
+            "description": (
+                "Put the assistant into passive sleep mode. "
+                "Only Whisper speech detection remains active. "
+                f"Continuously listens for the wake word '{WAKE_WORD}'. "
+                "When the wake word is detected, a lightweight AI relevance "
+                "check determines whether the speaker is actually addressing "
+                "the assistant. If relevant, sleep mode exits and returns "
+                "the detected speech as the next user prompt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
 
 
@@ -629,7 +743,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
         log_write(f"[OUT] {out}")
         return out
 
-    printable = bash if len("\n".join(bash.splitlines()[:20])) < 500 else bash[:500] + "\n    .\n    .\n    ."
+    printable = bash if len("\n".join(bash.splitlines()[:PRINT_LINE_THRESHOLD])) < PRINT_CHAR_THRESHOLD else bash[:PRINT_CHAR_THRESHOLD] + "\n    .\n    .\n    ."
     try:
         print(f"{GRAY}[EXECUTING] {printable}{RESET}")
 
@@ -645,7 +759,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
         out = result.stdout.strip()
         err = result.stderr.strip()
 
-        printable_out = out if len("\n".join(out.splitlines()[:20])) < 500 else out[:500] + "\n    .\n    .\n    ."
+        printable_out = out if len("\n".join(out.splitlines()[:PRINT_LINE_THRESHOLD])) < PRINT_CHAR_THRESHOLD else out[:PRINT_CHAR_THRESHOLD] + "\n    .\n    .\n    ."
 
         if err and out:
             print(f"{GRAY}[OUT]\n{printable_out}\n{RED}[ERR]\n{err}{RESET}")
@@ -953,6 +1067,7 @@ def write_file(
 
 def index_files(path: str, extension_filter: str = "") -> str:
     """Read files, chunk them, and store in indexed_memory.txt (not memories.txt)."""
+    printable_index = ""
     log_write(f"[index_files] path:{path}, filter:{extension_filter}")
 
     path = os.path.expanduser(path)
@@ -1025,14 +1140,14 @@ def index_files(path: str, extension_filter: str = "") -> str:
                 indexed_files_count += 1
                 indexed_chunks_count += len(chunks)
 
-                print(
-                    f"{GRAY}[INDEXED] "
-                    f"{rel_path} ({len(chunks)} chunks){RESET}"
-                )
+                if len(printable_index) < PRINT_CHAR_THRESHOLD:
+                    printable_index += f"[INDEXED] {rel_path} ({len(chunks)}"
 
         except Exception as e:
             print(f"Failed to index {fpath}: {e}")
-
+            
+    printable_index = printable_index if len(printable_index) <= PRINT_CHAR_THRESHOLD else printable_index[:PRINT_CHAR_THRESHOLD]+"\n    .\n    .\n    ."
+    print(f"{GRAY}{printable_index}{RESET}")
     return (
         f"Successfully indexed "
         f"{indexed_chunks_count} chunks "
@@ -1260,3 +1375,67 @@ def speak(text: str, debug: bool = False) -> str:
         if debug:
             print(e)
         return f"[EXCEPTION] {e}"
+
+
+def sleep_mode():
+    CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+    DEFAULT_CONFIG = {
+        "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
+        "tts_enabled": False,
+    }
+    if not os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=4)
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            config = json.load(f)
+    except Exception:
+        config = DEFAULT_CONFIG
+    STT_PATH = os.path.expanduser(config["stt_path"])
+
+    if STT_PATH not in sys.path:
+        sys.path.append(STT_PATH)
+
+    try:
+        from main import listen
+        if subprocess.run(
+            "which edge-tts",
+            shell=True,
+            capture_output=True
+        ).returncode != 0:
+            raise Exception("edge-tts not found")
+        if subprocess.run(
+            "which mpv",
+            shell=True,
+            capture_output=True
+        ).returncode != 0:
+            raise Exception("mpv not found")
+        if not os.path.isdir(os.path.join(BASE_DIR, "Termux-STT")):
+            raise Exception("Termux-STT not found.")
+    except Exception as e:
+        return f"[ERR] Wake mode not initiated. Reason: {e}"
+    print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
+
+    while True:
+        heard = listen(once=True)
+
+        if not heard:
+            continue
+
+        low = heard.lower().strip()
+        print(f"{GRAY}[HEARD] {heard}{RESET}")
+
+        if WAKE_WORD not in low:
+            continue
+
+        print(f"{GRAY}[WAKE WORD DETECTED]{RESET}")
+        try:
+            relevant = is_wake_relevant(heard)
+            if relevant:
+                print(f"{GRAY}[WAKING UP]{RESET}")
+                return heard
+            else:
+                print(f"{GRAY}[IGNORED]{RESET}")
+        except Exception as e:
+            print(f"{RED}[WAKE CHECK FAILED] {e}{RESET}")
+            

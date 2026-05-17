@@ -2,65 +2,96 @@
 
 A terminal-native autonomous AI agent for Termux powered by Gemini through the OpenAI-compatible API interface.
 
-This project is **not** a regex-driven shell parser anymore.  
-It uses **native tool calling** inside the runtime, with internal orchestration for command execution, memory retrieval, and filesystem-safe actions.
+The assistant identity is **Orion**.
 
-The agent is designed to behave like a practical terminal assistant that can reason, inspect, remember, and act inside a constrained Termux environment.
+This project is not a regex-driven shell parser anymore.
+It uses native tool calling inside the runtime, with internal orchestration for:
+- command execution
+- memory retrieval
+- filesystem-safe actions
+- indexed retrieval
+- voice wake handling
+
+The agent is designed to behave like a practical terminal operator that can reason, inspect, remember, and act inside a constrained Termux environment.
+
+This project is not trying to fake general intelligence.
+
+It is focused on controlled autonomy inside a local terminal runtime. A rare concept these days. Most "AI agents" currently resemble a caffeinated while-loop wearing sunglasses.
 
 ---
 
-## What the agent can do
+# What Orion can do
 
 - reason over tasks step by step
 - call tools internally
 - execute shell commands through a validated runtime tool
 - inspect files and directories
 - maintain persistent structured memory
-- retrieve relevant memories when needed
+- retrieve relevant memories automatically
+- index large codebases and documents
+- perform lightweight RAG retrieval
 - render markdown cleanly in the terminal
 - interact with supported Termux APIs
+- scrape and structure webpages
+- support wake-word voice activation
+- operate in passive sleep mode
 - work inside a sandboxed filesystem model
 
 ---
 
-## Important architecture note
+# Important Architecture Note
 
-The agent **does not** rely on old-style `bash-run` blocks or command extraction from model text.
+The agent does **not** rely on old-style shell block extraction.
 
-That older design has been replaced by:
+Older approaches based on:
+- markdown command fences
+- regex scraping
+- bash extraction from model text
+
+have been replaced by:
 
 - native tool calling
 - internal tool dispatch
-- validated command execution
-- direct result feedback into the model loop
+- validated execution
+- direct tool feedback loops
+- structured runtime orchestration
 
-So the model does **not** output shell blocks for the runtime to scrape.  
-The runtime calls tools directly and manages the loop internally.
+The runtime itself manages execution and tool results.
+
+The model does not emit fake terminal scripts for the outer runtime to scrape.
+
+That architecture gets unstable very quickly once the model starts improvising. Which it absolutely will. Machines inherit humanity's bad habits faster than expected.
 
 ---
 
-## Features
+# Core Runtime Tools
 
-### Native Tool Calling
-
-The assistant uses tools such as:
+The assistant currently supports:
 
 - `run_code`
 - `save_memory`
 - `retrieve_memory`
+- `read_file`
+- `write_file`
+- `index_files`
+- `web_scrape`
+- `sleep_mode`
 
-These are handled by the runtime, not by parsing markdown command fences.
+These are runtime-managed tools, not prompt-roleplay abstractions.
 
 ---
 
-## Sandboxed Filesystem
+# Sandboxed Filesystem
 
-The AI operates around:
+The AI operates primarily around:
 
 ```text
 ~/Termux-AI
 ```
-### Permission model
+
+---
+
+## Permission Model
 
 | Action | Allowed |
 |---|---|
@@ -75,7 +106,7 @@ The permission system is:
 - workspace-aware
 - context-sensitive
 
-instead of relying purely on naive keyword matching.
+instead of relying purely on naive keyword filtering.
 
 Safe autonomous actions inside the workspace are allowed automatically.
 
@@ -90,19 +121,20 @@ Protected areas and risky operations still require confirmation.
 
 ---
 
-## Persistent Memory
+# Persistent Memory
 
-The agent stores durable memory in:
+The agent stores durable personal memory in:
 
 ```text
 ~/Termux-AI/memories.txt
 ```
+
 Memory supports:
 - structured entries
 - priorities
 - tags
 - semantic retrieval
-- automatic injection into prompts
+- automatic prompt injection
 - tool-based saving and retrieval
 
 The memory system is intended for stable knowledge such as:
@@ -114,25 +146,59 @@ The memory system is intended for stable knowledge such as:
 
 ---
 
-## Semantic Memory Retrieval
+# Indexed Knowledge Memory
 
-The agent does not blindly dump the whole memory file into context.
+Large codebases and documents are stored separately in:
 
-Instead, it retrieves relevant memories using:
-- keyword scoring
-- category matching
-- priority weighting
-- heap-based ranking
+```text
+~/Termux-AI/indexed_memory.txt
+```
 
-This keeps memory retrieval focused and useful.
+This system supports:
+- chunked indexing
+- semantic retrieval
+- lightweight RAG injection
+- codebase awareness
+- document ingestion
+
+Unlike personal memory, indexed memory is:
+- bulk-oriented
+- automatically chunked
+- relevance-filtered
+- capped during retrieval to avoid context flooding
+
+The runtime uses:
+- `index_files()` for ingestion
+- semantic scoring during retrieval
+- automatic memory injection into prompts
+- separate retrieval thresholds for indexed content
+
+This allows Orion to reason over projects without dumping entire repositories into context like a deranged photocopier.
 
 ---
 
-## Markdown Terminal Renderer
+# Semantic Memory Retrieval
 
-The response renderer formats terminal output with ANSI styling.
+The agent does not blindly inject entire memory files into prompts.
 
-It supports:
+Retrieval uses:
+- keyword scoring
+- category matching
+- priority weighting
+- heap-ranked retrieval
+- separate indexed-memory thresholds
+
+This keeps retrieval focused and reduces context pollution.
+
+Priority-10 instructions always surface automatically.
+
+---
+
+# Markdown Terminal Renderer
+
+The response renderer formats terminal output using ANSI styling.
+
+Supported formatting includes:
 - headings
 - bold text
 - italic text
@@ -141,23 +207,56 @@ It supports:
 - bullets
 - numbered lists
 - dividers
-- readable color styling
+- readable terminal colors
 
-This keeps assistant output usable in Termux without raw markdown clutter leaking through.
+This keeps terminal output readable without raw markdown clutter leaking into the shell.
+
+Human civilization invented ANSI escape codes and somehow still uses Electron for calculators. Reality remains difficult to process.
 
 ---
 
-## Termux API Integration
+# Voice Wake System
 
-The agent can use supported local tools such as:
+When paired with the companion project:
+
+0
+
+Orion supports:
+- live speech transcription
+- passive sleep mode
+- wake-word detection
+- AI-based wake relevance classification
+- optional TTS responses using `edge-tts`
+
+---
+
+## Sleep Mode Behavior
+
+When instructed to sleep:
+- the reasoning loop pauses
+- Whisper speech detection remains active
+- Orion listens for the wake word
+- detected speech is checked for relevance using a lightweight AI classifier
+- irrelevant chatter is ignored
+- relevant requests wake the assistant automatically
+
+This prevents accidental activation from unrelated speech while keeping the assistant responsive.
+
+---
+
+# Termux API Integration
+
+The runtime can integrate with supported local utilities such as:
 - `termux-media-player`
+- `termux-notification`
+- `termux-tts-speak`
 - other installed Termux utilities
 
-This is handled as part of the runtime tool system, not as fake text instructions.
+This is handled through runtime tools, not fake text instructions.
 
 ---
 
-## Project structure
+# Project Structure
 
 ```text
 ~/Termux-AI $ tree
@@ -166,35 +265,42 @@ This is handled as part of the runtime tool system, not as fake text instruction
 ├── LICENSE
 ├── README.md
 ├── api.keys
+├── config.json
 ├── core
 │   ├── __main__.py
-│   ├── __pycache__
 │   ├── interface.py
 │   ├── llm_client.py
-│   ├── memory_store.py
 │   ├── permissions.py
 │   ├── prompt.py
-│   └── renderer.py
+│   ├── renderer.py
+│   └── tools.py
+├── indexed_memory.txt
 ├── log.txt
 ├── memories.txt
-└── workspace
-```
----
-## Components
+├── Termux-STT
+├── workspace
+└── setup.sh
 
-### `interface.py`
+```
+
+---
+
+# Components
+
+## `interface.py`
 
 Main terminal interface.
 
 Responsibilities:
 - user interaction
 - conversation loop
+- voice handling
 - displaying output
-- passing prompts into the model runtime
+- passing prompts into the runtime
 
 ---
 
-### `llm_client.py`
+## `llm_client.py`
 
 Core inference engine.
 
@@ -204,24 +310,30 @@ Handles:
 - retries
 - overload recovery
 - API key rotation
+- model fallback handling
 - automatic memory injection
 
 ---
 
-### `memory_store.py`
+## `tools.py`
 
-Persistent memory subsystem.
+Runtime tool subsystem.
 
 Handles:
-- parsing memory records
-- semantic retrieval
-- memory scoring
-- top-k selection
-- saving structured memories
+- shell execution
+- memory operations
+- indexing
+- file editing
+- web scraping
+- wake mode
+- TTS
+- RAG support
+
+This effectively became the operational backbone of the runtime. The inevitable fate of all "utility files."
 
 ---
 
-### `permissions.py`
+## `permissions.py`
 
 Sandbox enforcement layer.
 
@@ -233,7 +345,7 @@ Responsibilities:
 
 ---
 
-### `renderer.py`
+## `renderer.py`
 
 ANSI markdown renderer.
 
@@ -246,37 +358,55 @@ Responsibilities:
 
 ---
 
-### `prompt.py`
+## `prompt.py`
 
 Behavior tuning layer.
 
-Contains the system prompt and agent behavior rules.
+Contains:
+- the system prompt
+- runtime behavior rules
+- operational guidance
+- autonomy constraints
 
 ---
 
-## Setup
+# Setup
 
-### Install dependencies
+## Install Dependencies
+
 ```bash
 pkg install git
 ```
-### Clone the repo
+
+---
+
+## Clone The Repository
+
 ```bash
 git clone https://github.com/opsonusdh/Termux-AI
 cd Termux-AI
 bash setup.sh
 ```
-For voice detection support you can add my another repo [Termux-STT](https://github.com/opsonusdh/Termux-STT/):
+
+---
+
+## Optional Voice Support
+
+Install the companion speech project:
+
 ```bash
 pkg install mpv
 pip install edge-tts
+
 git clone https://github.com/opsonusdh/Termux-STT/
 cd Termux-STT
 bash setup.sh
 cd ..
 ```
+
 ---
-### Create API keys file
+
+# Create API Keys File
 
 Create:
 
@@ -295,12 +425,12 @@ One API key per line.
 
 The runtime automatically rotates keys when:
 - rate limits occur
-- temporary overloads happen
+- overloads happen
 - provider-side failures appear
 
 ---
 
-## Running
+# Running
 
 From the project root:
 
@@ -309,45 +439,46 @@ cd ~/Termux-AI
 python core
 ```
 
-Or run the module directly, depending on how your `__main__.py` is wired.
+Or run the module directly depending on how `__main__.py` is configured.
 
 ---
 
-## Example session
+# Example Session
 
-### User
+## User
 
 ```text
 YOU > create a small cli project
 ```
 
-### Agent
+## Orion
 
-The AI:
+The assistant:
 - inspects context
+- retrieves relevant memory
 - plans the task
 - calls tools internally
-- creates files in `~/Termux-AI/workspace`
+- creates files safely
 - validates outputs
-- returns a formatted answer
+- returns structured results
 
 ---
 
-## Security model
+# Security Model
 
-### Protected core
+## Protected Core
 
 ```text
 ~/Termux-AI/core
 ```
 
-Contains the runtime logic and protected source code.
+Contains protected runtime logic and core orchestration.
 
 Modification requires explicit permission.
 
 ---
 
-### Workspace
+## Workspace
 
 ```text
 ~/Termux-AI/workspace
@@ -366,88 +497,104 @@ The AI may:
 - generate projects
 - run experiments
 
-without requiring permission.
+without requiring repeated confirmation.
 
-This allows the agent to:
+This allows Orion to:
 - use `yt-dlp`
 - process media with `ffmpeg`
 - generate scripts
-- create temporary build artifacts
+- create build artifacts
 - run local automation workflows
 
-without repeatedly interrupting the user for confirmation.
+without interrupting the user every thirty seconds like a nervous intern.
 
 ---
 
-### External system
+## External System
 
-The system may be inspected, but protected or risky actions require confirmation.
+The broader system may be inspected, but risky actions require confirmation.
 
 Examples:
 - modifying system directories
 - killing unrelated processes
-- accessing privileged device APIs
 - altering protected runtime files
+- privileged API access
 
 ---
 
-## Current capabilities
+# Current Capabilities
 
 - autonomous shell execution
 - semantic memory retrieval
+- indexed RAG retrieval
 - long-term memory persistence
 - markdown terminal rendering
 - native tool calling
 - multi-step reasoning
 - filesystem management
+- wake-word voice activation
+- passive sleep mode
+- AI-based wake relevance classification
+- web scraping
+- structured file editing
 - media playback
 - Termux API integration
 - retry-based recovery
 - structured permissions
 - API key rotation
+- model fallback handling
 
 ---
 
-## Current limitations
+# Current Limitations
 
-- no streaming output yet
-- no async execution
-- limited shell parsing heuristics
-- long contexts can still grow large
-- no vector embeddings yet
+- no streaming tool execution yet
+- no async task scheduler
+- retrieval is keyword-weighted rather than embedding-based
+- very large contexts still require trimming
 - no rollback or snapshot system
+- no persistent background agents yet
 
 ---
 
-## Future ideas
+# Future Ideas
 
 - vector memory
 - streaming responses
+- async execution
 - background tasks
-- voice interface
 - plugin system
 - execution rollback
 - command confidence scoring
 - multi-agent coordination
+- local embeddings
+- persistent wake daemon
 
 ---
 
-## Philosophy
+# Philosophy
 
-This project is not trying to fake general intelligence.
-
-It is a practical autonomous terminal agent designed to be:
+This project is intended to be:
 - useful
 - inspectable
 - constrained
 - recoverable
 - extensible
 
+The architecture intentionally favors:
+- explicit runtime control
+- inspectable orchestration
+- constrained autonomy
+- local-first execution
+- recoverable behavior
+
+over opaque cloud-agent abstractions.
+
 The goal is controlled autonomy, not chaotic shell possession.
 
 ---
 
-## License
+# License
 
 MIT License
 
@@ -455,9 +602,13 @@ Use responsibly.
 
 ---
 
-## Final note
+# Final Note
 
-- This project was started before OpenClaw existed.
-- It has since evolved into a native tool-calling agent.
-- It is intended to integrate with other Termux projects, including Termux-TUI.
-- Improvements, suggestions, and testing are welcome.
+- This project began before OpenClaw existed.
+- It later evolved into a native tool-calling runtime.
+- It is designed to integrate with other Termux ecosystem projects.
+- Improvements, testing, and architectural suggestions are welcome.
+
+The project is still evolving, but the core direction is stable:
+> build a practical local autonomous terminal agent that remains understandable by humans.
+

@@ -17,7 +17,10 @@ scripts, piping data, even installing packages – proceeds without interruption
 
 import os
 import re
+import sys
+import json
 import shlex
+import subprocess
 from typing import List, Tuple
 
 #  Directory roots 
@@ -25,6 +28,47 @@ AI_ROOT   = os.path.abspath(os.path.expanduser("~/ai_root"))
 CORE_DIR  = os.path.join(AI_ROOT, "core")
 STT_DIR   = os.path.join(AI_ROOT, "Termux-STT")
 WORKSPACE = os.path.join(AI_ROOT, "workspace")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+DEFAULT_CONFIG = {
+    "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
+    "tts_enabled": False,
+}
+if not os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(DEFAULT_CONFIG, f, indent=4)
+        
+try:
+    with open(CONFIG_PATH, "r") as f:
+        config = json.load(f)
+except:
+    config = DEFAULT_CONFIG
+
+STT_PATH = os.path.expanduser(config["stt_path"])
+if STT_PATH not in sys.path:
+    sys.path.append(STT_PATH)
+
+try:
+    from main import listen
+
+    if subprocess.run(
+        "which edge-tts",
+        shell=True,
+        capture_output=True
+    ).returncode != 0:
+        raise Exception("edge-tts not found")
+    if subprocess.run(
+        "which mpv",
+        shell=True,
+        capture_output=True
+    ).returncode != 0:
+        raise Exception("mpv not found")
+
+    HAS_STT = True
+
+except Exception:
+    HAS_STT = False
 
 # Directories the AI must never silently modify
 PROTECTED_DIRS: List[str] = [CORE_DIR, STT_DIR]
@@ -375,12 +419,34 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
     """
     for segment in _split_shell_chain(cmd):
         needs, reason = _segment_needs_permission(segment)
+
         if needs:
             print(f"\n[PERMISSION] The AI wants to run:\n  {segment}")
             print(f"  Reason: {reason}")
+
+            # Voice notification
+            try:
+                if config.get("tts_enabled", False) and HAS_STT:
+                    subprocess.Popen(
+                        (
+                            'edge-tts '
+                            '--voice "en-US-AndrewNeural" '
+                            f'--text "Permission required. Reason: {reason}" '
+                            '--write-media - | mpv -'
+                        ),
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+            except Exception:
+                pass
+
             inp = input("  Allow? [y/n] ").strip().lower()
+
             if inp in {"y", "yes"}:
                 return True, "OK"
+
             return False, f"Denied: {reason}"
 
     return True, "OK"

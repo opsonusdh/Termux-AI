@@ -1,6 +1,7 @@
 import os
 import json
 import sys
+import subprocess
 from llm_client import ask_ai
 from renderer import render_markdown_terminal, GRAY, RESET
 from tools import speak
@@ -31,8 +32,23 @@ if STT_PATH not in sys.path:
 
 try:
     from main import listen
+
+    if subprocess.run(
+        "which edge-tts",
+        shell=True,
+        capture_output=True
+    ).returncode != 0:
+        raise Exception("edge-tts not found")
+    if subprocess.run(
+        "which mpv",
+        shell=True,
+        capture_output=True
+    ).returncode != 0:
+        raise Exception("mpv not found")
+
     HAS_STT = True
-except ImportError:
+
+except Exception:
     HAS_STT = False
 
 def chat_loop():
@@ -42,6 +58,8 @@ def chat_loop():
     if HAS_STT:
         if not config.get("tts_enabled"):
             print("""Enter "start voice" to use Voice Input.""")
+        else:
+            print("""Say "stop voice" to use keyboard Input.""")
     
     if HAS_STT and config.get("tts_enabled"):
         try:
@@ -64,8 +82,8 @@ def chat_loop():
                 user_input = input("\nYOU > ").strip()
             except EOFError:
                 break
-                                        
-        else:           
+
+        else:
             print(f"{GRAY}[Listening...]{RESET}")
             try:
                 user_input = listen(once=True)
@@ -83,18 +101,18 @@ def chat_loop():
             except Exception as e:
                 print(f"\n[STT ERROR] {e}")
                 continue
-        
+
         if not user_input:
             continue
         if user_input.lower() in ("exit", "quit", "exit.", "quit."):
             print("Session ended.")
             break
-        if user_input.lower() in ["start voice", "start voice"]:
+        if user_input.lower() in ["start voice.", "start voice"]:
             config["tts_enabled"] = True
             with open(CONFIG_PATH, "w") as f:
                  json.dump(config, f, indent=4)
             continue
-        if user_input.lower() in ("stop voice", "stop voice."):
+        if user_input.lower() in ("stop voice.", "stop voice."):
             config["tts_enabled"] = False
             with open(CONFIG_PATH, "w") as f:
                  json.dump(config, f, indent=4)
