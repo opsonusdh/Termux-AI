@@ -1,4 +1,4 @@
-# Terminal Autonomous AI Agent (Termux)
+# Terminal Autonomous AI Agent: Orion (Termux)
 
 A terminal-native autonomous AI agent for Termux powered by Gemini through the OpenAI-compatible API interface.
 
