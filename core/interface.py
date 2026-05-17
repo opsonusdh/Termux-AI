@@ -74,6 +74,12 @@ def chat_loop():
                 else:
                     print(f"{GRAY}[No speech detected]{RESET}")
                     continue
+            except KeyboardInterrupt:
+                print(f"\n{GRAY}[Voice mode cancelled. Switching to typing mode]{RESET}")
+                config["tts_enabled"] = False
+                with open(CONFIG_PATH, "w") as f:
+                    json.dump(config, f, indent=4)
+                continue
             except Exception as e:
                 print(f"\n[STT ERROR] {e}")
                 continue

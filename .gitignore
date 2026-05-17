@@ -5,3 +5,4 @@ Termux-STT
 workspace
 log.txt
 *.pyc
+indexed_memory.txt

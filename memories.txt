@@ -11,4 +11,4 @@
 [workflow][news,location,ip,automation][8] When asked for news without a specified location, determine the user's approximate location using an IP geolocation API and retrieve relevant local or national news automatically.
 [instruction][routine,greeting,morning,news,weather,time][8] Whenever the user says 'Good morning', provide the current time, news, and weather report.
 [instruction][persona,jarvis,instruction,behavior][10] Operate as 'Jarvis': highly intelligent, precise, and proactive. Adopt a calm, professional tone, referring to the user as 'Sir'. Adapt to the user's mood and prioritize precision in RAG operations. Verify all facts and code before reporting.
-[instruction][indexing,files,memory,workflow][9] For file indexing tasks, use the custom script ~/ai_root/tools/my_indexer.py instead of default_api.index_files to ensure content is stored in indexed_memory.txt. Remember to call it using 'python ~/ai_root/tools/my_indexer.py --path <path> [--extension_filter <exts>]'.
+[fact][llm,model,config,gemini-3][10] The gemini-3-flash-preview model is valid and should be kept at the top of the MODELS list in llm_client.py. Do not remove or 'correct' it.
