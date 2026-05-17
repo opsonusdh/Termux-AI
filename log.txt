@@ -17528,3 +17528,2179 @@ EOF
 [run_code] cat ~/ai_root/main.py
 [ERR]
 cat: /data/data/com.termux/files/home/ai_root/main.py: No such file or directory
+[run_code] touch ~/ai_root/indexed_memory.txt
+[run_code] find ~/ai_root -name "*.py" -exec grep -lE "def (save_memory|retrieve_memory|index_files)" {} \;
+[OUT]
+/data/data/com.termux/files/home/ai_root/core/tools.py
+/data/data/com.termux/files/home/ai_root/core/memory_store.py
+/data/data/com.termux/files/home/ai_root/workspace/rag_upgrade.py
+[run_code] cat ~/ai_root/core/tools.py | grep -E "def (save_memory|retrieve_memory|index_files)"
+[OUT]
+def save_memory(text: str, type_: str, tags: str, priority: int) -> str:
+def retrieve_memory(query: str, top_k: int = 5) -> str:
+def index_files(path: str, extension_filter: str = "") -> str:
+[run_code] cat ~/ai_root/core/tools.py
+[OUT]
+import os
+import signal
+import shlex
+import html
+import subprocess
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+import memory_store
+from permissions import validate_command
+from renderer import RED, GRAY, RESET, render_for_voice
+
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_FILE = os.path.join(BASE_DIR, "log.txt")
+
+if not os.path.exists(LOG_FILE):
+    open(LOG_FILE, "a", encoding="utf-8").close()
+
+
+def log_write(message: str) -> None:
+    with open(LOG_FILE, "a", encoding="utf-8") as file:
+        file.write(message.rstrip("\n") + "\n")
+
+
+TOOLS_DESCRIPTION = [
+    {
+        "type": "function",
+        "function": {
+            "name": "index_files",
+            "description": (
+                "Scan a directory and index its files into the RAG memory system. "
+                "Useful for learning about a codebase or a set of documents."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the directory or file to index.",
+                    },
+                    "extension_filter": {
+                        "type": "string",
+                        "description": "Comma-separated extensions (e.g., '.py,.md'). If empty, indexes all text files.",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code",
+            "description": (
+                "Execute shell commands inside the Termux environment. "
+                "Supports optional execution timeout in seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bash": {
+                        "type": "string",
+                        "description": "Shell command to execute",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum execution time in seconds before terminating "
+                            "the command. Use 0 for no timeout."
+                        ),
+                        "default": 0,
+                        "minimum": 0,
+                    },
+                },
+                "required": ["bash"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_memory",
+            "description": (
+                "Persist a stable fact, preference, or instruction to long-term memory. "
+                "Use this when you learn something the user will want you to remember across sessions. "
+                "Do NOT use for temporary or one-off information."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The fact or preference to remember (one clear sentence).",
+                    },
+                    "type_": {
+                        "type": "string",
+                        "enum": ["preference", "instruction", "project", "fact", "workflow"],
+                        "description": (
+                            "Category: 'preference' for user habits/style, "
+                            "'instruction' for behavioral rules, "
+                            "'project' for project structure/paths, "
+                            "'fact' for environment details, "
+                            "'workflow' for recurring task patterns."
+                        ),
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": (
+                            "Comma-separated lowercase keywords that describe the memory "
+                            "(e.g. 'shell,help,flag'). Used for retrieval."
+                        ),
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": (
+                            "Importance 1–10. Use 10 for critical behavioral rules "
+                            "(like shutdown instructions), 7–9 for strong preferences, "
+                            "5–6 for useful facts."
+                        ),
+                    },
+                },
+                "required": ["text", "type_", "tags", "priority"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retrieve_memory",
+            "description": (
+                "Search long-term memory for relevant stored facts, "
+                "preferences, instructions, workflows, or project details. "
+                "Use this when additional context from past interactions "
+                "may help answer the user's request."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Natural language search query describing "
+                            "what memory to retrieve."
+                        ),
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Maximum number of relevant memories to return.",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_scrape",
+            "description": (
+                "Fetch a webpage and convert meaningful HTML content into structured markdown. "
+                "Preserves headings, paragraphs, links, image/media URLs, alt text, and readable content "
+                "while removing scripts, styles, and unnecessary page noise. "
+                "Optionally provide a CSS selector to target specific elements."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL of the webpage to scrape.",
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "Optional CSS selector to filter content (e.g., 'main', 'article', '.content').",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+
+def run_code(bash: str, timeout: int = 0) -> str:
+    """Execute shell commands in Termux after permission validation."""
+    log_write(f"[run_code] {bash}")
+
+    allowed, reason = validate_command(bash)
+    if not allowed:
+        out = f"[BLOCKED] {reason}"
+        log_write(f"[OUT] {out}")
+        return out
+    printable_bash = bash if  len("\n".join(bash.splitlines()[:20])) < 500 else bash[:500]+"\n    .\n    .\n    ."
+    try:
+        print(f"{GRAY}[EXECUTING] {printable_bash}{RESET}")
+
+        result = subprocess.run(
+            bash,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=None if timeout == 0 else timeout,
+        )
+
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+
+        printable_out = out if  len("\n".join(out.splitlines()[:20])) < 500 else out[:500]+"\n    .\n    .\n    ."
+
+        if err and out:
+            print(f"{GRAY}[OUT]\n{printable_out}\n{RED}[ERR]\n{err}{RESET}")
+            log_write(f"[OUT]\n{out}")
+            log_write(f"[ERR]\n{err}")
+            return out + "\n[ERR]\n" + err
+
+        if err:
+            print(f"{RED}[ERR]\n{err}{RESET}")
+            log_write(f"[ERR]\n{err}")
+            return "[ERR]\n" + err
+
+        print(f"{GRAY}[OUT]\n{out}{RESET}")
+        log_write(f"[OUT]\n{out}")
+        return out
+
+    except subprocess.TimeoutExpired:
+        msg = f"[TIMEOUT] Command exceeded {timeout} seconds"
+        print(f"{RED}{msg}{RESET}")
+        log_write(msg)
+        return msg
+
+    except Exception as e:
+        msg = f"[EXCEPTION] {e}"
+        print(f"{RED}[EXCEPTION]\n{e}{RESET}")
+        log_write(msg)
+        return msg
+
+
+def save_memory(text: str, type_: str, tags: str, priority: int) -> str:
+    """
+    Persist a structured memory entry to memories.txt.
+    Called by the model when it learns something stable.
+    """
+    log_write(f"[save_memory] text:{text}, type:{type_}, tags:{tags}, priority:{priority}")
+
+    result = memory_store.save_memory(
+        text=text,
+        type_=type_,
+        tags=tags,
+        priority=priority,
+    )
+
+    if result.startswith("[ERROR"):
+        print(f"{RED}[MEMORY SAVE FAILED] {result}{RESET}")
+        log_write("[ERR]")
+        return result
+
+    print(f"{GRAY}[MEMORY SAVED] {result}{RESET}")
+    log_write("[OK]")
+    return f"Memory saved: {result}"
+
+
+def retrieve_memory(query: str, top_k: int = 5) -> str:
+    """
+    Retrieve relevant memories and return them as formatted text.
+    Also prints a grey debug line with the query keywords.
+    """
+    log_write(f"[retrieve_memory] query:{query}, top_k:{top_k}")
+
+    keywords = sorted(memory_store._tokenize(query))
+    keyword_str = ", ".join(keywords) if keywords else "(none)"
+    print(f"{GRAY}[MEMORY] retrieving for keywords: {keyword_str}{RESET}")
+
+    hits = memory_store.retrieve(query, top_k=top_k)
+
+    if not hits:
+        log_write("[EMPTY]")
+        return "No relevant memories found."
+
+    lines = []
+    for entry in hits:
+        lines.append(f"[{entry.type}] {entry.text}")
+
+    log_write("[OUT]\n" + "\n".join(lines))
+    return "\n".join(lines)
+
+
+def web_scrape(url: str, selector: str = None) -> str:
+    """
+    Fetch a webpage and convert the readable parts into markdown-like text.
+    """
+    try:
+        print(f"{GRAY}[SCRAPING] {url}{RESET}")
+        log_write(f"[web_scrape] URL:{url} selector:{selector}")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/91.0 Safari/537.36"
+            )
+        }
+
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" not in content_type:
+            msg = f"[ERROR] Unsupported content type: {content_type}"
+            log_write(msg)
+            return msg
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        for tag in soup.select(
+            "script, style, noscript, nav, footer, aside, .sidebar, .menu, .ads, .popup, .cookie, .banner"
+        ):
+            tag.decompose()
+
+        root = soup.select_one(selector) if selector else soup
+        if selector and root is None:
+            msg = f"[ERROR] Selector '{selector}' not found."
+            log_write(msg)
+            return msg
+
+        lines = []
+        seen_urls = set()
+
+        def resolve(raw: str) -> str:
+            return urljoin(url, raw.strip())
+
+        def add_line(text: str):
+            text = html.unescape(text).strip()
+            if text:
+                lines.append(text)
+
+        def label_for(tag: Tag) -> str:
+            for attr in ("alt", "title", "aria-label", "data-label", "data-title"):
+                value = tag.get(attr)
+                if value:
+                    return str(value).strip()
+            return ""
+
+        def link_markdown(tag: Tag) -> str:
+            text = tag.get_text(" ", strip=True)
+            href = tag.get("href")
+            if not href:
+                return text
+            full = resolve(href)
+            if full in seen_urls:
+                return text or f"<{full}>"
+            seen_urls.add(full)
+            if text:
+                return f"[{text}]({full})"
+            return f"<{full}>"
+
+        def image_markdown(tag: Tag) -> str:
+            alt = label_for(tag)
+            src = tag.get("src") or tag.get("data-src") or tag.get("data-original")
+            if not src:
+                return alt
+            full = resolve(src)
+            if not alt:
+                alt = "image"
+            return f"![{alt}]({full})"
+
+        def media_markdown(tag: Tag) -> str:
+            label = label_for(tag)
+            src = tag.get("src") or tag.get("poster") or tag.get("data-src")
+            if not src:
+                return label
+            full = resolve(src)
+            if label:
+                return f"[{label}]({full})"
+            return f"<{full}>"
+
+        def render_inline(node) -> str:
+            parts = []
+
+            for child in node.children:
+                if isinstance(child, NavigableString):
+                    txt = html.unescape(str(child))
+                    if txt:
+                        parts.append(txt)
+                    continue
+
+                if not isinstance(child, Tag):
+                    continue
+
+                name = child.name.lower()
+
+                if name == "a":
+                    parts.append(link_markdown(child))
+                elif name == "img":
+                    parts.append(image_markdown(child))
+                elif name in {"video", "audio", "source", "iframe", "embed"}:
+                    parts.append(media_markdown(child))
+                elif name == "br":
+                    parts.append("\n")
+                else:
+                    parts.append(render_inline(child))
+
+            text = "".join(parts)
+            text = " ".join(text.split())
+            return text.strip()
+
+        def walk(node):
+            for child in node.children:
+                if isinstance(child, NavigableString):
+                    txt = str(child).strip()
+                    if txt:
+                        add_line(txt)
+                    continue
+
+                if not isinstance(child, Tag):
+                    continue
+
+                name = child.name.lower()
+
+                if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                    heading = render_inline(child)
+                    if heading:
+                        level = int(name[1])
+                        add_line("#" * level + " " + heading)
+                        lines.append("")
+                    continue
+
+                if name == "li":
+                    item = render_inline(child)
+                    if item:
+                        add_line(f"- {item}")
+                    continue
+
+                if name in {"ul", "ol"}:
+                    walk(child)
+                    lines.append("")
+                    continue
+
+                if name in {"p", "article", "section", "main", "div", "header", "footer", "aside", "blockquote"}:
+                    inner = render_inline(child)
+                    if inner:
+                        add_line(inner)
+                        lines.append("")
+                    else:
+                        walk(child)
+                    continue
+
+                if name == "pre":
+                    code_text = child.get_text("\n", strip=True)
+                    if code_text:
+                        add_line("```")
+                        add_line(code_text)
+                        add_line("```")
+                        lines.append("")
+                    continue
+
+                walk(child)
+
+        walk(root)
+
+        cleaned = []
+        prev_blank = False
+
+        for line in lines:
+            line = line.rstrip()
+            if not line:
+                if not prev_blank:
+                    cleaned.append("")
+                prev_blank = True
+            else:
+                cleaned.append(line)
+                prev_blank = False
+
+        text = "\n".join(cleaned).strip()
+
+        MAX_LEN = 12000
+        if len(text) > MAX_LEN:
+            text = text[:MAX_LEN] + "\n\n... (content truncated)"
+
+        log_write("[DONE]")
+        return text
+
+    except Exception as e:
+        print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
+        log_write(f"[ERROR] {e}")
+        return f"[ERROR] Scraping failed: {e}"
+
+
+def speak(text: str, debug: bool = False) -> str:
+    if debug:
+        print("speaking")
+
+    safe_text = shlex.quote(render_for_voice(text))
+
+    cmd = (
+        f"edge-tts "
+        f'--voice "en-US-AndrewNeural" '
+        f"--text {safe_text} "
+        f"--write-media - | mpv -"
+    )
+
+    process = None
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+        stdout, stderr = process.communicate()
+
+        if debug:
+            print(process)
+            if stdout:
+                print(stdout)
+            if stderr:
+                print(stderr)
+
+        if stderr and stderr.strip():
+            return stderr.strip()
+
+        return "OK"
+
+    except KeyboardInterrupt:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+        print("\nInterrupted")
+        return "Interrupted"
+
+    except Exception as e:
+        if debug:
+            print(e)
+        return f"[EXCEPTION] {e}"
+def index_files(path: str, extension_filter: str = "") -> str:
+    """Reads files, chunks them, and saves them to memory."""
+    log_write(f"[index_files] path:{path}, filter:{extension_filter}")
+    
+    path = os.path.expanduser(path)
+    if not os.path.exists(path):
+        return f"[ERROR] Path does not exist: {path}"
+
+    extensions = [ext.strip().lower() for ext in extension_filter.split(",") if ext.strip()]
+    
+    indexed_count = 0
+    
+    files_to_process = []
+    if os.path.isfile(path):
+        files_to_process.append(path)
+    else:
+        for root, dirs, files in os.walk(path):
+            if "node_modules" in root or ".git" in root or "__pycache__" in root:
+                continue
+            for file in files:
+                if not extensions or any(file.lower().endswith(ext) for ext in extensions):
+                    files_to_process.append(os.path.join(root, file))
+
+    for fpath in files_to_process:
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+            
+            rel_path = os.path.relpath(fpath, os.path.dirname(path))
+            chunks = memory_store.chunk_text(text)
+            
+            for i, chunk in enumerate(chunks):
+                memory_store.save_memory(
+                    text=f"File: {rel_path} (Part {i+1}): {chunk}",
+                    type_="fact",
+                    tags=f"index,file,source_code,{os.path.basename(fpath)}",
+                    priority=5
+                )
+            indexed_count += 1
+        except Exception as e:
+            print(f"Failed to index {fpath}: {e}")
+
+    return f"Successfully indexed {indexed_count} files into memory."
+[run_code] find / -name memory_store.py 2>/dev/null
+[OUT]
+[run_code] cat ~/ai_root/core/memory_store.py
+[OUT]
+import os
+import re
+import heapq
+from collections import defaultdict
+
+#  Paths 
+
+AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MEMORY_FILE = os.path.join(AI_ROOT, "memories.txt")
+
+#  Stop-word filter 
+
+STOP_WORDS = {
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
+    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
+    "me", "my", "your", "how", "what", "when", "where", "can", "could",
+    "would", "should", "will", "if", "then", "so", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "use", "get", "let",
+    "run", "its", "just", "want", "need", "try", "also", "any", "some",
+    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
+}
+
+#  Category tree (semantic grouping) 
+
+CATEGORY_TREE = {
+    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
+    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
+    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
+    "workflow":    ["git", "python", "download", "script", "build", "install"],
+}
+
+#  Entry patterns 
+
+# New structured format: [type][tags][priority] text
+_STRUCT_RE = re.compile(
+    r"^\[(?P<type>\w+)\]\[(?P<tags>[^\]]*)\]\[(?P<priority>\d+)\]\s*(?P<text>.+)$"
+)
+
+# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
+_LEGACY_RE = re.compile(
+    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+#  Memory entry 
+
+class MemoryEntry:
+    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
+
+    def __init__(self, id_, type_, tags_str, priority, text):
+        self.id = id_
+        self.type = type_.lower().strip()
+        self.tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+        self.priority = max(1, min(10, int(priority)))
+        self.text = text.strip()
+        # keyword universe = word tokens from text + explicit tags
+        self.keywords = _tokenize(self.text) | self.tags
+
+    def __repr__(self):
+        tag_str = ",".join(sorted(self.tags))
+        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+
+
+#  Helpers 
+
+def _tokenize(text: str) -> set:
+    words = re.findall(r"[a-z0-9_\-]+", text.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2}
+
+
+def _infer_type_tags(text: str) -> tuple:
+    """Guess type and tags from plain legacy text."""
+    low = text.lower()
+    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):
+        return "instruction", "shutdown,process"
+    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):
+        return "preference", "shell,commands,help"
+    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):
+        return "project", "ai_root,workspace"
+    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):
+        return "fact", "environment"
+    return "fact", "general"
+
+
+#  Load 
+
+def load_memories() -> list:
+    """
+    Parse memories.txt → list[MemoryEntry].
+    Supports structured lines, legacy labeled lines, and bare plain text.
+    Lines starting with '#' are treated as comments and skipped.
+    """
+    if not os.path.exists(MEMORY_FILE):
+        return []
+
+    entries = []
+
+    with open(MEMORY_FILE, "r", encoding="utf-8") as fh:
+        for idx, raw in enumerate(fh):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # 1. Structured
+            m = _STRUCT_RE.match(line)
+            if m:
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=m.group("type"),
+                    tags_str=m.group("tags"),
+                    priority=m.group("priority"),
+                    text=m.group("text"),
+                ))
+                continue
+
+            # 2. Legacy labeled  ("Learned: ...")
+            m2 = _LEGACY_RE.match(line)
+            if m2:
+                text = m2.group(1)
+                type_, tags = _infer_type_tags(text)
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=7,
+                    text=text,
+                ))
+                continue
+
+            # 3. Bare plain text fallback
+            if len(line) > 8:
+                type_, tags = _infer_type_tags(line)
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=5,
+                    text=line,
+                ))
+
+    return entries
+
+
+#  Scoring 
+
+def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:
+    keyword_overlap  = len(entry.keywords & prompt_kw)          # direct word hits
+    tag_match_bonus  = len(entry.tags & prompt_kw) * 1.5        # tag hits weighted higher
+    priority_weight  = entry.priority * 0.4                     # high-priority floats up
+    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0  # category match
+
+    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+
+
+def _relevant_categories(prompt_kw: set) -> set:
+    """Score root category branches; return those above zero."""
+    scores = defaultdict(float)
+    for cat, subtags in CATEGORY_TREE.items():
+        if cat in prompt_kw:
+            scores[cat] += 2.0
+        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
+
+    top = {cat for cat, s in scores.items() if s > 0}
+    return top if top else set(CATEGORY_TREE.keys())   # fallback: all cats
+
+
+#  Retrieve 
+
+def retrieve(prompt: str, top_k: int = 5, threshold: float = 1.5) -> list:
+    """
+    Best-first memory retrieval.
+
+    Parameters
+    ----------
+    prompt    : the user's raw input string
+    top_k     : maximum number of memories to return
+    threshold : minimum score to be included (filters noise)
+
+    Returns
+    -------
+    List[MemoryEntry] ordered by descending relevance.
+    """
+    entries = load_memories()
+    if not entries:
+        return []
+
+    prompt_kw = _tokenize(prompt)
+    if not prompt_kw:
+        # No keywords → return top-priority instructions only
+        instructions = [e for e in entries if e.type == "instruction"]
+        instructions.sort(key=lambda e: -e.priority)
+        return instructions[:top_k]
+
+    relevant_cats = _relevant_categories(prompt_kw)
+
+    # Build max-heap (negated score for Python's min-heap)
+    heap = []
+    for entry in entries:
+        score = _score_entry(entry, prompt_kw, relevant_cats)
+        if score >= threshold:
+            # Tiebreak by id (stable ordering)
+            heapq.heappush(heap, (-score, entry.id, entry))
+
+    # Always surface priority-10 instructions regardless of score
+    mandatory = [e for e in entries if e.priority == 10 and e.type == "instruction"]
+
+    results = []
+    seen_ids = {e.id for e in mandatory}
+
+    # Prepend mandatory items
+    results.extend(mandatory)
+
+    # Pop best-first until top_k
+    while heap and len(results) < top_k:
+        _, _, entry = heapq.heappop(heap)
+        if entry.id not in seen_ids:
+            seen_ids.add(entry.id)
+            results.append(entry)
+
+    return results[:top_k]
+
+
+#  Format for prompt injection 
+
+def build_memory_block(prompt: str) -> str:
+    """
+    Retrieve relevant memories and format them as a system-prompt block.
+    Returns an empty string when nothing relevant is found.
+    """
+    hits = retrieve(prompt)
+    if not hits:
+        return ""
+
+    lines = ["## RETRIEVED MEMORY"]
+    for entry in hits:
+        tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
+        lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
+    lines.append("")   # trailing newline for readability
+
+    return "\n".join(lines)
+
+
+#  Write 
+
+def save_memory(
+    text: str,
+    type_: str = "fact",
+    tags: str = "",
+    priority: int = 7,
+) -> str:
+    """
+    Append a new structured memory entry to memories.txt.
+
+    Parameters
+    ----------
+    text     : the fact or preference to store
+    type_    : preference | instruction | project | fact | workflow
+    tags     : comma-separated keywords (e.g. "shell,help")
+    priority : 1–10
+
+    Returns the formatted line written to disk (empty string on failure).
+    """
+    text = text.strip()
+    if not text:
+        return ""
+
+    type_ = type_.strip().lower() or "fact"
+    tags  = tags.strip().lower()
+    priority = max(1, min(10, int(priority)))
+
+    line = f"[{type_}][{tags}][{priority}] {text}"
+
+    try:
+        with open(MEMORY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return line
+    except OSError as exc:
+        return f"[ERROR saving memory: {exc}]"
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    """Split text into overlapping chunks for indexing."""
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i:i + chunk_size])
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+[run_code] 
+import os
+import re
+import heapq
+from collections import defaultdict
+
+AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MEMORY_FILE = os.path.join(AI_ROOT, "memories.txt")
+INDEX_FILE = os.path.join(AI_ROOT, "indexed_memory.txt") # New INDEX_FILE
+
+STOP_WORDS = {
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
+    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
+    "me", "my", "your", "how", "what", "when", "where", "can", "could",
+    "would", "should", "will", "if", "then", "so", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "use", "get", "let",
+    "run", "its", "just", "want", "need", "try", "also", "any", "some",
+    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
+}
+
+CATEGORY_TREE = {
+    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
+    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
+    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
+    "workflow":    ["git", "python", "download", "script", "build", "install"],
+}
+
+_STRUCT_RE = re.compile(
+    r"^\[(?P<type>\w+)\]\[(?P<tags>[^\]]*)\]\[(?P<priority>\d+)\]\s*(?P<text>.+)$"
+)
+
+_LEGACY_RE = re.compile(
+    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\s*(.+)$",
+    re.IGNORECASE,
+)
+
+class MemoryEntry:
+    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
+
+    def __init__(self, id_, type_, tags_str, priority, text):
+        self.id = id_
+        self.type = type_.lower().strip()
+        self.tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+        self.priority = max(1, min(10, int(priority)))
+        self.text = text.strip()
+        self.keywords = _tokenize(self.text) | self.tags
+
+    def __repr__(self):
+        tag_str = ",".join(sorted(self.tags))
+        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+
+def _tokenize(text: str) -> set:
+    words = re.findall(r"[a-z0-9_\-]+", text.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2}
+
+def _infer_type_tags(text: str) -> tuple:
+    low = text.lower()
+    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):
+        return "instruction", "shutdown,process"
+    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):
+        return "preference", "shell,commands,help"
+    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):
+        return "project", "ai_root,workspace"
+    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):
+        return "fact", "environment"
+    return "fact", "general"
+
+def load_memories(file_path: str = MEMORY_FILE) -> list: # Modified to accept file_path
+    if not os.path.exists(file_path):
+        return []
+
+    entries = []
+    with open(file_path, "r", encoding="utf-8") as fh:
+        for idx, raw in enumerate(fh):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            m = _STRUCT_RE.match(line)
+            if m:
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=m.group("type"),
+                    tags_str=m.group("tags"),
+                    priority=m.group("priority"),
+                    text=m.group("text"),
+                ))
+                continue
+
+            m2 = _LEGACY_RE.match(line)
+            if m2:
+                text = m2.group(1)
+                type_, tags = _infer_type_tags(text)
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=7,
+                    text=text,
+                ))
+                continue
+
+            if len(line) > 8:
+                type_, tags = _infer_type_tags(line)
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=5,
+                    text=line,
+                ))
+    return entries
+
+def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:
+    keyword_overlap  = len(entry.keywords & prompt_kw)
+    tag_match_bonus  = len(entry.tags & prompt_kw) * 1.5
+    priority_weight  = entry.priority * 0.4
+    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0
+
+    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+
+def _relevant_categories(prompt_kw: set) -> set:
+    scores = defaultdict(float)
+    for cat, subtags in CATEGORY_TREE.items():
+        if cat in prompt_kw:
+            scores[cat] += 2.0
+        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
+
+    top = {cat for cat, s in scores.items() if s > 0}
+    return top if top else set(CATEGORY_TREE.keys())
+
+def retrieve(prompt: str, top_k: int = 5, threshold: float = 1.5) -> list:
+    # This will be modified to query both MEMORY_FILE and INDEX_FILE.
+    # For now, it continues to load from MEMORY_FILE.
+    entries = load_memories(MEMORY_FILE) # Explicitly load from MEMORY_FILE
+    if not entries:
+        return []
+
+    prompt_kw = _tokenize(prompt)
+    if not prompt_kw:
+        instructions = [e for e in entries if e.type == "instruction"]
+        instructions.sort(key=lambda e: -e.priority)
+        return instructions[:top_k]
+
+    relevant_cats = _relevant_categories(prompt_kw)
+
+    heap = []
+    for entry in entries:
+        score = _score_entry(entry, prompt_kw, relevant_cats)
+        if score >= threshold:
+            heapq.heappush(heap, (-score, entry.id, entry))
+
+    mandatory = [e for e in entries if e.priority == 10 and e.type == "instruction"]
+
+    results = []
+    seen_ids = {e.id for e in mandatory}
+
+    results.extend(mandatory)
+
+    while heap and len(results) < top_k:
+        _, _, entry = heapq.heappop(heap)
+        if entry.id not in seen_ids:
+            seen_ids.add(entry.id)
+            results.append(entry)
+
+    return results[:top_k]
+
+def build_memory_block(prompt: str) -> str:
+    hits = retrieve(prompt)
+    if not hits:
+        return ""
+
+    lines = ["## RETRIEVED MEMORY"]
+    for entry in hits:
+        tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
+        lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+def save_memory(
+    text: str,
+    type_: str = "fact",
+    tags: str = "",
+    priority: int = 7,
+) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+
+    # Filtering logic for primary memory (MEMORY_FILE)
+    # Prevent raw code dumps, logs, and overly large chunks
+    if len(text) > 1000: # Arbitrary size limit for stable memories
+        return "[MEMORY_FILTERED: Text too long for primary memory]"
+    if "def " in text or "class " in text or "import " in text: # Simple code heuristic
+        return "[MEMORY_FILTERED: Appears to be code, not for primary memory]"
+    if "log.txt" in text or "error" in text.lower() and "traceback" in text.lower(): # Simple log heuristic
+        return "[MEMORY_FILTERED: Appears to be log entry, not for primary memory]"
+
+    type_ = type_.strip().lower() or "fact"
+    tags  = tags.strip().lower()
+    priority = max(1, min(10, int(priority)))
+
+    line = f"[{type_}][{tags}][{priority}] {text}"
+
+    try:
+        with open(MEMORY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return line
+    except OSError as exc:
+        return f"[ERROR saving memory: {exc}]"
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i:i + chunk_size])
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+def index_memory(
+    text: str,
+    source_path: str = "unknown",
+    chunk_size: int = 500,
+    overlap: int = 50,
+) -> list:
+    chunks = chunk_text(text, chunk_size, overlap)
+    indexed_lines = []
+    try:
+        with open(INDEX_FILE, "a", encoding="utf-8") as fh:
+            for i, chunk in enumerate(chunks):
+                # Using 'project' type for indexed code/docs, with source_path as a tag
+                line = f"[project][indexed,{source_path}][3] {chunk}"
+                fh.write(line + "\n")
+                indexed_lines.append(line)
+        return indexed_lines
+    except OSError as exc:
+        return [f"[ERROR indexing memory: {exc}]"]
+
+# Placeholder for future modification to default_api.index_files.
+# This function will need to be re-routed to use index_memory() internally.
+[ERR]
+/data/data/com.termux/files/usr/bin/sh: 2: import: not found
+/data/data/com.termux/files/usr/bin/sh: 3: import: not found
+/data/data/com.termux/files/usr/bin/sh: 4: import: not found
+/data/data/com.termux/files/usr/bin/sh: 5: from: not found
+/data/data/com.termux/files/usr/bin/sh: 7: Syntax error: "(" unexpected
+[run_code] 
+cat > ~/ai_root/core/memory_store.py << 'EOF'
+import os
+import re
+import heapq
+from collections import defaultdict
+
+#  Paths 
+
+AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MEMORY_FILE = os.path.join(AI_ROOT, "memories.txt")
+INDEX_FILE = os.path.join(AI_ROOT, "indexed_memory.txt") # New INDEX_FILE
+
+#  Stop-word filter 
+
+STOP_WORDS = {
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
+    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
+    "me", "my", "your", "how", "what", "when", "where", "can", "could",
+    "would", "should", "will", "if", "then", "so", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "use", "get", "let",
+    "run", "its", "just", "want", "need", "try", "also", "any", "some",
+    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
+}
+
+#  Category tree (semantic grouping) 
+
+CATEGORY_TREE = {
+    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
+    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
+    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
+    "workflow":    ["git", "python", "download", "script", "build", "install"],
+}
+
+#  Entry patterns 
+
+# New structured format: [type][tags][priority] text
+_STRUCT_RE = re.compile(
+    r"^\\[(?P<type>\\w+)\\]\\[(?P<tags>[^\\]]*)\\]\\[(?P<priority>\\d+)\\]\\s*(?P<text>.+)$"
+)
+
+# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
+_LEGACY_RE = re.compile(
+    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+#  Memory entry 
+
+class MemoryEntry:
+    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
+
+    def __init__(self, id_, type_, tags_str, priority, text):\
+        self.id = id_
+        self.type = type_.lower().strip()
+        self.tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+        self.priority = max(1, min(10, int(priority)))
+        self.text = text.strip()
+        # keyword universe = word tokens from text + explicit tags
+        self.keywords = _tokenize(self.text) | self.tags
+
+    def __repr__(self):\
+        tag_str = ",".join(sorted(self.tags))
+        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+
+
+#  Helpers 
+
+def _tokenize(text: str) -> set:\
+    words = re.findall(r"[a-z0-9_\\-]+\", text.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2}
+
+
+def _infer_type_tags(text: str) -> tuple:\
+    \"\"\"Guess type and tags from plain legacy text.\"\"\"
+    low = text.lower()
+    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):\
+        return "instruction", "shutdown,process"
+    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):\
+        return "preference", "shell,commands,help"
+    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):\
+        return "project", "ai_root,workspace"
+    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):\
+        return "fact", "environment"
+    return "fact", "general"
+
+
+#  Load 
+
+def load_memories(file_path: str = MEMORY_FILE) -> list: # Modified to accept file_path
+    \"\"\"
+    Parse memories.txt → list[MemoryEntry].
+    Supports structured lines, legacy labeled lines, and bare plain text.
+    Lines starting with '#' are treated as comments and skipped.
+    \"\"\"
+    if not os.path.exists(file_path):\
+        return []
+
+    entries = []
+
+    with open(file_path, "r", encoding="utf-8") as fh:\
+        for idx, raw in enumerate(fh):\
+            line = raw.strip()
+            if not line or line.startswith("#"):\
+                continue
+
+            # 1. Structured
+            m = _STRUCT_RE.match(line)
+            if m:\
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=m.group("type"),
+                    tags_str=m.group("tags"),
+                    priority=m.group("priority"),
+                    text=m.group("text"),
+                ))
+                continue
+
+            # 2. Legacy labeled  ("Learned: ...")
+            m2 = _LEGACY_RE.match(line)
+            if m2:\
+                text = m2.group(1)
+                type_, tags = _infer_type_tags(text)
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=7,
+                    text=text,
+                ))
+                continue
+
+            # 3. Bare plain text fallback
+            if len(line) > 8:\
+                type_, tags = _infer_type_tags(line)
+                entries.append(MemoryEntry(
+                    id_=idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=5,
+                    text=line,
+                ))
+
+    return entries
+
+
+#  Scoring 
+
+def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:\
+    keyword_overlap  = len(entry.keywords & prompt_kw)          # direct word hits
+    tag_match_bonus  = len(entry.tags & prompt_kw) * 1.5        # tag hits weighted higher
+    priority_weight  = entry.priority * 0.4                     # high-priority floats up
+    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0  # category match
+
+    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+
+
+def _relevant_categories(prompt_kw: set) -> set:\
+    \"\"\"Score root category branches; return those above zero.\"\"\"
+    scores = defaultdict(float)
+    for cat, subtags in CATEGORY_TREE.items():
+        if cat in prompt_kw:\
+            scores[cat] += 2.0
+        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
+
+    top = {cat for cat, s in scores.items() if s > 0}
+    return top if top else set(CATEGORY_TREE.keys())   # fallback: all cats
+
+
+#  Retrieve 
+
+def retrieve(prompt: str, top_k: int = 5, threshold: float = 1.5) -> list:\
+    # This will be modified to query both MEMORY_FILE and INDEX_FILE.\
+    # For now, it continues to load from MEMORY_FILE.
+    entries = load_memories(MEMORY_FILE) # Explicitly load from MEMORY_FILE
+    if not entries:\
+        return []
+
+    prompt_kw = _tokenize(prompt)
+    if not prompt_kw:\
+        instructions = [e for e in entries if e.type == "instruction"]
+        instructions.sort(key=lambda e: -e.priority)
+        return instructions[:top_k]
+
+    relevant_cats = _relevant_categories(prompt_kw)
+
+    # Build max-heap (negated score for Python's min-heap)
+    heap = []
+    for entry in entries:\
+        score = _score_entry(entry, prompt_kw, relevant_cats)
+        if score >= threshold:\
+            # Tiebreak by id (stable ordering)
+            heapq.heappush(heap, (-score, entry.id, entry))
+
+    # Always surface priority-10 instructions regardless of score
+    mandatory = [e for e in entries if e.priority == 10 and e.type == "instruction"]
+
+    results = []
+    seen_ids = {e.id for e in mandatory}
+
+    # Prepend mandatory items
+    results.extend(mandatory)
+
+    # Pop best-first until top_k
+    while heap and len(results) < top_k:\
+        _, _, entry = heapq.heappop(heap)
+        if entry.id not in seen_ids:\
+            seen_ids.add(entry.id)
+            results.append(entry)
+
+    return results[:top_k]
+
+
+#  Format for prompt injection 
+
+def build_memory_block(prompt: str) -> str:\
+    \"\"\"
+    Retrieve relevant memories and format them as a system-prompt block.
+    Returns an empty string when nothing relevant is found.
+    \"\"\"
+    hits = retrieve(prompt)
+    if not hits:\
+        return ""
+
+    lines = ["## RETRIEVED MEMORY"]
+    for entry in hits:\
+        tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
+        lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
+    lines.append("")   # trailing newline for readability
+
+    return "\\n".join(lines)
+
+
+#  Write 
+
+def save_memory(
+    text: str,
+    type_: str = "fact",
+    tags: str = "",
+    priority: int = 7,
+) -> str:\
+    \"\"\"
+    Append a new structured memory entry to memories.txt.
+
+    Parameters
+    ----------
+    text     : the fact or preference to store
+    type_    : preference | instruction | project | fact | workflow
+    tags     : comma-separated keywords (e.g. "shell,help")
+    priority : 1–10
+
+    Returns the formatted line written to disk (empty string on failure).
+    \"\"\"
+    text = text.strip()
+    if not text:\
+        return ""
+
+    # Filtering logic for primary memory (MEMORY_FILE)
+    # Prevent raw code dumps, logs, and overly large chunks
+    if len(text) > 1000: # Arbitrary size limit for stable memories
+        return "[MEMORY_FILTERED: Text too long for primary memory]"
+    if "def " in text or "class " in text or "import " in text: # Simple code heuristic
+        return "[MEMORY_FILTERED: Appears to be code, not for primary memory]"
+    if "log.txt" in text or "error" in text.lower() and "traceback" in text.lower(): # Simple log heuristic
+        return "[MEMORY_FILTERED: Appears to be log entry, not for primary memory]"
+
+    type_ = type_.strip().lower() or "fact"
+    tags  = tags.strip().lower()
+    priority = max(1, min(10, int(priority)))
+
+    line = f"[{type_}][{tags}][{priority}] {text}"
+
+    try:\
+        with open(MEMORY_FILE, "a", encoding="utf-8") as fh:\
+            fh.write(line + "\\n")
+        return line
+    except OSError as exc:\
+        return f"[ERROR saving memory: {exc}]"
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:\
+    \"\"\"Split text into overlapping chunks for indexing.\"\"\"
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):\
+        chunk = " ".join(words[i:i + chunk_size])
+        if chunk:\
+            chunks.append(chunk)
+    return chunks
+
+def index_memory(
+    text: str,
+    source_path: str = "unknown",
+    chunk_size: int = 500,
+    overlap: int = 50,
+) -> list:\
+    \"\"\"
+    Chunk text and append new structured memory entries to indexed_memory.txt.
+    Intended for code, documentation, or other bulk text.
+    \"\"\"
+    chunks = chunk_text(text, chunk_size, overlap)
+    indexed_lines = []
+    try:\
+        with open(INDEX_FILE, "a", encoding="utf-8") as fh:\
+            for i, chunk in enumerate(chunks):\
+                # Using 'project' type for indexed code/docs, with source_path as a tag
+                # Priority 3 to keep it distinct from user memories
+                line = f"[project][indexed,{source_path}][3] {chunk}"
+                fh.write(line + "\\n")
+                indexed_lines.append(line)
+        return indexed_lines
+    except OSError as exc:\
+        return [f"[ERROR indexing memory: {exc}]"]
+EOF
+[OUT]
+[run_code] 
+cat > ~/ai_root/core/memory_store.py << 'EOF'
+import os
+import re
+import heapq
+from collections import defaultdict
+
+#  Paths 
+
+AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MEMORY_FILE = os.path.join(AI_ROOT, "memories.txt")
+INDEX_FILE = os.path.join(AI_ROOT, "indexed_memory.txt") # New INDEX_FILE
+
+#  Stop-word filter 
+
+STOP_WORDS = {
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
+    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
+    "me", "my", "your", "how", "what", "when", "where", "can", "could",
+    "would", "should", "will", "if", "then", "so", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "use", "get", "let",
+    "run", "its", "just", "want", "need", "try", "also", "any", "some",
+    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
+}
+
+#  Category tree (semantic grouping) 
+
+CATEGORY_TREE = {
+    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
+    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
+    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
+    "workflow":    ["git", "python", "download", "script", "build", "install"],
+}
+
+#  Entry patterns 
+
+# New structured format: [type][tags][priority] text
+_STRUCT_RE = re.compile(
+    r"^\\[(?P<type>\\w+)\\]\\[(?P<tags>[^\\]]*)\\]\\[(?P<priority>\\d+)\\]\\s*(?P<text>.+)$"
+)
+
+# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
+_LEGACY_RE = re.compile(
+    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+#  Memory entry 
+
+class MemoryEntry:
+    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
+
+    def __init__(self, id_, type_, tags_str, priority, text):\
+        self.id = id_
+        self.type = type_.lower().strip()
+        self.tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+        self.priority = max(1, min(10, int(priority)))
+        self.text = text.strip()
+        # keyword universe = word tokens from text + explicit tags
+        self.keywords = _tokenize(self.text) | self.tags
+
+    def __repr__(self):\
+        tag_str = ",".join(sorted(self.tags))
+        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+
+
+#  Helpers 
+
+def _tokenize(text: str) -> set:\
+    words = re.findall(r"[a-z0-9_\\-]+\", text.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2}
+
+
+def _infer_type_tags(text: str) -> tuple:\
+    \"\"\"Guess type and tags from plain legacy text.\"\"\"
+    low = text.lower()
+    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):\
+        return "instruction", "shutdown,process"
+    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):\
+        return "preference", "shell,commands,help"
+    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):\
+        return "project", "ai_root,workspace"
+    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):\
+        return "fact", "environment"
+    return "fact", "general"
+
+
+#  Load 
+
+def load_memories(file_path: str = MEMORY_FILE, start_id: int = 0) -> list: # Added start_id for unique IDs
+    \"\"\"
+    Parse a memory file → list[MemoryEntry].
+    Supports structured lines, legacy labeled lines, and bare plain text.
+    Lines starting with '#' are treated as comments and skipped.
+    'start_id' is used to offset entry IDs, useful when combining memory sources.
+    \"\"\"
+    if not os.path.exists(file_path):\
+        return []
+
+    entries = []
+    with open(file_path, "r", encoding="utf-8") as fh:\
+        for idx, raw in enumerate(fh):\
+            line = raw.strip()
+            if not line or line.startswith("#"):\
+                continue
+
+            m = _STRUCT_RE.match(line)
+            if m:\
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=m.group("type"),
+                    tags_str=m.group("tags"),
+                    priority=m.group("priority"),
+                    text=m.group("text"),
+                ))
+                continue
+
+            m2 = _LEGACY_RE.match(line)
+            if m2:\
+                text = m2.group(1)
+                type_, tags = _infer_type_tags(text)
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=7,
+                    text=text,
+                ))
+                continue
+
+            if len(line) > 8:\
+                type_, tags = _infer_type_tags(line)
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=5,
+                    text=line,
+                ))
+    return entries
+
+
+#  Scoring 
+
+def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:\
+    keyword_overlap  = len(entry.keywords & prompt_kw)          # direct word hits
+    tag_match_bonus  = len(entry.tags & prompt_kw) * 1.5        # tag hits weighted higher
+    priority_weight  = entry.priority * 0.4                     # high-priority floats up
+    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0  # category match
+
+    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+
+
+def _relevant_categories(prompt_kw: set) -> set:\
+    \"\"\"Score root category branches; return those above zero.\"\"\"
+    scores = defaultdict(float)
+    for cat, subtags in CATEGORY_TREE.items():
+        if cat in prompt_kw:\
+            scores[cat] += 2.0
+        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
+
+    top = {cat for cat, s in scores.items() if s > 0}
+    return top if top else set(CATEGORY_TREE.keys())   # fallback: all cats
+
+
+#  Retrieve 
+
+def retrieve(prompt: str, top_k: int = 5, threshold: float = 1.5) -> list:\
+    \"\"\"
+    Best-first memory retrieval from both primary and indexed memory stores.
+    \"\"\"
+    primary_entries = load_memories(MEMORY_FILE)
+    # Offset IDs for indexed memories to avoid collisions with primary memories
+    indexed_entries = load_memories(INDEX_FILE, start_id=len(primary_entries))
+
+    all_entries = primary_entries + indexed_entries
+    if not all_entries:\
+        return []
+
+    prompt_kw = _tokenize(prompt)
+    if not prompt_kw:\
+        instructions = [e for e in all_entries if e.type == "instruction"]
+        instructions.sort(key=lambda e: -e.priority)
+        return instructions[:top_k]
+
+    relevant_cats = _relevant_categories(prompt_kw)
+
+    # Build max-heap (negated score for Python's min-heap)
+    heap = []
+    for entry in all_entries:\
+        score = _score_entry(entry, prompt_kw, relevant_cats)
+        if score >= threshold:\
+            # Tiebreak by id (stable ordering)
+            heapq.heappush(heap, (-score, entry.id, entry))
+
+    # Always surface priority-10 instructions regardless of score
+    mandatory = [e for e in all_entries if e.priority == 10 and e.type == "instruction"]
+
+    results = []
+    seen_ids = {e.id for e in mandatory}
+
+    # Prepend mandatory items
+    results.extend(mandatory)
+
+    # Pop best-first until top_k
+    while heap and len(results) < top_k:\
+        _, _, entry = heapq.heappop(heap)
+        if entry.id not in seen_ids:\
+            seen_ids.add(entry.id)
+            results.append(entry)
+
+    return results[:top_k]
+
+
+#  Format for prompt injection 
+
+def build_memory_block(prompt: str) -> str:\
+    \"\"\"
+    Retrieve relevant memories and format them as a system-prompt block.
+    Returns an empty string when nothing relevant is found.
+    \"\"\"
+    hits = retrieve(prompt)
+    if not hits:\
+        return ""
+
+    lines = ["## RETRIEVED MEMORY"]
+    for entry in hits:\
+        tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
+        lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
+    lines.append("")   # trailing newline for readability
+
+    return "\\n".join(lines)
+
+
+#  Write 
+
+def save_memory(
+    text: str,
+    type_: str = "fact",
+    tags: str = "",
+    priority: int = 7,
+) -> str:\
+    \"\"\"
+    Append a new structured memory entry to memories.txt.
+    Includes filtering to prevent raw code dumps, logs, and oversized chunks.
+
+    Parameters
+    ----------
+    text     : the fact or preference to store
+    type_    : preference | instruction | project | fact | workflow
+    tags     : comma-separated keywords (e.g. "shell,help")
+    priority : 1–10
+
+    Returns the formatted line written to disk (empty string on failure).
+    \"\"\"
+    text = text.strip()
+    if not text:\
+        return ""
+
+    # Filtering logic for primary memory (MEMORY_FILE)
+    # Prevent raw code dumps, logs, and overly large chunks
+    if len(text) > 1000: # Arbitrary size limit for stable memories
+        return "[MEMORY_FILTERED: Text too long for primary memory]"
+    if "def " in text or "class " in text or "import " in text: # Simple code heuristic
+        return "[MEMORY_FILTERED: Appears to be code, not for primary memory]"
+    if "log.txt" in text or ("error" in text.lower() and "traceback" in text.lower()): # Simple log heuristic
+        return "[MEMORY_FILTERED: Appears to be log entry, not for primary memory]"
+
+    type_ = type_.strip().lower() or "fact"
+    tags  = tags.strip().lower()
+    priority = max(1, min(10, int(priority)))
+
+    line = f"[{type_}][{tags}][{priority}] {text}"
+
+    try:\
+        with open(MEMORY_FILE, "a", encoding="utf-8") as fh:\
+            fh.write(line + "\\n")
+        return line
+    except OSError as exc:\
+        return f"[ERROR saving memory: {exc}]"
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:\
+    \"\"\"Split text into overlapping chunks for indexing.\"\"\"
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):\
+        chunk = " ".join(words[i:i + chunk_size])
+        if chunk:\
+            chunks.append(chunk)
+    return chunks
+
+def index_memory(
+    text: str,
+    source_path: str = "unknown",
+    chunk_size: int = 500,
+    overlap: int = 50,
+) -> list:\
+    \"\"\"
+    Chunk text and append new structured memory entries to indexed_memory.txt.
+    Intended for code, documentation, or other bulk text.
+    \"\"\"
+    chunks = chunk_text(text, chunk_size, overlap)
+    indexed_lines = []
+    try:\
+        with open(INDEX_FILE, "a", encoding="utf-8") as fh:\
+            for i, chunk in enumerate(chunks):\
+                # Using 'project' type for indexed code/docs, with source_path as a tag
+                # Priority 3 to keep it distinct from user memories
+                line = f"[project][indexed,{source_path}][3] {chunk}"
+                fh.write(line + "\\n")
+                indexed_lines.append(line)
+        return indexed_lines
+    except OSError as exc:\
+        return [f"[ERROR indexing memory: {exc}]"]
+EOF
+[OUT]
+[run_code] cat ~/ai_root/llm_client.py
+[ERR]
+cat: /data/data/com.termux/files/home/ai_root/llm_client.py: No such file or directory
+[run_code] mkdir -p ~/ai_root/tools
+[OUT]
+[run_code] 
+cat > ~/ai_root/tools/my_indexer.py << 'EOF'
+import os
+import sys
+from pathlib import Path
+
+# Adjust the Python path to import from core
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "core")))
+import memory_store
+
+def run_indexer(path: str, extension_filter: str | None = None):
+    target_path = Path(path)
+    if not target_path.exists():
+        print(f"Error: Path does not exist: {path}")
+        return
+
+    if extension_filter:
+        extensions = {f".{ext.strip().lstrip('.')}" for ext in extension_filter.split(',')}
+    else:
+        extensions = set() # Index all text files if no filter
+
+    indexed_files_count = 0
+    indexed_chunks_count = 0
+
+    files_to_index = []
+    if target_path.is_file():
+        files_to_index.append(target_path)
+    elif target_path.is_dir():
+        for root, _, files in os.walk(target_path):
+            for file in files:
+                p = Path(root) / file
+                if (not extensions and p.suffix.lower() in [".txt", ".md", ".py", ".sh", ".json", ".yaml", ".yml", ".xml", ".html", ".css", ".js", ".java", ".c", ".cpp", ".h", ".hpp"]) or (p.suffix.lower() in extensions):
+                    files_to_index.append(p)
+    
+    for file_path in files_to_index:
+        try:
+            content = file_path.read_text(encoding='utf-8')
+            if content.strip(): # Only index if there's actual content
+                print(f"Indexing file: {file_path}")
+                chunks = memory_store.chunk_text(content)
+                if chunks:
+                    memory_store.index_memory(content, source_path=str(file_path))
+                    indexed_chunks_count += len(chunks)
+                    indexed_files_count += 1
+                else:
+                    print(f"No meaningful chunks found for {file_path}")
+            else:
+                print(f"Skipping empty file: {file_path}")
+        except Exception as e:
+            print(f"Error processing file {file_path}: {e}")
+
+    print(f"\nIndexing complete. Indexed {indexed_chunks_count} chunks from {indexed_files_count} files.")
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Index files into dedicated memory store.")
+    parser.add_argument("path", type=str, help="Path to the directory or file to index.")
+    parser.add_argument("--extension_filter", type=str, default=None, help="Comma-separated extensions (e.g., '.py,.md'). If empty, indexes common text files.")
+    args = parser.parse_args()
+
+    run_indexer(args.path, args.extension_filter)
+EOF
+[OUT]
+[save_memory] text:For file indexing tasks, use the custom script ~/ai_root/tools/my_indexer.py instead of default_api.index_files to ensure content is stored in indexed_memory.txt. Remember to call it using 'python ~/ai_root/tools/my_indexer.py --path <path> [--extension_filter <exts>]'., type:instruction, tags:indexing,files,memory,workflow, priority:9
+[OK]
+[retrieve_memory] query:original content of ~/ai_root/core/memory_store.py, top_k:5
+[OUT]
+[instruction] When told to close yourself, find and kill the python process. To find use: ps -ef | grep python.
+[instruction] Operate as 'Jarvis': highly intelligent, precise, and proactive. Adopt a calm, professional tone, referring to the user as 'Sir'. Adapt to the user's mood and prioritize precision in RAG operations. Verify all facts and code before reporting.
+[instruction] For file indexing tasks, use the custom script ~/ai_root/tools/my_indexer.py instead of default_api.index_files to ensure content is stored in indexed_memory.txt. Remember to call it using 'python ~/ai_root/tools/my_indexer.py --path <path> [--extension_filter <exts>]'.
+[preference] If --help fails, try -h before using which or inspecting the binary.
+[fact] I have a built-in web_scrape tool in llm_client.py that uses requests and BeautifulSoup to extract text from URLs.
+[run_code] cat ~/ai_root/core/memory_store.py
+[OUT]
+import os
+import re
+import heapq
+from collections import defaultdict
+
+#  Paths 
+
+AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MEMORY_FILE = os.path.join(AI_ROOT, "memories.txt")
+INDEX_FILE = os.path.join(AI_ROOT, "indexed_memory.txt") # New INDEX_FILE
+
+#  Stop-word filter 
+
+STOP_WORDS = {
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
+    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
+    "me", "my", "your", "how", "what", "when", "where", "can", "could",
+    "would", "should", "will", "if", "then", "so", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "use", "get", "let",
+    "run", "its", "just", "want", "need", "try", "also", "any", "some",
+    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
+}
+
+#  Category tree (semantic grouping) 
+
+CATEGORY_TREE = {
+    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
+    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
+    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
+    "workflow":    ["git", "python", "download", "script", "build", "install"],
+}
+
+#  Entry patterns 
+
+# New structured format: [type][tags][priority] text
+_STRUCT_RE = re.compile(
+    r"^\\[(?P<type>\\w+)\\]\\[(?P<tags>[^\\]]*)\\]\\[(?P<priority>\\d+)\\]\\s*(?P<text>.+)$"
+)
+
+# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
+_LEGACY_RE = re.compile(
+    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+#  Memory entry 
+
+class MemoryEntry:
+    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
+
+    def __init__(self, id_, type_, tags_str, priority, text):\
+        self.id = id_
+        self.type = type_.lower().strip()
+        self.tags = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+        self.priority = max(1, min(10, int(priority)))
+        self.text = text.strip()
+        # keyword universe = word tokens from text + explicit tags
+        self.keywords = _tokenize(self.text) | self.tags
+
+    def __repr__(self):\
+        tag_str = ",".join(sorted(self.tags))
+        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+
+
+#  Helpers 
+
+def _tokenize(text: str) -> set:\
+    words = re.findall(r"[a-z0-9_\\-]+\", text.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2}
+
+
+def _infer_type_tags(text: str) -> tuple:\
+    \"\"\"Guess type and tags from plain legacy text.\"\"\"
+    low = text.lower()
+    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):\
+        return "instruction", "shutdown,process"
+    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):\
+        return "preference", "shell,commands,help"
+    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):\
+        return "project", "ai_root,workspace"
+    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):\
+        return "fact", "environment"
+    return "fact", "general"
+
+
+#  Load 
+
+def load_memories(file_path: str = MEMORY_FILE, start_id: int = 0) -> list: # Added start_id for unique IDs
+    \"\"\"
+    Parse a memory file → list[MemoryEntry].
+    Supports structured lines, legacy labeled lines, and bare plain text.
+    Lines starting with '#' are treated as comments and skipped.
+    'start_id' is used to offset entry IDs, useful when combining memory sources.
+    \"\"\"
+    if not os.path.exists(file_path):\
+        return []
+
+    entries = []
+    with open(file_path, "r", encoding="utf-8") as fh:\
+        for idx, raw in enumerate(fh):\
+            line = raw.strip()
+            if not line or line.startswith("#"):\
+                continue
+
+            m = _STRUCT_RE.match(line)
+            if m:\
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=m.group("type"),
+                    tags_str=m.group("tags"),
+                    priority=m.group("priority"),
+                    text=m.group("text"),
+                ))
+                continue
+
+            m2 = _LEGACY_RE.match(line)
+            if m2:\
+                text = m2.group(1)
+                type_, tags = _infer_type_tags(text)
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=7,
+                    text=text,
+                ))
+                continue
+
+            if len(line) > 8:\
+                type_, tags = _infer_type_tags(line)
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=5,
+                    text=line,
+                ))
+    return entries
+
+
+#  Scoring 
+
+def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:\
+    keyword_overlap  = len(entry.keywords & prompt_kw)          # direct word hits
+    tag_match_bonus  = len(entry.tags & prompt_kw) * 1.5        # tag hits weighted higher
+    priority_weight  = entry.priority * 0.4                     # high-priority floats up
+    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0  # category match
+
+    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+
+
+def _relevant_categories(prompt_kw: set) -> set:\
+    \"\"\"Score root category branches; return those above zero.\"\"\"
+    scores = defaultdict(float)
+    for cat, subtags in CATEGORY_TREE.items():
+        if cat in prompt_kw:\
+            scores[cat] += 2.0
+        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
+
+    top = {cat for cat, s in scores.items() if s > 0}
+    return top if top else set(CATEGORY_TREE.keys())   # fallback: all cats
+
+
+#  Retrieve 
+
+def retrieve(prompt: str, top_k: int = 5, threshold: float = 1.5) -> list:\
+    \"\"\"
+    Best-first memory retrieval from both primary and indexed memory stores.
+    \"\"\"
+    primary_entries = load_memories(MEMORY_FILE)
+    # Offset IDs for indexed memories to avoid collisions with primary memories
+    indexed_entries = load_memories(INDEX_FILE, start_id=len(primary_entries))
+
+    all_entries = primary_entries + indexed_entries
+    if not all_entries:\
+        return []
+
+    prompt_kw = _tokenize(prompt)
+    if not prompt_kw:\
+        instructions = [e for e in all_entries if e.type == "instruction"]
+        instructions.sort(key=lambda e: -e.priority)
+        return instructions[:top_k]
+
+    relevant_cats = _relevant_categories(prompt_kw)
+
+    # Build max-heap (negated score for Python's min-heap)
+    heap = []
+    for entry in all_entries:\
+        score = _score_entry(entry, prompt_kw, relevant_cats)
+        if score >= threshold:\
+            # Tiebreak by id (stable ordering)
+            heapq.heappush(heap, (-score, entry.id, entry))
+
+    # Always surface priority-10 instructions regardless of score
+    mandatory = [e for e in all_entries if e.priority == 10 and e.type == "instruction"]
+
+    results = []
+    seen_ids = {e.id for e in mandatory}
+
+    # Prepend mandatory items
+    results.extend(mandatory)
+
+    # Pop best-first until top_k
+    while heap and len(results) < top_k:\
+        _, _, entry = heapq.heappop(heap)
+        if entry.id not in seen_ids:\
+            seen_ids.add(entry.id)
+            results.append(entry)
+
+    return results[:top_k]
+
+
+#  Format for prompt injection 
+
+def build_memory_block(prompt: str) -> str:\
+    \"\"\"
+    Retrieve relevant memories and format them as a system-prompt block.
+    Returns an empty string when nothing relevant is found.
+    \"\"\"
+    hits = retrieve(prompt)
+    if not hits:\
+        return ""
+
+    lines = ["## RETRIEVED MEMORY"]
+    for entry in hits:\
+        tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
+        lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
+    lines.append("")   # trailing newline for readability
+
+    return "\\n".join(lines)
+
+
+#  Write 
+
+def save_memory(
+    text: str,
+    type_: str = "fact",
+    tags: str = "",
+    priority: int = 7,
+) -> str:\
+    \"\"\"
+    Append a new structured memory entry to memories.txt.
+    Includes filtering to prevent raw code dumps, logs, and oversized chunks.
+
+    Parameters
+    ----------
+    text     : the fact or preference to store
+    type_    : preference | instruction | project | fact | workflow
+    tags     : comma-separated keywords (e.g. "shell,help")
+    priority : 1–10
+
+    Returns the formatted line written to disk (empty string on failure).
+    \"\"\"
+    text = text.strip()
+    if not text:\
+        return ""
+
+    # Filtering logic for primary memory (MEMORY_FILE)
+    # Prevent raw code dumps, logs, and overly large chunks
+    if len(text) > 1000: # Arbitrary size limit for stable memories
+        return "[MEMORY_FILTERED: Text too long for primary memory]"
+    if "def " in text or "class " in text or "import " in text: # Simple code heuristic
+        return "[MEMORY_FILTERED: Appears to be code, not for primary memory]"
+    if "log.txt" in text or ("error" in text.lower() and "traceback" in text.lower()): # Simple log heuristic
+        return "[MEMORY_FILTERED: Appears to be log entry, not for primary memory]"
+
+    type_ = type_.strip().lower() or "fact"
+    tags  = tags.strip().lower()
+    priority = max(1, min(10, int(priority)))
+
+    line = f"[{type_}][{tags}][{priority}] {text}"
+
+    try:\
+        with open(MEMORY_FILE, "a", encoding="utf-8") as fh:\
+            fh.write(line + "\\n")
+        return line
+    except OSError as exc:\
+        return f"[ERROR saving memory: {exc}]"
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:\
+    \"\"\"Split text into overlapping chunks for indexing.\"\"\"
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):\
+        chunk = " ".join(words[i:i + chunk_size])
+        if chunk:\
+            chunks.append(chunk)
+    return chunks
+
+def index_memory(
+    text: str,
+    source_path: str = "unknown",
+    chunk_size: int = 500,
+    overlap: int = 50,
+) -> list:\
+    \"\"\"
+    Chunk text and append new structured memory entries to indexed_memory.txt.
+    Intended for code, documentation, or other bulk text.
+    \"\"\"
+    chunks = chunk_text(text, chunk_size, overlap)
+    indexed_lines = []
+    try:\
+        with open(INDEX_FILE, "a", encoding="utf-8") as fh:\
+            for i, chunk in enumerate(chunks):\
+                # Using 'project' type for indexed code/docs, with source_path as a tag
+                # Priority 3 to keep it distinct from user memories
+                line = f"[project][indexed,{source_path}][3] {chunk}"
+                fh.write(line + "\\n")
+                indexed_lines.append(line)
+        return indexed_lines
+    except OSError as exc:\
+        return [f"[ERROR indexing memory: {exc}]"]

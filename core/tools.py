@@ -194,7 +194,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
         out = f"[BLOCKED] {reason}"
         log_write(f"[OUT] {out}")
         return out
-    printable_bash = out if  len("\n".join(out.splitlines()[:20])) < 500 else out[:500]+"\n .\n .\n ."
+    printable_bash = bash if  len("\n".join(bash.splitlines()[:20])) < 500 else bash[:500]+"\n    .\n    .\n    ."
     try:
         print(f"{GRAY}[EXECUTING] {printable_bash}{RESET}")
 
@@ -210,7 +210,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
         out = result.stdout.strip()
         err = result.stderr.strip()
 
-        printable_out = out if  len("\n".join(out.splitlines()[:20])) < 500 else out[:500]+"\n .\n .\n ."
+        printable_out = out if  len("\n".join(out.splitlines()[:20])) < 500 else out[:500]+"\n    .\n    .\n    ."
 
         if err and out:
             print(f"{GRAY}[OUT]\n{printable_out}\n{RED}[ERR]\n{err}{RESET}")

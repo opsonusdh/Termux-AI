@@ -14,7 +14,16 @@ API_KEYS = open(
     os.path.join(AI_ROOT, "api.keys"), "r", encoding="utf-8"
 ).read().splitlines()
 
-MODEL = "gemini-1.5-flash"
+MODELS = [
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+
+]
 
 clients = [
     OpenAI(
@@ -27,7 +36,8 @@ clients = [
 
 def ask_ai(prompt: str) -> str:
     ind = 0
-    problematic = set()
+    model_ind = 0
+    problematic = []
     api_keys_len = len(API_KEYS)
 
     #  READ: retrieve and inject memories 
@@ -48,7 +58,7 @@ def ask_ai(prompt: str) -> str:
 
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=MODELS[model_ind],
                 messages=messages,
                 tools=TOOLS_DESCRIPTION,
                 tool_choice="auto",
@@ -85,13 +95,8 @@ def ask_ai(prompt: str) -> str:
                         )
                     elif tool_name == "web_scrape":
                         result = web_scrape(
-                            url=args.get("url", ""), 
-                            selector=args.get("selector", None)
-                        )
-                    elif tool_name == "index_files":
-                        result = index_files(
-                            path=args.get("path", ""), 
-                            extension_filter=args.get("extension_filter", "")
+                            url=args.get("url", ""),
+                            selector=args.get("selector", None),
                         )
 
                     else:
@@ -114,27 +119,39 @@ def ask_ai(prompt: str) -> str:
         except Exception as e:
             msg_str = str(e)
 
-            # Detect rate limits or temporary outages
-            is_rate_limit = any(x in msg_str for x in ["429", "RESOURCE_EXHAUSTED", "rate limit"])
-            is_overload = any(x in msg_str.lower() for x in ["503", "unavailable", "overloaded"])
-
-            if is_rate_limit or is_overload:
-                problematic.add(ind)
+            if (
+                "429" in msg_str
+                or "RESOURCE_EXHAUSTED" in msg_str
+                or "rate limit" in msg_str.lower()
+            ):
+                problematic.append(API_KEYS[ind])
                 prob_len = len(problematic)
-                keys_left = api_keys_len - prob_len
-                
-                status_msg = "Exhausted" if is_rate_limit else "Overloaded"
-                print(f"{RED}Model {status_msg}. Keys left: {max(0, keys_left)}.{RESET}")
+                print(
+                    f"{RED}Model exhausted. "
+                    f"Keys left: {api_keys_len - prob_len}. "
+                    f"Slowing down and retrying.{RESET}"
+                )
+                if prob_len == api_keys_len:
+                    problematic = []
+                    if model_ind >= len(MODELS)-1:
+                        model_ind = 0
+                        time.sleep(35)
+                    else:
+                        model_ind += 1
+                        time.sleep(5)
 
-                if prob_len >= api_keys_len:
-                    print(f"{RED}All keys exhausted. Cooling down for 35s...{RESET}")
-                    problematic.clear()
-                    time.sleep(35)
-                else:
-                    time.sleep(2)
+            elif (
+                "503" in msg_str
+                or "UNAVAILABLE" in msg_str
+                or "overloaded" in msg_str.lower()
+            ):
+                problematic.append(API_KEYS[ind])
+                print(f"{RED}Model overloaded. Retrying shortly.{RESET}")
+                time.sleep(5)
+
             else:
-                # Critical error, re-raise
                 raise
 
-            # Move to next key
-            ind = (ind + 1) % api_keys_len
+            ind += 1
+            if ind >= api_keys_len:
+                ind = 0

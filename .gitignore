@@ -3,5 +3,5 @@ api.keys
 config*
 Termux-STT
 workspace
-log*
+log.txt
 *.pyc
