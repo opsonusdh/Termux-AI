@@ -1417,7 +1417,7 @@ def sleep_mode():
     print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
 
     while True:
-        heard = listen(once=True, cleaned=False)
+        heard = listen(once=True, cleaned=False, calibrate_once=True)
 
         if not heard:
             continue

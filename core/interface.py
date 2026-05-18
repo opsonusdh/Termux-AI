@@ -86,7 +86,7 @@ def chat_loop():
         else:
             print(f"{GRAY}[Listening...]{RESET}")
             try:
-                user_input = listen(once=True)
+                user_input = listen(once=True, calibrate_once=True)
                 if user_input:
                     print(f"\nYOU (Voice) > {user_input}")
                 else:

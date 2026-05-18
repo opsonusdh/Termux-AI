@@ -1,352 +1,126 @@
 # Contributing to Termux-AI
 
-Fork the repo  
-Create a new branch  
-Make changes  
-Submit a pull request  
+Thanks for helping improve **Termux-AI** and its terminal agent, **Orion**. This project is built for controlled autonomy inside Termux, not for random chaos disguised as productivity.
 
-Autonomous chaos is allowed.  
-Uncontrolled chaos is not.
+## Getting Started
 
-Thanks for taking the time to contribute.
-
----
-
-# Getting Started
-
-## 1. Fork this repository
-
-Fork the project to your GitHub account.
+1. Fork the repository
+2. Create a branch for your change
+3. Make the smallest clean change that solves the problem
+4. Test it in Termux
+5. Open a pull request
 
 ---
 
-## 2. Clone your fork
+## What This Project Cares About
 
-```bash
-git clone https://github.com/YOUR_USERNAME/Termux-AI.git
-```
+Termux-AI is centered around:
+- terminal-based orchestration
+- validated command execution
+- memory retrieval
+- voice input and wake-word handling
+- safe interaction with local files
+- clean terminal rendering
 
----
-
-## 3. Enter the project directory
-
-```bash
-cd Termux-AI
-```
+Changes should respect the existing architecture instead of wrestling it into abstraction soup.
 
 ---
 
-## 4. Create a new branch
+## Before You Submit
 
-```bash
-git checkout -b your-feature-name
-```
-
-Examples:
-
-```bash
-git checkout -b improve-sandbox
-git checkout -b fix-command-parser
-git checkout -b add-memory-tools
-```
+Please check that your change:
+- works on a real Termux environment
+- does not break `core/interface.py`, `core/tools.py`, or `core/permissions.py`
+- does not weaken command validation
+- does not write into protected areas unless intended
+- keeps behavior understandable and predictable
 
 ---
 
-## 5. Make your changes
+## Code Style
 
-Keep changes focused and understandable.
-
-One pull request should ideally contain:
-- one feature
-- one fix
-- or one improvement area
-
-Not:
-- 17 unrelated rewrites
-- dependency migrations
-- a philosophical reinvention of shell execution
+- Keep code readable and explicit
+- Prefer small functions over clever sprawl
+- Avoid unnecessary dependencies
+- Keep shell commands validated and controlled
+- Do not add silent side effects
+- Match the project’s current tone and structure where reasonable
 
 ---
 
-## 6. Push your branch
+## Working With Core Components
 
-```bash
-git push origin your-feature-name
-```
+Important files:
+
+- `core/interface.py`
+  Handles the user loop, config loading, and voice mode.
+
+- `core/tools.py`
+  Handles tool dispatch, memory, logging, and external actions.
+
+- `core/permissions.py`
+  Defines what the agent may do without asking first.
+
+- `config.json`
+  Controls runtime settings such as STT path and TTS mode.
+
+- `memories.txt`
+  Stores persistent instruction-style memory.
+
+If your change touches these, test carefully. Autonomous systems already have enough opportunities to embarrass everyone.
 
 ---
 
-## 7. Open a Pull Request
+## Good Pull Requests
 
-Describe:
+A good pull request is:
+- focused on one thing
+- described clearly
+- tested with real input
+- free of unrelated edits
+- easy to review
+
+If fixing a bug, include:
+- what broke
+- how to reproduce it
 - what changed
-- why it changed
-- possible side effects
-- security implications if relevant
+- how you tested it
 
 ---
 
-# Project Structure
-
-```text
-ai_root/
-├── core/
-│   ├── interface.py
-│   ├── llm_client.py
-│   ├── executor.py
-│   ├── permissions.py
-│   └── prompt.txt
-├── workspace/
-├── memories.txt
-├── log.txt
-└── api.keys
-```
-
----
-
-# Core Architecture
-
-## `interface.py`
-Main interaction loop.
-
-Responsibilities:
-- user interaction
-- command extraction
-- reasoning loop
-- execution pipeline
-
----
-
-## `llm_client.py`
-Handles:
-- Gemini SDK
-- API key rotation
-- retries
-- tool calling
-
----
-
-## `executor.py`
-Responsible for:
-- command execution
-- logging
-- timeout handling
-- output collection
-
----
-
-## `permissions.py`
-Sandbox enforcement layer.
-
-Controls:
-- filesystem access
-- protected directories
-- dangerous commands
-- permission gating
-
----
-
-# Sandbox Rules
-
-The AI may:
-- read files globally
-- write inside `~/ai_root`
-- execute safe shell commands
-
-The AI may NOT:
-- modify `~/ai_root/core`
-- modify system files
-- run privileged commands
-- bypass permission checks
-
-without explicit user approval.
-
-Any PR weakening these protections will likely be rejected.
-
-Because “the AI deleted my environment” is not a bug report anyone enjoys reading.
-
----
-
-# Adding Features
-
-## Good Contribution Areas
-
-### Sandbox Improvements
-Examples:
-- safer command parsing
-- better path validation
-- redirect handling
-
----
-
-### AI Improvements
-Examples:
-- better context trimming
-- memory summarization
-- retry optimization
-- command planning
-
----
-
-### Tooling
-Examples:
-- internet search tools
-- file editing tools
-- execution previews
-- safer write operations
-
----
-
-### Documentation
-Examples:
-- setup guides
-- architecture explanations
-- examples
-- troubleshooting
-
----
-
-# Code Style
-
-## General Rules
-
-- Keep functions small
-- Prefer readable logic
-- Avoid unnecessary abstraction
-- Comment unusual behavior
-- Fail loudly when needed
-
----
-
-## Avoid
-
-```python
-x = a if b else c if d else e
-```
-
-Prefer clarity over compactness.
-
-Future contributors should not need archaeological training to understand the codebase.
-
----
-
-# Dependencies
-
-Avoid unnecessary dependencies.
-
-Before adding a package:
-- explain why it is needed
-- explain why built-in modules are insufficient
-
-Heavy dependencies for tiny tasks are discouraged.
-
----
-
-# Testing
-
-Test changes manually in Termux before opening a PR.
-
-Recommended environment:
-- Termux
-- Python 3.11+
-- Android API 34
-
----
-
-# Installation Notes
-
-Before installing dependencies in Termux:
-
-```bash
-export ANDROID_API=34
-```
-
-Install required package:
-
-```bash
-pip install google-genai
-```
-
----
-
-# Commit Messages
-
-Good:
-
-```text
-fix heredoc execution handling
-improve sandbox validation
-add timeout retry logic
-```
-
-Bad:
-
-```text
-update
-fix
-works now
-final_final_real
-```
-
-Git history is documentation, not a panic diary.
-
----
-
-# Reporting Bugs
+## Reporting Bugs
 
 Open an issue and include:
-
-- what you did
-- expected behavior
-- actual behavior
-- logs/errors
-- Python version
-- Termux version
-
-Useful bug reports save everyone time.
+- what you tried
+- what you expected
+- what happened instead
+- relevant terminal output
+- your Termux and Python versions
 
 ---
 
-# Feature Requests
+## Suggesting Features
 
-When suggesting features:
-- explain the use case
-- explain safety implications
-- explain why it belongs in this project
+Feature requests are welcome, especially if they improve:
+- memory behavior
+- permission handling
+- terminal rendering
+- voice interaction
+- tool reliability
+- workspace handling
 
-Not every autonomous-agent idea is a good idea.
-
-Some are just ransomware with extra steps.
-
----
-
-# Security
-
-This project intentionally limits the AI.
-
-The system should remain:
-- inspectable
-- interruptible
-- sandboxed
-- recoverable
-
-Contributions should preserve these principles.
+If a feature adds complexity, explain why it is worth it. Complexity breeds in dark corners and undocumented helper functions.
 
 ---
 
-# Final Notes
+## Community Expectations
 
-Small contributions are welcome:
-- typo fixes
-- docs
-- cleanup
-- bug fixes
-- safety improvements
+Be respectful. Be specific. Be useful.
 
-You do not need to rewrite the architecture to contribute meaningfully.
+No harassment, no personal attacks, no drive-by nonsense.
 
 ---
 
-# License
+## License
 
-By contributing, you agree that your contributions will be licensed under the project's license.
+By contributing, you agree that your changes may be distributed under the project’s license.
