@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from permissions import validate_command
 from renderer import RED, GRAY, RESET, render_for_voice
 
-WAKE_WORD = "orion"
+WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
 AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -716,7 +716,7 @@ TOOLS_DESCRIPTION = [
             "description": (
                 "Put the assistant into passive sleep mode. "
                 "Only Whisper speech detection remains active. "
-                f"Continuously listens for the wake word '{WAKE_WORD}'. "
+                f"Continuously listens for the wake word '{WAKE_WORDS}'. "
                 "When the wake word is detected, a lightweight AI relevance "
                 "check determines whether the speaker is actually addressing "
                 "the assistant. If relevant, sleep mode exits and returns "
@@ -1417,15 +1417,19 @@ def sleep_mode():
     print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
 
     while True:
-        heard = listen(once=True)
+        heard = listen(once=True, cleaned=False)
 
         if not heard:
             continue
 
         low = heard.lower().strip()
         print(f"{GRAY}[HEARD] {heard}{RESET}")
-
-        if WAKE_WORD not in low:
+        
+        wake_word_heard = False
+        for wake_word in WAKE_WORDS:
+            if wake_word in low:
+                wake_word_heard = True
+        if not wake_word_heard:
             continue
 
         print(f"{GRAY}[WAKE WORD DETECTED]{RESET}")
