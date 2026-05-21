@@ -1,0 +1,10 @@
+{
+    "capabilities": [
+        {
+            "name": "validate_execution",
+            "module": "validator",
+            "function": "validate_execution",
+            "description": "Validate execution results against a JSON schema. Returns Success or Failure with error details."
+        }
+    ]
+}

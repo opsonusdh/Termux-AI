@@ -23,15 +23,19 @@ PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
 AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-API_KEYS = [
-    k.strip()
-    for k in open(
-        os.path.join(AI_ROOT, "api.keys"),
-        "r",
-        encoding="utf-8"
-    ).read().splitlines()
-    if k.strip()
-]
+def _load_google_keys() -> list:
+    """Load Google API keys from api.keys.
+    Supports both the new JSON dict format and legacy plain-text (one key per line)."""
+    path = os.path.join(AI_ROOT, "api.keys")
+    raw = open(path, "r", encoding="utf-8").read().strip()
+    try:
+        data = json.loads(raw)
+        keys = data.get("google", [])
+        return keys if isinstance(keys, list) else [keys]
+    except (json.JSONDecodeError, AttributeError):
+        return [k.strip() for k in raw.splitlines() if k.strip()]
+
+API_KEYS = _load_google_keys()
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE  = os.path.join(BASE_DIR, "log.txt")
@@ -691,7 +695,8 @@ TOOLS_DESCRIPTION = [
             "description": (
                 "Fetch a webpage and convert meaningful HTML into structured markdown. "
                 "Preserves headings, paragraphs, links, and image/media URLs. "
-                "Optionally target a specific element with a CSS selector."
+                "Optionally target a specific element with a CSS selector. "
+                "Use cases: google search, retrieve a site's text and a lot."
             ),
             "parameters": {
                 "type": "object",
@@ -1260,35 +1265,38 @@ def web_scrape(url: str, selector: str = None) -> str:
 
         def walk(node):
             for child in node.children:
+
+                # Ignore raw text nodes here.
+                # Semantic tags handle their own text extraction.
                 if isinstance(child, NavigableString):
-                    txt = str(child).strip()
-                    if txt:
-                        add_line(txt)
                     continue
+
                 if not isinstance(child, Tag):
                     continue
+
                 name = child.name.lower()
 
+                # Headings
                 if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
                     heading = render_inline(child)
                     if heading:
                         add_line("#" * int(name[1]) + " " + heading)
                         lines.append("")
+
+                # List items
                 elif name == "li":
                     item = render_inline(child)
                     if item:
                         add_line(f"- {item}")
-                elif name in {"ul", "ol"}:
-                    walk(child)
-                    lines.append("")
-                elif name in {"p", "article", "section", "main", "div",
-                               "header", "footer", "aside", "blockquote"}:
+
+                # Paragraph-like semantic content
+                elif name in {"p", "blockquote"}:
                     inner = render_inline(child)
                     if inner:
                         add_line(inner)
                         lines.append("")
-                    else:
-                        walk(child)
+
+                # Code blocks
                 elif name == "pre":
                     code_text = child.get_text("\n", strip=True)
                     if code_text:
@@ -1296,6 +1304,36 @@ def web_scrape(url: str, selector: str = None) -> str:
                         add_line(code_text)
                         add_line("```")
                         lines.append("")
+
+                # Structural/container elements
+                elif name in {
+                    "html",
+                    "body",
+                    "article",
+                    "section",
+                    "main",
+                    "div",
+                    "ul",
+                    "ol",
+                    "header",
+                    "footer",
+                    "aside",
+                    "nav",
+                }:
+                    walk(child)
+
+                # Images/media outside inline contexts
+                elif name == "img":
+                    img = image_markdown(child)
+                    if img:
+                        add_line(img)
+
+                elif name in {"video", "audio", "iframe", "embed"}:
+                    media = media_markdown(child)
+                    if media:
+                        add_line(media)
+
+                # Fallback recursion
                 else:
                     walk(child)
 

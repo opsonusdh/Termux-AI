@@ -112,7 +112,7 @@ def chat_loop():
             with open(CONFIG_PATH, "w") as f:
                  json.dump(config, f, indent=4)
             continue
-        if user_input.lower() in ("stop voice.", "stop voice."):
+        if user_input.lower() in ("stop voice.", "stop voice"):
             config["tts_enabled"] = False
             with open(CONFIG_PATH, "w") as f:
                  json.dump(config, f, indent=4)
