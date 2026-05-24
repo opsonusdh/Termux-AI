@@ -36,8 +36,8 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 
 ```bash
 # 1. Clone
-git clone https://github.com/opsonusdh/Termux-AI ~/ai_root
-cd ~/ai_root
+git clone https://github.com/opsonusdh/Termux-AI ~/Termux-AI
+cd ~/Termux-AI
 
 # 2. Install dependencies
 bash setup.sh
@@ -45,7 +45,7 @@ pip install openai beautifulsoup4 requests
 
 # 3. Add API keys
 # Create api.keys in JSON format:
-cat > ~/ai_root/api.keys << 'EOF'
+cat > ~/Termux-AI/api.keys << 'EOF'
 {
   "google": ["YOUR_GEMINI_KEY_1", "YOUR_GEMINI_KEY_2"],
   "groq":   ["YOUR_GROQ_KEY"],
@@ -54,7 +54,7 @@ cat > ~/ai_root/api.keys << 'EOF'
 EOF
 
 # 4. Run
-cd ~/ai_root/core
+cd ~/Termux-AI/core
 python3 core
 ```
 
@@ -65,7 +65,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 ## Directory Structure
 
 ```
-~/ai_root/
+~/Termux-AI/
 ├── core/
 │   ├── __main__.py          # Entry point — run this
 │   ├── interface.py         # Chat loop, voice toggle, STT integration
