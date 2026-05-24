@@ -137,10 +137,13 @@ def chat_loop():
             print(f"\n[ERROR] {e}")
             continue
 
-        print("\nAI >")
+        if config.get("tts_enabled") and HAS_STT:
+            print("\nAI (Voice) >")
+        else:
+            print("\nAI >")
 
         print(render_markdown_terminal(reply))
-        if config.get("tts_enabled"):
+        if config.get("tts_enabled") and HAS_STT:
             speak(reply, block=True)
 
         history.append({"role": "user",     "content": user_input})
