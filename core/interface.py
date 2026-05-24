@@ -68,7 +68,7 @@ def chat_loop():
                 "Avoid robotic introductions, capability lists, or mentioning tools unless asked. "
                 "Keep the tone warm and casual."
             )
-            print("\nAI > ")
+            print("\nAI (Voice) > ")
             reply = ask_ai(greeting_prompt, voice=config.get("tts_enabled", False))
             print(render_markdown_terminal(reply))
             speak(reply)

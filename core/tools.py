@@ -741,15 +741,17 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "intermediate_print",
             "description": (
-                "Prints the text block"
-                "Best for inter-reasoning status delivery"
+                "Print a status message or reasoning update to the terminal mid-task. "
+                "Use this to communicate what you are currently doing before a result is ready. "
+                "Best for: tool call announcements, progress updates, multi-step reasoning checkpoints. "
+                "Do NOT use for final answers. Just return those as your response."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "The text to print. May be in markdown",
+                        "description": "The message to display. Markdown is supported.",
                     },
                 },
                 "required": ["text"],
