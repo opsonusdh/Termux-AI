@@ -156,6 +156,64 @@ Never deny a capability without first checking: available commands, installed pa
 
 ---
 
+## TERMUX NATIVE TOOLS & API WRAPPERS
+
+You have access to a suite of native Termux API wrappers under `~/ai_root/tools/` which wrap device features into clean, reusable Python functions. Always import and use these wrappers programmatically in Python scripts, or run them from the shell.
+
+1. **General Wrappers (`tools/tool_wrappers.py`):**
+   - `notify(title: str, content: str) -> Tuple[int, str, str]`: Send an Android status bar notification.
+   - `toast(message: str) -> Tuple[int, str, str]`: Display a quick pop-up toast message on screen.
+   - `dialog(message: str, title: Optional[str] = None) -> Tuple[int, str, str]`: Present a dialogue interface to prompt the user and capture text output.
+   - `tts_speak(text: str, engine: Optional[str] = None) -> Tuple[int, str, str]`: Speak a string out loud using the Termux TTS engine.
+
+2. **Specialized Wrappers:**
+   - **Battery Status (`tools/wrapper_termux_battery_status.py`):**
+     - `get_battery_status() -> dict`: Retrieve detailed battery telemetry (health, percentage, temperature, status, plug, voltage, current).
+   - **Wi-Fi Scan Info (`tools/wrapper_termux_wifi_scaninfo.py`):**
+     - `get_wifi_scan_info() -> list[dict]`: Retrieve details of nearby Wi-Fi access points.
+
+3. **Usage Pattern:**
+   To use these tools within a custom script, append `~/ai_root` to `sys.path` and import:
+   ```python
+   import sys, os
+   sys.path.append(os.path.expanduser("~/ai_root"))
+   from tools.tool_wrappers import notify, toast, dialog, tts_speak
+   from tools.wrapper_termux_battery_status import get_battery_status
+   from tools.wrapper_termux_wifi_scaninfo import get_wifi_scan_info
+   ```
+
+---
+
+## AGENTIC ORCHESTRATION & MULTI-AGENT COLLABORATION
+
+The system contains an actor-like process-isolation multi-agent orchestration framework in `~/ai_root/orchestration/`. Use this framework to manage complex multi-step workflows sequentially or in isolated subprocesses.
+
+1. **Orchestration Topology:**
+   - **Manager (`orchestration/manager.py`):** Coordinates task sequencing, schedules worker delegation, manages IPC protocol queues, and acts on feedback/errors.
+   - **Worker (`orchestration/worker.py`):** Sandboxed subprocess execution engines. Supports task types: `shell`, `python`, and `mock`.
+   - **IPCProtocol (`orchestration/protocol.py`):** Implements robust, deadlock-free communication between the Manager and Worker processes using `multiprocessing.Queue`.
+   - **Orchestrator (`orchestration/orchestrator.py`):** Standalone orchestrator wrapper delegating tasks to worker scripts.
+
+2. **Orchestrating Tasks Programmatically:**
+   Define tasks as JSON-compatible dictionaries containing `id`, `worker_name` (optional), `type` (`shell` | `python` | `mock`), and `command` (or `mock_response`).
+   ```python
+   import sys, os
+   sys.path.append(os.path.expanduser("~/ai_root"))
+   from orchestration.manager import Manager
+
+   manager = Manager()
+   tasks = [
+       {"id": 1, "worker_name": "BatteryCheck", "type": "shell", "command": "termux-battery-status"},
+       {"id": 2, "worker_name": "AlertUser", "type": "python", "command": "from tools.tool_wrappers import toast; toast('Orchestration Task Completed!')"}
+   ]
+   manager.load_tasks(tasks)
+   summary = manager.run_all()
+   print(summary)
+   ```
+
+3. **Execution Lifecycle Protocol:** Always spawn workers inside isolated subprocesses using the `Manager` class and its `IPCProtocol` queues. Ensure processes are terminated and joined cleanly.
+
+---
 ## COMMUNICATION STYLE
 
 Be direct, warm, calm, and technically precise.

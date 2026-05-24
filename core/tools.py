@@ -8,6 +8,7 @@ import shlex
 import signal
 import heapq
 import requests
+import threading
 import subprocess
 from pathlib import Path
 from openai import OpenAI
@@ -16,12 +17,14 @@ from collections import defaultdict
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from permissions import validate_command
-from renderer import RED, GRAY, RESET, render_for_voice
+from renderer import RED, GRAY, RESET, render_for_voice, render_markdown_terminal
 
 WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
 AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+_speak_thread: threading.Thread | None = None
 
 def _load_google_keys() -> list:
     """Load Google API keys from api.keys.
@@ -733,6 +736,26 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "intermediate_print",
+            "description": (
+                "Prints the text block"
+                "Best for inter-reasoning status delivery"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to print. May be in markdown",
+                    },
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 
@@ -1365,7 +1388,26 @@ def web_scrape(url: str, selector: str = None) -> str:
         return f"[ERROR] Scraping failed: {e}"
 
 
-def speak(text: str, debug: bool = False) -> str:
+_speak_thread: threading.Thread | None = None
+
+def speak(text: str, debug: bool = False, block: bool = False) -> None:
+    global _speak_thread
+
+    if _speak_thread and _speak_thread.is_alive():
+        _speak_thread.join()
+
+    _speak_thread = threading.Thread(
+        target=_speak_blocking,
+        args=(text, debug),
+        daemon=True,
+    )
+    _speak_thread.start()
+
+    if block:
+        _speak_thread.join()
+
+
+def _speak_blocking(text: str, debug: bool = False) -> str:
     if debug:
         print("speaking")
 
@@ -1415,7 +1457,7 @@ def speak(text: str, debug: bool = False) -> str:
         return f"[EXCEPTION] {e}"
 
 
-def sleep_mode():
+def sleep_mode() -> None:
     CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
     DEFAULT_CONFIG = {
         "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
@@ -1481,3 +1523,11 @@ def sleep_mode():
         except Exception as e:
             print(f"{RED}[WAKE CHECK FAILED] {e}{RESET}")
             
+
+def intermediate_print(text: str, voice: bool = False) -> None:
+    print("AI (Intermediate) >")
+    print(render_markdown_terminal(text))
+    print()
+    if voice:
+        speak(render_for_voice(text))
+        

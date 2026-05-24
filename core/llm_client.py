@@ -230,7 +230,7 @@ def _stitch_assistant_turns(messages: list[dict], last_chunk: str) -> str:
     return "".join(parts).strip()
 
 
-def _dispatch_tool(tool_call: dict) -> str:
+def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     name     = tool_call["function"]["name"]
     raw_args = tool_call["function"].get("arguments", "{}")
     try:
@@ -277,6 +277,10 @@ def _dispatch_tool(tool_call: dict) -> str:
                                selector = g("selector", None),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
+        "intermediate_print": lambda: intermediate_print(
+                                text  = g("text", ""),
+                                voice = voice,
+                            ),
     }
 
     fn = routes.get(name)
@@ -296,14 +300,14 @@ def _dbg(*args) -> None:
         print(f"[DEBUG]", *args)
 
 
-def ask_ai(prompt: str) -> str:
+def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) -> str:
     memory_block   = build_memory_block(prompt)
     system_content = (memory_block + "\n\n" + SYSTEM_PROMPT) if memory_block else SYSTEM_PROMPT
 
-    base_messages: list[dict] = [
-        {"role": "system", "content": system_content},
-        {"role": "user",   "content": prompt},
-    ]
+    base_messages: list[dict] = [{"role": "system", "content": system_content}]
+    if history:
+        base_messages.extend(history)
+    base_messages.append({"role": "user", "content": prompt})
 
     slot      = 0
     last_slot = -1   # track slot changes to know when to reset messages
@@ -424,7 +428,7 @@ def ask_ai(prompt: str) -> str:
                     messages.append(msg_dict)
                     for tc in msg_dict["tool_calls"]:
                         tool_name   = tc["function"]["name"]
-                        tool_result = _dispatch_tool(tc)
+                        tool_result = _dispatch_tool(tc, voice=voice)
                         _dbg(f"  tool '{tool_name}' → result len: {len(str(tool_result))}")
                         messages.append({
                             "role":         "tool",

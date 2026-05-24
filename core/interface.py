@@ -52,7 +52,7 @@ except Exception:
     HAS_STT = False
 
 def chat_loop():
-    context = ""
+    history: list[dict] = []
 
     print("Terminal AI ready. Type 'exit' to quit.")
     if HAS_STT:
@@ -63,15 +63,17 @@ def chat_loop():
     
     if HAS_STT and config.get("tts_enabled"):
         try:
-            print("\nAI > ")
-            reply = ask_ai(
+            greeting_prompt = (
                 "System: Start the conversation naturally like a friendly assistant. "
                 "Avoid robotic introductions, capability lists, or mentioning tools unless asked. "
                 "Keep the tone warm and casual."
             )
+            print("\nAI > ")
+            reply = ask_ai(greeting_prompt, voice=config.get("tts_enabled", False))
             print(render_markdown_terminal(reply))
             speak(reply)
-            context += f"System: Greet the user.\nAI:\n{reply}\n"
+            history.append({"role": "user",      "content": greeting_prompt})
+            history.append({"role": "assistant",  "content": reply})
         except:
             pass
     else:
@@ -118,12 +120,14 @@ def chat_loop():
                  json.dump(config, f, indent=4)
             continue
 
-        context += f"\nUser:\n{user_input}\n"
-
         print("\n[Thinking]")
 
         try:
-            reply = ask_ai(context)
+            reply = ask_ai(
+                user_input,
+                history=history,
+                voice=config.get("tts_enabled", False),
+            )
 
         except KeyboardInterrupt:
             print("\nInterrupted.")
@@ -135,13 +139,12 @@ def chat_loop():
 
         print("\nAI >")
 
-        print(
-            render_markdown_terminal(reply)
-        )
+        print(render_markdown_terminal(reply))
         if config.get("tts_enabled"):
-            speak(reply)
+            speak(reply, block=True)
 
-        context += f"\nAI:\n{reply}\n"
+        history.append({"role": "user",     "content": user_input})
+        history.append({"role": "assistant", "content": reply})
 
 
 if __name__ == "__main__":

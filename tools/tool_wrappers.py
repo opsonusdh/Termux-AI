@@ -7,9 +7,22 @@ Only a subset of verified tools is wrapped as a proof of concept.
 import subprocess
 from typing import Tuple, Optional
 
+# Gray debug trail colors
+GRAY  = "\033[90m"
+RED   = "\033[31m"
+RESET = "\033[0m"
+
 def _run_cmd(cmd: list[str]) -> Tuple[int, str, str]:
     """Run a command and return (exit_code, stdout, stderr)."""
+    cmd_str = " ".join(cmd)
+    print(f"{GRAY}[EXECUTING] {cmd_str}{RESET}")
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        if proc.stdout.strip():
+            print(f"{GRAY}[OUT]\n{proc.stdout.strip()}{RESET}")
+    else:
+        if proc.stderr.strip():
+            print(f"{RED}[ERR]\n{proc.stderr.strip()}{RESET}")
     return proc.returncode, proc.stdout, proc.stderr
 
 def notify(title: str, content: str) -> Tuple[int, str, str]:
@@ -39,8 +52,3 @@ def tts_speak(text: str, engine: Optional[str] = None) -> Tuple[int, str, str]:
     if engine:
         cmd.extend(['-e', engine])
     return _run_cmd(cmd)
-
-# Example usage (commented out):
-# if __name__ == '__main__':
-#     notify('Test', 'This is a test notification')
-#     toast('Hello from Orion')

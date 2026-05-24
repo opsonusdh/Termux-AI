@@ -10,6 +10,11 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from protocol import IPCProtocol
 from worker import Worker
 
+# Gray debug trail colors
+GRAY  = "\033[90m"
+RED   = "\033[31m"
+RESET = "\033[0m"
+
 class Manager:
     def __init__(self):
         self.protocol = IPCProtocol()
@@ -44,11 +49,11 @@ class Manager:
 
     def run_all(self):
         """Executes all tasks sequentially and tracks status."""
-        print(f"[Manager] Starting orchestration of {len(self.tasks)} tasks...")
+        print(f"{GRAY}[MANAGER] Starting orchestration of {len(self.tasks)} tasks...{RESET}")
         for task in self.tasks:
             task_id = task["id"]
             worker_name = task["worker_name"]
-            print(f"[Manager] Delegating task {task_id} to {worker_name}...")
+            print(f"{GRAY}[MANAGER] Delegating task {task_id} to {worker_name}...{RESET}")
             
             task["status"] = "running"
             
@@ -70,16 +75,16 @@ class Manager:
                 task["status"] = res.get("status", "completed")
                 task["result"] = res
                 self.history.append(res)
-                print(f"[Manager] Task {task_id} finished with status: {task['status']}")
+                print(f"{GRAY}[MANAGER] Task {task_id} finished with status: {task['status']}{RESET}")
             else:
                 # Handle unexpected response or timeout
                 task["status"] = "failed"
                 task["result"] = response
                 self.history.append(response)
-                print(f"[Manager] Task {task_id} failed to report properly: {response}")
+                print(f"{RED}[MANAGER] Task {task_id} failed to report properly: {response}{RESET}")
                 
             if task["status"] not in ["success", "completed"]:
-                print(f"[Manager] Aborting due to failure in task {task_id}.")
+                print(f"{RED}[MANAGER] Aborting due to failure in task {task_id}.{RESET}")
                 break
                 
         # Aggregate final status
@@ -99,5 +104,5 @@ if __name__ == "__main__":
     ]
     manager.load_tasks(demo_tasks)
     summary = manager.run_all()
-    print("\n--- Summary ---")
+    print(f"\n{GRAY}--- Summary ---{RESET}")
     print(json.dumps(summary, indent=2))

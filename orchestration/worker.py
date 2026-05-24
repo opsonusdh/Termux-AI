@@ -4,6 +4,10 @@ import subprocess
 import os
 import time
 
+# Gray debug trail colors
+GRAY  = "\033[90m"
+RESET = "\033[0m"
+
 class Worker:
     def __init__(self, name):
         self.name = name
@@ -18,12 +22,15 @@ class Worker:
         task_type = task.get('type', 'shell')
         command = task.get('command', '')
         
+        print(f"{GRAY}[WORKER:{self.name}] Executing task type: {task_type}{RESET}")
         start_time = time.time()
         
         if task_type == 'shell':
             try:
+                print(f"{GRAY}[WORKER:{self.name}] Command: {command}{RESET}")
                 res = subprocess.run(command, shell=True, capture_output=True, text=True)
                 duration = time.time() - start_time
+                print(f"{GRAY}[WORKER:{self.name}] Done (code: {res.returncode}){RESET}")
                 return {
                     "worker": self.name,
                     "task_type": "shell",
@@ -35,6 +42,7 @@ class Worker:
                 }
             except Exception as e:
                 duration = time.time() - start_time
+                print(f"{GRAY}[WORKER:{self.name}] Error: {str(e)}{RESET}")
                 return {
                     "worker": self.name,
                     "task_type": "shell",
@@ -45,6 +53,7 @@ class Worker:
                 
         elif task_type == 'python':
             try:
+                print(f"{GRAY}[WORKER:{self.name}] Command: {command}{RESET}")
                 if os.path.exists(command):
                     cmd = ["python3", command]
                     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -53,6 +62,7 @@ class Worker:
                     res = subprocess.run(cmd, capture_output=True, text=True)
                 
                 duration = time.time() - start_time
+                print(f"{GRAY}[WORKER:{self.name}] Done (code: {res.returncode}){RESET}")
                 return {
                     "worker": self.name,
                     "task_type": "python",
@@ -64,6 +74,7 @@ class Worker:
                 }
             except Exception as e:
                 duration = time.time() - start_time
+                print(f"{GRAY}[WORKER:{self.name}] Error: {str(e)}{RESET}")
                 return {
                     "worker": self.name,
                     "task_type": "python",
@@ -75,6 +86,7 @@ class Worker:
         elif task_type == 'mock':
             duration = time.time() - start_time
             mock_res = task.get('mock_response', {"status": "success", "message": "Mock execution successful"})
+            print(f"{GRAY}[WORKER:{self.name}] Mock execution complete.{RESET}")
             return {
                 "worker": self.name,
                 "task_type": "mock",
@@ -84,6 +96,7 @@ class Worker:
             }
         else:
             duration = time.time() - start_time
+            print(f"{GRAY}[WORKER:{self.name}] Unknown task type: {task_type}{RESET}")
             return {
                 "worker": self.name,
                 "status": "error",
