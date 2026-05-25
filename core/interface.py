@@ -15,6 +15,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 DEFAULT_CONFIG = {
     "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,
+    "use_groq": False
 }
 if not os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, "w") as f:
@@ -51,6 +52,7 @@ try:
 except Exception:
     HAS_STT = False
 
+
 def chat_loop():
     history: list[dict] = []
 
@@ -71,7 +73,7 @@ def chat_loop():
             print("\nAI (Voice) > ")
             reply = ask_ai(greeting_prompt, voice=config.get("tts_enabled", False))
             print(render_markdown_terminal(reply))
-            speak(reply)
+            speak(reply, block=True)
             history.append({"role": "user",      "content": greeting_prompt})
             history.append({"role": "assistant",  "content": reply})
         except:
@@ -88,7 +90,7 @@ def chat_loop():
         else:
             print(f"{GRAY}[Listening...]{RESET}")
             try:
-                user_input = listen(once=True, calibrate_once=True)
+                user_input = listen(once=True, calibrate_once=True, use_groq=config.get("use_groq", False))
                 if user_input:
                     print(f"\nYOU (Voice) > {user_input}")
                 else:
@@ -114,6 +116,18 @@ def chat_loop():
             with open(CONFIG_PATH, "w") as f:
                  json.dump(config, f, indent=4)
             continue
+        if user_input.lower() in ["start voice local.", "start voice local"]:
+            config["tts_enabled"] = True
+            config["use_groq"] = False
+            with open(CONFIG_PATH, "w") as f:
+                 json.dump(config, f, indent=4)
+            continue
+        if user_input.lower() in ["start voice remote.", "start voice remote"]:
+             config["tts_enabled"] = True
+             config["use_groq"] = True
+             with open(CONFIG_PATH, "w") as f:
+                  json.dump(config, f, indent=4)
+             continue
         if user_input.lower() in ("stop voice.", "stop voice"):
             config["tts_enabled"] = False
             with open(CONFIG_PATH, "w") as f:

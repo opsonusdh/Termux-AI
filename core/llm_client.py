@@ -24,16 +24,18 @@ PROVIDERS: dict[str, dict] = {
 
 
 MODEL_SLOTS: list[dict] = [
-    {"provider_id": "google",  "name": "gemini-3.5-flash",                "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3.1-flash-lite-preview",   "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3.1-flash-lite",           "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3-flash-preview",          "max_tokens": None},
-    {"provider_id": "groq",    "name": "groq/compound",                   "max_tokens": 8192},
-    {"provider_id": "nvidia",  "name": "openai/gpt-oss-120b",             "max_tokens": 4096},
-    {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-r1",         "max_tokens": 4096},
-    {"provider_id": "google",  "name": "gemma-4-31b-it",                  "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-2.5-flash",                "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-2.5-flash-lite",           "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-3.5-flash",                     "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-3.1-flash-lite-preview",        "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-3.1-flash-lite",                "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-3-flash-preview",               "max_tokens": None},
+    {"provider_id": "groq",    "name": "groq/compound",                        "max_tokens": 8192},
+    {"provider_id": "nvidia",  "name": "openai/gpt-oss-120b",                  "max_tokens": 4096},
+    {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-v4-flash",        "max_tokens": 4096},
+    {"provider_id": "nvidia",  "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "max_tokens": 4096},
+    {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-r1",              "max_tokens": 4096},
+    {"provider_id": "google",  "name": "gemma-4-31b-it",                       "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-2.5-flash",                     "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-2.5-flash-lite",                "max_tokens": None},
 ]
 
 
@@ -352,6 +354,7 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
         if slot != last_slot:
             messages  = _sanitize_messages_for_provider(list(base_messages), pid)
             last_slot = slot
+            base_len  = len(messages)
             _dbg(f"Slot changed → [{pid}/{model_name}]. Messages reset. "
                  f"History depth: {len(messages)}")
         else:
@@ -455,7 +458,7 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     })
                     continue
 
-                return _stitch_assistant_turns(messages, partial) or "[EMPTY RESPONSE]"
+                return _stitch_assistant_turns(messages[base_len:], partial) or "[EMPTY RESPONSE]"
 
         except Exception as e:
             s = str(e)

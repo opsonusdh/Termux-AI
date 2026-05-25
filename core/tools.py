@@ -925,6 +925,7 @@ def read_file(
         return f"[ERROR] Path is not a file: {path}"
 
     log_write(f"[read_file] path:{path} start:{segment_start} end:{segment_end} unit:{unit}")
+    print(f"{GRAY}[READING] {path}{RESET}")
 
     try:
         # Byte segment
@@ -957,17 +958,23 @@ def read_file(
         hi = min(total, segment_end or total)         # inclusive end, 1-indexed
 
         if lo >= total:
+            print(f"{RED}[ERROR] segment_start ({segment_start}) is beyond the file ({total} lines).{RESET}")
             return f"[ERROR] segment_start ({segment_start}) is beyond the file ({total} lines)."
         if lo >= hi:
+            print(f"{RED}[ERROR] segment_start ({segment_start}) must be less than segment_end ({segment_end}).{RESET}")
             return f"[ERROR] segment_start ({segment_start}) must be less than segment_end ({segment_end})."
 
         selected = all_lines[lo:hi]
         numbered = [f"{lo+i+1:6d}  {ln}" for i, ln in enumerate(selected)]
         header   = f"[FILE] {path}  lines {lo+1}–{hi} of {total}\n"
-        return header + "".join(numbered)
+        out = header + "".join(numbered)
+        printable_out = out if len("\n".join(out.splitlines()[:PRINT_LINE_THRESHOLD])) < PRINT_CHAR_THRESHOLD else out[:PRINT_CHAR_THRESHOLD] + "\n    .\n    .\n    ."
+        print(f"{GRAY}[OUT]\n{printable_out}{RESET}")
+        return out
 
     except OSError as exc:
         log_write(f"[ERR] {exc}")
+        print(f"{RED}[ERR] {exc}{RESET}")
         return f"[ERROR] {exc}"
 
 
@@ -1009,6 +1016,7 @@ def write_file(
         os.makedirs(parent, exist_ok=True)
 
     log_write(f"[write_file] path:{path} mode:{mode} start:{segment_start} end:{segment_end} unit:{unit}")
+    print(f"{GRAY}[WRITING] {path}  (mode={mode}){RESET}")
 
     try:
         # overwrite
@@ -1016,12 +1024,14 @@ def write_file(
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(content)
             lines_written = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+            print(f"{GRAY}[OK] Wrote {lines_written} line(s) to {path}{RESET}.")
             return f"[OK] Wrote {lines_written} line(s) to {path}."
 
         # append
         if mode == "append":
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(content)
+            print(f"{GRAY}[OK] Appended {len(content)} byte(s) to {path}.{RESET}.")
             return f"[OK] Appended {len(content)} byte(s) to {path}."
 
         # prepend
@@ -1032,15 +1042,20 @@ def write_file(
                     existing = fh.read()
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(content + existing)
+            
+            print(f"{GRAY}[OK] Prepended {len(content)} byte(s) to {path}.{RESET}")
             return f"[OK] Prepended {len(content)} byte(s) to {path}."
 
         # segment
         if mode == "segment":
             if segment_start is None or segment_end is None:
+                print(f"{GRAY}[ERROR] mode='segment' requires both segment_start and segment_end.{RESET}")
                 return "[ERROR] mode='segment' requires both segment_start and segment_end."
             if segment_start < 1:
+                print(f"{GRAY}[ERROR] segment_start must be >= 1.{RESET}")
                 return "[ERROR] segment_start must be >= 1."
             if segment_end < segment_start:
+                print(f"{GRAY}[ERROR] segment_end must be >= segment_start.")
                 return "[ERROR] segment_end must be >= segment_start."
 
             # byte segment
@@ -1053,8 +1068,10 @@ def write_file(
                 new_bytes   = existing[:segment_start] + replacement + existing[segment_end:]
                 with open(path, "wb") as fh:
                     fh.write(new_bytes)
+                
+                print(f"{GRAY}[OK] Replaced bytes {segment_start}-{segment_end} in {path} with {len(replacement)} byte(s).{RESET}")
                 return (
-                    f"[OK] Replaced bytes {segment_start}–{segment_end} in {path} "
+                    f"[OK] Replaced bytes {segment_start}-{segment_end} in {path} "
                     f"with {len(replacement)} byte(s)."
                 )
 
@@ -1069,6 +1086,7 @@ def write_file(
             hi    = min(segment_end, total)             # exclusive slice end
 
             if lo > total:
+                print(f"{RED}[ERROR] segment_start ({segment_start}) is beyond the file length ({total} lines).{RESET}")
                 return (
                     f"[ERROR] segment_start ({segment_start}) is beyond "
                     f"the file length ({total} lines)."
@@ -1083,15 +1101,18 @@ def write_file(
                 fh.writelines(new_lines)
 
             replaced = hi - lo
+            print(f"{GRAY}[OK] Replaced line(s) {segment_start}-{min(segment_end, total)} ({replaced} line(s) removed, replacement written) in {path}.{RESET}")
             return (
-                f"[OK] Replaced line(s) {segment_start}–{min(segment_end, total)} "
+                f"[OK] Replaced line(s) {segment_start}-{min(segment_end, total)} "
                 f"({replaced} line(s) removed, replacement written) in {path}."
             )
-
+        
+        print(f"{GRAY}[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment.{RESET}")
         return f"[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment."
 
     except OSError as exc:
         log_write(f"[ERR] {exc}")
+        print(f"{RED}[ERR] {exc}{RESET}")
         return f"[ERROR] {exc}"
 
 
@@ -1464,6 +1485,7 @@ def sleep_mode() -> None:
     DEFAULT_CONFIG = {
         "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
         "tts_enabled": False,
+        "use_groq": False
     }
     if not os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "w") as f:
@@ -1499,7 +1521,7 @@ def sleep_mode() -> None:
     print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
 
     while True:
-        heard = listen(once=True, cleaned=False, calibrate_once=True)
+        heard = listen(once=True, cleaned=False, calibrate_once=True, use_groq=config.get("use_groq", False))
 
         if not heard:
             continue

@@ -35,40 +35,45 @@ DEFAULT_CONFIG = {
     "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,
 }
+
 if not os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, "w") as f:
         json.dump(DEFAULT_CONFIG, f, indent=4)
-        
-try:
-    with open(CONFIG_PATH, "r") as f:
-        config = json.load(f)
-except:
-    config = DEFAULT_CONFIG
 
-STT_PATH = os.path.expanduser(config["stt_path"])
-if STT_PATH not in sys.path:
-    sys.path.append(STT_PATH)
+def is_voice_available():
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            config = json.load(f)
+    except Exception:
+        config = DEFAULT_CONFIG
 
-try:
-    from main import listen
+    if not config.get("tts_enabled", False):
+        return False
 
-    if subprocess.run(
-        "which edge-tts",
-        shell=True,
-        capture_output=True
-    ).returncode != 0:
-        raise Exception("edge-tts not found")
-    if subprocess.run(
-        "which mpv",
-        shell=True,
-        capture_output=True
-    ).returncode != 0:
-        raise Exception("mpv not found")
+    STT_PATH = os.path.expanduser(config["stt_path"])
+    if STT_PATH not in sys.path:
+        sys.path.append(STT_PATH)
 
-    HAS_STT = True
+    try:
+        from main import listen
 
-except Exception:
-    HAS_STT = False
+        if subprocess.run(
+            "which edge-tts",
+            shell=True,
+            capture_output=True
+        ).returncode != 0:
+            return False
+        if subprocess.run(
+            "which mpv",
+            shell=True,
+            capture_output=True
+        ).returncode != 0:
+            return False
+
+        return True
+
+    except Exception:
+        return False
 
 # Directories the AI must never silently modify
 PROTECTED_DIRS: List[str] = [CORE_DIR, STT_DIR]
@@ -426,7 +431,7 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
 
             # Voice notification
             try:
-                if config.get("tts_enabled", False) and HAS_STT:
+                if is_voice_available():
                     subprocess.Popen(
                         (
                             'edge-tts '
