@@ -13,8 +13,10 @@ import subprocess
 from pathlib import Path
 from openai import OpenAI
 from urllib.parse import urljoin
+from datetime import datetime
 from collections import defaultdict
 from bs4 import BeautifulSoup, NavigableString, Tag
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from permissions import validate_command
 from renderer import RED, GRAY, RESET, render_for_voice, render_markdown_terminal
@@ -23,6 +25,7 @@ WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
 AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DIAGNOSIS_TIMEOUT = 10
 
 _speak_thread: threading.Thread | None = None
 
@@ -1555,3 +1558,168 @@ def intermediate_print(text: str, voice: bool = False) -> None:
     if voice:
         speak(render_for_voice(text))
         
+
+def _check_battery() -> dict:
+    try:
+        result = subprocess.run(
+            ["termux-battery-status"],
+            capture_output=True, text=True, timeout=8
+        )
+        data = json.loads(result.stdout)
+        return {
+            "level_pct":    data.get("percentage"),
+            "status":       data.get("status"),
+            "temperature_c": data.get("temperature"),
+            "plugged":      data.get("plugged"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _check_weather() -> dict:
+    try:
+        import urllib.request
+        url = "https://wttr.in/?format=j1"
+        req = urllib.request.Request(url, headers={"User-Agent": "curl/7.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+
+        forecast = []
+        for day in data.get("weather", [])[:3]:
+            hourly = day.get("hourly", [])
+
+            peak = max(hourly, key=lambda h: int(h.get("FeelsLikeC", 0))) if hourly else {}
+
+            max_uv        = max((int(h.get("uvIndex",           0)) for h in hourly), default=0)
+            max_humidity  = max((int(h.get("humidity",          0)) for h in hourly), default=0)
+            max_feels     = max((int(h.get("FeelsLikeC",        0)) for h in hourly), default=0)
+            max_heat_idx  = max((int(h.get("HeatIndexC",        0)) for h in hourly), default=0)
+            max_wind_kmph = max((int(h.get("windspeedKmph",     0)) for h in hourly), default=0)
+            max_gust_kmph = max((int(h.get("WindGustKmph",      0)) for h in hourly), default=0)
+            min_vis       = min((int(h.get("visibility",       99)) for h in hourly), default=99)
+            total_precip  = sum((float(h.get("precipMM",       0.0)) for h in hourly))
+            chance_thunder= max((int(h.get("chanceofthunder",   0)) for h in hourly), default=0)
+            chance_rain   = max((int(h.get("chanceofrain",      0)) for h in hourly), default=0)
+            chance_high   = max((int(h.get("chanceofhightemp",  0)) for h in hourly), default=0)
+
+            seen = set()
+            descs = []
+            for h in hourly:
+                d = (h.get("weatherDesc") or [{}])[0].get("value", "").strip()
+                if d and d not in seen:
+                    seen.add(d)
+                    descs.append(d)
+
+            forecast.append({
+                "date":                    day.get("date"),
+                "max_temp_c":              int(day.get("maxtempC",  0)),
+                "min_temp_c":              int(day.get("mintempC",  0)),
+                "max_feels_like_c":        max_feels,
+                "max_heat_index_c":        max_heat_idx,
+                "peak_heat_hour":          peak.get("time"),
+                "max_uv_index":            max_uv,
+                "max_humidity_pct":        max_humidity,
+                "max_wind_kmph":           max_wind_kmph,
+                "max_gust_kmph":           max_gust_kmph,
+                "min_visibility_km":       min_vis,
+                "total_precip_mm":         round(total_precip, 1),
+                "chance_of_rain_pct":      chance_rain,
+                "chance_of_thunder_pct":   chance_thunder,
+                "chance_of_high_temp_pct": chance_high,
+                "sun_hours":               float(day.get("sunHour", 0)),
+                "uv_index_daily_max":      int(day.get("uvIndex",   0)),
+                "conditions":              descs,
+            })
+        return {"forecast": forecast}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _check_storage() -> dict:
+    try:
+        result = subprocess.run(
+            ["df", "-h", os.path.expanduser("~")],
+            capture_output=True, text=True, timeout=8
+        )
+        lines = result.stdout.strip().splitlines()
+        if len(lines) >= 2:
+            parts = lines[1].split()
+            return {
+                "total":       parts[1],
+                "used":        parts[2],
+                "available":   parts[3],
+                "use_percent": parts[4],
+            }
+        return {"error": "unexpected df output"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _check_memory() -> dict:
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                key, val = line.split(":", 1)
+                info[key.strip()] = val.strip()
+        total     = int(info["MemTotal"].split()[0])
+        available = int(info["MemAvailable"].split()[0])
+        used      = total - available
+        return {
+            "total_mb":     round(total     / 1024),
+            "used_mb":      round(used      / 1024),
+            "available_mb": round(available / 1024),
+            "use_percent":  round(used / total * 100, 1),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _check_network() -> dict:
+    try:
+        result = subprocess.run(
+            ["termux-wifi-connectioninfo"],
+            capture_output=True, text=True, timeout=8
+        )
+        data = json.loads(result.stdout)
+        return {
+            "ssid":           data.get("ssid"),
+            "link_speed_mbps": data.get("link_speed_mbps"),
+            "rssi_dbm":       data.get("rssi"),
+            "ip":             data.get("ip"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _check_datetime() -> dict:
+    now = datetime.now()
+    return {
+        "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "weekday":  now.strftime("%A"),
+        "hour":     now.hour,
+    }
+
+
+CHECKS = {
+    "battery":  _check_battery,
+    "weather":  _check_weather,
+    "storage":  _check_storage,
+    "memory":   _check_memory,
+    "network":  _check_network,
+    "datetime": _check_datetime,
+}
+
+
+def run_diagnosis() -> dict:
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(CHECKS)) as executor:
+        futures = {executor.submit(fn): name for name, fn in CHECKS.items()}
+        for future in as_completed(futures, timeout=DIAGNOSIS_TIMEOUT):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as e:
+                results[name] = {"error": str(e)}
+    return results
+

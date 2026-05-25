@@ -2,11 +2,16 @@ import os
 import json
 import sys
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from llm_client import ask_ai
 from renderer import render_markdown_terminal, GRAY, RESET
-from tools import speak
+from tools import *
 
 sys.dont_write_bytecode = True
+
+# Start sys diagnosis in background immediately
+_diag_executor = ThreadPoolExecutor(max_workers=1)
+_diag_future   = _diag_executor.submit(run_diagnosis)
 
 # Add Termux-STT to path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,8 +58,29 @@ except Exception:
     HAS_STT = False
 
 
+def _get_diag_history():
+    """Return a one-shot system message with diagnosis data, or None."""
+    try:
+        if _diag_future.done():
+            result = _diag_future.result()
+            if result:
+                return {
+                    "role": "system",
+                    "content": (
+                        "Here is background diagnostic data collected from the environment:\n"
+                        f"{json.dumps(result, indent=2)}\n"
+                        "Check if anything is genuinely concerning and inform the user. "
+                        "If everything looks normal, say nothing about it."
+                    )
+                }
+    except Exception:
+        pass
+    return None
+
+
 def chat_loop():
     history: list[dict] = []
+    _diag_injected = False
 
     print("Terminal AI ready. Type 'exit' to quit.")
     if HAS_STT:
@@ -66,12 +92,19 @@ def chat_loop():
     if HAS_STT and config.get("tts_enabled"):
         try:
             greeting_prompt = (
-                "System: Start the conversation naturally like a friendly assistant. "
+                "SYSTEM: Start the conversation naturally like a friendly assistant. "
                 "Avoid robotic introductions, capability lists, or mentioning tools unless asked. "
                 "Keep the tone warm and casual."
             )
+
+            # Inject diagnosis into greeting if already done
+            diag_msg = _get_diag_history()
+            greeting_history = [diag_msg] if diag_msg else []
+            if diag_msg:
+                _diag_injected = True
+
             print("\nAI (Voice) > ")
-            reply = ask_ai(greeting_prompt, voice=config.get("tts_enabled", False))
+            reply = ask_ai(greeting_prompt, history=greeting_history, voice=config.get("tts_enabled", False))
             print(render_markdown_terminal(reply))
             speak(reply, block=True)
             history.append({"role": "user",      "content": greeting_prompt})
@@ -80,6 +113,7 @@ def chat_loop():
             pass
     else:
         print()
+
     while True:
         if not config.get("tts_enabled") or not HAS_STT:
             try:
@@ -136,10 +170,18 @@ def chat_loop():
 
         print("\n[Thinking]")
 
+        # Inject diagnosis on first user message if not already done at greeting
+        call_history = list(history)
+        if not _diag_injected:
+            diag_msg = _get_diag_history()
+            if diag_msg:
+                call_history = [diag_msg] + call_history
+                _diag_injected = True
+
         try:
             reply = ask_ai(
                 user_input,
-                history=history,
+                history=call_history,
                 voice=config.get("tts_enabled", False),
             )
 
