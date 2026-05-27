@@ -25,7 +25,6 @@ PROVIDERS: dict[str, dict] = {
 
 MODEL_SLOTS: list[dict] = [
     {"provider_id": "google",  "name": "gemini-3.5-flash",                     "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3.1-flash-lite-preview",        "max_tokens": None},
     {"provider_id": "google",  "name": "gemini-3.1-flash-lite",                "max_tokens": None},
     {"provider_id": "google",  "name": "gemini-3-flash-preview",               "max_tokens": None},
     {"provider_id": "groq",    "name": "groq/compound",                        "max_tokens": 8192},

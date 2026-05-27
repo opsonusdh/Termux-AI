@@ -1,15 +1,15 @@
 """
-permissions.py – Autonomy-first permission gate for ~/ai_root AI agent.
+permissions.py – Autonomy-first permission gate for ~/Termux-AI AI agent.
 
 Philosophy
 ----------
-The AI operates freely inside ~/ai_root.  Permission is requested only when
+The AI operates freely inside ~/Termux-AI.  Permission is requested only when
 an action would:
 
   1. Run a forbidden system command (sudo, reboot, …)
   2. Write into core/         – the AI's own source code
   3. Write into Termux-STT/   – the speech-to-text module
-  4. Write/execute outside ~/ai_root entirely
+  4. Write/execute outside ~/Termux-AI entirely
 
 Everything else – workspace edits, package installs, reading files, running
 scripts, piping data, even installing packages – proceeds without interruption.
@@ -24,7 +24,7 @@ import subprocess
 from typing import List, Tuple
 
 #  Directory roots 
-AI_ROOT   = os.path.abspath(os.path.expanduser("~/ai_root"))
+AI_ROOT   = os.path.abspath(os.path.expanduser("~/Termux-AI"))
 CORE_DIR  = os.path.join(AI_ROOT, "core")
 STT_DIR   = os.path.join(AI_ROOT, "Termux-STT")
 WORKSPACE = os.path.join(AI_ROOT, "workspace")
@@ -110,7 +110,7 @@ INTERPRETER_COMMANDS = {
 }
 
 # Package managers – installing software is a normal, routine AI task.
-# They don't touch ai_root source directly, so they run freely.
+# They don't touch AI's root source directly, so they run freely.
 PACKAGE_MANAGERS = {
     "pip", "pip3", "npm", "pkg", "apt", "apt-get",
     "yarn", "npx", "gem", "cargo", "pipx",
@@ -155,7 +155,7 @@ def _is_protected(path: str) -> bool:
     return any(_commonpath_is_inside(d, p) for d in PROTECTED_DIRS)
 
 def _is_outside_root(path: str) -> bool:
-    """True when path escapes ~/ai_root entirely."""
+    """True when path escapes ~/Termux-AI entirely."""
     return not _commonpath_is_inside(AI_ROOT, _expand_path(path))
 
 def _is_pathish(token: str) -> bool:
@@ -177,7 +177,7 @@ def _path_verdict(path: str) -> Tuple[bool, str]:
         )
         return True, f"path '{rel}' is inside protected directory '{protected_name}/'"
     if _is_outside_root(path):
-        return True, f"path '{path}' is outside ~/ai_root"
+        return True, f"path '{path}' is outside ~/Termux-AI"
     return False, "OK"
 
 
@@ -279,8 +279,8 @@ def _check_write_targets(cmd: str, targets: List[str]) -> Tuple[bool, str]:
 def _check_mutating(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
     """
     File-mutating commands need permission only when their target paths
-    are protected or outside ~/ai_root.  Writing freely to workspace/
-    or any other ai_root subdirectory is fine.
+    are protected or outside ~/Termux-AI.  Writing freely to workspace/
+    or any other Termux-AI subdirectory is fine.
     """
     targets: List[str] = []
 
@@ -361,7 +361,7 @@ def _check_generic(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
     """
     Catch-all for commands not in any other category.
     Only blocks when output (via shell redirection or -o/-O flags)
-    lands in a protected directory or outside ~/ai_root.
+    lands in a protected directory or outside ~/Termux-AI.
     """
     targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
     return _check_write_targets(cmd, targets)
