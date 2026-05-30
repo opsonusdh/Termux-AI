@@ -1,41 +1,41 @@
 import os
 import json
 import time
+import re
 import requests
 import threading
 import websocket
 import subprocess
-import re
 from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
 qrcode_module = str(
-    BASE_DIR
-    / "Termux-WP"
-    / "node_modules"
-    / "qrcode-terminal"
+    BASE_DIR / "Termux-WP" / "node_modules" / "qrcode-terminal"
 )
 if not Path(qrcode_module).exists():
-    raise FileNotFoundError(f"Termux-WP is not installed or not properly configured at {BASE_DIR}")
+    raise FileNotFoundError(
+        f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+    )
 
-# Define URLs for local WhatsApp Bot
 BASE_URL = "http://localhost:3000"
-WS_URL = "ws://localhost:3000"
+WS_URL   = "ws://localhost:3000"
+
+GRAY  = "\033[90m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
 
 
 class WhatsAppManager:
     def __init__(self):
         self.pending_messages = []
-        self.lock = threading.Lock()
+        self.lock             = threading.Lock()
 
         self.contact_state = {}
-        self.state_lock = threading.Lock()
+        self.state_lock    = threading.Lock()
 
         self.is_busy = False
-
         self.busy_instruction = (
             "You are Orion, the personal AI assistant of the user. "
             "The user is currently busy and cannot respond. "
@@ -43,11 +43,13 @@ class WhatsAppManager:
             "Do not repeat your identity unless this is the first reply in the conversation."
         )
 
-        self.ws_thread = None
-        self.running = False
+        self.ws_thread        = None
+        self.running          = False
         self.connection_state = "DISCONNECTED"
-        self.debug = False
+        self.debug            = False
+        self._ready_event     = threading.Event()
 
+    #  Direction helpers
 
     def _normalize_direction(self, direction):
         return str(direction or "").strip().upper()
@@ -55,9 +57,10 @@ class WhatsAppManager:
     def _is_outgoing_message(self, msg):
         direction = self._normalize_direction(msg.get("direction"))
         return direction in {
-        "OUT", "OUTGOING", "SENT", "BOT", "REPLY", "AI", "ASSISTANT", "ORION"
+            "OUTBOUND", "OUT", "OUTGOING", "SENT",
+            "BOT", "REPLY", "AI", "ASSISTANT", "ORION"
         }
-    
+
     def _normalize_context_messages(self, context):
         normalized = []
         for msg in context or []:
@@ -65,114 +68,169 @@ class WhatsAppManager:
             if not body:
                 continue
             normalized.append({
-                "direction": self._normalize_direction(msg.get("direction")),
-                "body": body,
-                "timestamp": str(msg.get("timestamp") or "").strip(),
+                "direction" : self._normalize_direction(msg.get("direction")),
+                "body"      : body,
+                "timestamp" : str(msg.get("timestamp") or "").strip(),
             })
         return normalized
 
+    #  Context helpers
+
     def _fetch_context_window(self, sender, context, limit=20):
         normalized = self._normalize_context_messages(context)
-
         if sender:
             try:
-                fetched = self.fetch_context(sender, limit=limit) or []
+                fetched      = self.fetch_context(sender, limit=limit) or []
                 fetched_norm = self._normalize_context_messages(fetched)
                 if len(fetched_norm) > len(normalized):
                     normalized = fetched_norm
             except Exception:
                 pass
-
         return normalized[-limit:]
+
+    def _build_context_str(self, context):
+        lines = []
+        for msg in self._normalize_context_messages(context):
+            role = "Orion" if self._is_outgoing_message(msg) else "Them"
+            lines.append(f"{role}: {msg['body']}")
+        return "\n".join(lines) if lines else ""
 
     def _format_context_section(self, messages, title):
         if not messages:
             return f"{title}:\n- none"
-
         lines = [f"{title}:"]
         for i, msg in enumerate(messages, start=1):
-            role = "USER" if not self._is_outgoing_message(msg) else "ASSISTANT"
-            ts = f" [{msg['timestamp']}]" if msg.get("timestamp") else ""
+            role = "ASSISTANT" if self._is_outgoing_message(msg) else "USER"
+            ts   = f" [{msg['timestamp']}]" if msg.get("timestamp") else ""
             lines.append(f"{i}. {role}{ts}: {msg['body']}")
         return "\n".join(lines)
 
-    def _sanitize_reply(self, reply_text, has_prior_outgoing):
+    #  Contact state
+
+    def _has_introduced(self, sender, context):
+        for msg in self._normalize_context_messages(context):
+            if self._is_outgoing_message(msg):
+                return True
+        with self.state_lock:
+            return self.contact_state.get(sender, {}).get("has_introduced", False)
+
+    def _update_contact_state_from_context(self, sender, context):
+        if not sender:
+            return
+        has_outgoing = any(
+            self._is_outgoing_message(m)
+            for m in self._normalize_context_messages(context)
+        )
+        with self.state_lock:
+            state = self.contact_state.get(sender, {
+                "has_introduced"     : False,
+                "auto_reply_count"   : 0,
+                "last_seen"          : None,
+                "last_direction_out" : False,
+            })
+            if has_outgoing:
+                state["has_introduced"]     = True
+                state["last_direction_out"] = True
+            state["last_seen"] = datetime.now().isoformat()
+            self.contact_state[sender] = state
+
+    def reset_contact_state(self, sender=None):
+        with self.state_lock:
+            if sender is None:
+                self.contact_state.clear()
+            else:
+                self.contact_state.pop(sender, None)
+
+    #  Auto-reply helpers
+
+    def _sanitize_reply(self, reply_text, already_introduced):
         if not reply_text:
             return reply_text
-
         text = reply_text.strip()
-
-        if has_prior_outgoing:
-            patterns = [
-                r"^(hi|hello|hey)[,!\s]+(i'?m|i am|this is)\s+orion[,!\s-]*",
-                r"^(i'?m|i am|this is)\s+orion[,!\s-]*",
-            ]
-            for pattern in patterns:
-                cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
-                if cleaned and cleaned != text:
-                    return cleaned
-
+        if not already_introduced:
+            return text
+        patterns = [
+            r"^(hi|hello|hey)[,!\s]+i'?m\s+orion[,!\s-]*",
+            r"^(hi|hello|hey)[,!\s]+this is orion[,!\s-]*",
+            r"^(hi|hello|hey)[,!\s]+i am orion[,!\s-]*",
+            r"^i'?m\s+orion[,!\s-]*",
+            r"^this is orion[,!\s-]*",
+        ]
+        for pattern in patterns:
+            cleaned = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+            if cleaned and cleaned != text:
+                return cleaned
         return text
 
     def _build_auto_reply_prompt(self, sender, profile_name, text, context):
         context20 = self._fetch_context_window(sender, context, limit=20)
-        primary5 = context20[-5:]
-        extended = context20[:-5] if len(context20) > 5 else []
+        primary5  = context20[-5:]
+        extended  = context20[:-5] if len(context20) > 5 else []
 
-        has_prior_outgoing = any(self._is_outgoing_message(m) for m in context20)
-        conversation_state = "FOLLOW_UP" if has_prior_outgoing else "FIRST_REPLY"
+        already_introduced = self._has_introduced(sender, context20)
+        conversation_state = "FOLLOW_UP" if already_introduced else "FIRST_REPLY"
+
+        if already_introduced:
+            intro_rule = (
+                "You have already introduced yourself earlier in this conversation. "
+                "Do NOT say your name again. Do NOT greet them with their name. "
+                "Do NOT say 'Hi [name]' or 'Hello [name]'. "
+                "Just continue the conversation naturally, like a person mid-chat would."
+            )
+        else:
+            intro_rule = (
+                "This is your first message to this person. "
+                "Introduce yourself once as Orion, the user's assistant. "
+                "Keep it brief — one line max. "
+                "Do NOT repeat the introduction in the same message."
+            )
 
         system_prompt = (
-            "You are a helpful personal AI assistant replying on behalf of Subhro. "
-            "The user is busy right now. "
-            "Reply naturally, politely, and briefly. "
-            "Do not sound robotic. "
-            "Do not repeat your identity unless this is the first reply in the conversation. "
-            "If this is a follow-up message, continue naturally without reintroducing yourself and without greeting the sender to keep the natural conversation flow."
+            "You are Orion, a personal AI assistant managing WhatsApp messages for a busy user.\n\n"
+            "CORE RULES — follow these strictly:\n"
+            "1. Write like a real person texting, not an AI assistant. Short, natural sentences.\n"
+            "2. Never start a reply with the contact's name (e.g. never write 'Hi Sumana,' or 'Hello Sumana,').\n"
+            "3. Never repeat yourself across messages. Read the conversation history and vary your response.\n"
+            "4. If they ask a real question, answer it. Do not ignore it and just say the user is busy.\n"
+            "5. If they ask how long the user will be busy, say you don't know exactly but you'll pass the message on.\n"
+            "6. Keep replies to 1-2 sentences unless the question genuinely needs more.\n"
+            f"7. {intro_rule}\n\n"
+            f"User instruction: {self.busy_instruction}"
         )
 
         prompt_parts = [
             f"Contact name: {profile_name}",
-            f"Contact id: {sender}",
             f"Conversation state: {conversation_state}",
-            f"Has prior assistant message: {has_prior_outgoing}",
             "",
-            self._format_context_section(
-                primary5,
-                "PRIMARY_CONTEXT (use this first, most recent 5 messages)"
-            ),
+            self._format_context_section(primary5, "PRIMARY_CONTEXT (most recent 5 messages)"),
         ]
-
         if extended:
             prompt_parts.extend([
                 "",
-                self._format_context_section(
-                    extended,
-                    "EXTENDED_CONTEXT (older messages from the last 20, use only if needed)"
-                ),
+                self._format_context_section(extended, "EXTENDED_CONTEXT (older messages, use only if needed)"),
             ])
-
         prompt_parts.extend([
             "",
             "CURRENT_MESSAGE:",
             f"USER: {text}",
+            "",
+            "Write your reply now. Output only the reply text, nothing else.",
         ])
 
-        prompt = "\n".join(prompt_parts)
-        return system_prompt, prompt, has_prior_outgoing
-    
-    
+        return system_prompt, "\n".join(prompt_parts), already_introduced
+
+    #  WebSocket lifecycle
+
     def start(self):
-        """Starts the background WebSocket listener thread."""
         if self.running:
             return
         self.running = True
+        print("WhatsApp integration initialized and background listener started.")
         self.ws_thread = threading.Thread(target=self._run_ws_listener, daemon=True)
         self.ws_thread.start()
-        print("WhatsApp integration initialized and background listener started.")
+        self._ready_event.wait(timeout=3)
 
     def _run_ws_listener(self):
-        """Manages the WebSocket life-cycle loop and forces active connection recovery."""
         while self.running:
             try:
                 ws = websocket.WebSocketApp(
@@ -184,50 +242,41 @@ class WhatsAppManager:
                 ws.run_forever(ping_interval=30, ping_timeout=10)
             except Exception:
                 pass
-
-            # Wait 5 seconds before retrying to prevent spamming
             time.sleep(5)
 
     def _on_message(self, ws, message):
         try:
-            data = json.loads(message)
+            data       = json.loads(message)
             event_type = data.get("event")
-            payload = data.get("payload", {})
+            payload    = data.get("payload", {})
 
             if event_type == "MESSAGE_RECEIVED":
-                sender = payload.get("sender")
+                sender       = payload.get("sender")
                 profile_name = payload.get("profileName", "Anonymous")
-                text = payload.get("text", "")
-                context = payload.get("context_history", [])
+                text         = payload.get("text", "")
+                context      = payload.get("context_history", [])
 
-                # Print real-time alert to terminal (debug only)
                 if self.debug:
-                    print(f"\n[WhatsApp Alert] New Message from {profile_name} ({sender})")
-                    print(f'Text: "{text}"')
-                    print("-" * 40)
+                    print(f"{GRAY}[WhatsApp] Message from {profile_name} ({sender}): \"{text}\"{RESET}")
 
-                # Update state from current context if possible
                 self._update_contact_state_from_context(sender, context)
 
                 if self.is_busy:
-                    # Run auto-reply in a separate thread to not block WS connection
                     threading.Thread(
                         target=self._handle_auto_reply,
                         args=(sender, profile_name, text, context),
-                        daemon=True
+                        daemon=True,
                     ).start()
                 else:
-                    # Append to pending queue for main chat context
                     with self.lock:
                         self.pending_messages.append({
-                            "sender": sender,
-                            "profileName": profile_name,
-                            "text": text,
-                            "timestamp": datetime.now().isoformat(),
-                            "context_history": context
+                            "sender"         : sender,
+                            "profileName"    : profile_name,
+                            "text"           : text,
+                            "timestamp"      : datetime.now().isoformat(),
+                            "context_history": context,
                         })
 
-                # Log every incoming message regardless of busy state
                 try:
                     from tools import wa_log_write
                     wa_log_write("RECEIVED", profile_name, sender, text)
@@ -236,158 +285,62 @@ class WhatsAppManager:
 
             elif event_type == "SYSTEM_QR_REQUIRED":
                 qr_code = payload.get("qr")
-                print("\n[WhatsApp Alert] Scan authorization required!")
+                print(f"\n{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
                 if qr_code:
-                    print("Generating QR code on terminal... Please scan with WhatsApp:")
                     subprocess.run(
-                        f'node -e "require(\'{qrcode_module}\').generate(\'{qr_code}\', {{small: true}})"',
-                        shell=True
+                        ["node", "-e",
+                         f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
+                        env={**os.environ, "QR_CODE": qr_code},
                     )
 
             elif event_type == "SYSTEM_STATUS":
-                state = payload.get("state", "UNKNOWN")
-                self.connection_state = state
+                state   = payload.get("state", "UNKNOWN")
                 qr_code = payload.get("qr")
+                self.connection_state = state
+                self._ready_event.set()
                 if state not in ("READY", "CONNECTED"):
-                    print(f"\n[WhatsApp Status] Current Client State: {state}")
+                    if self.debug:
+                        print(f"{GRAY}[WhatsApp] Status: {state}{RESET}")
                 if state == "QR_REQUIRED" and qr_code:
-                    print("Generating QR code on terminal... Please scan with WhatsApp:")
+                    print(f"{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
                     subprocess.run(
-                        f'node -e "require(\'{qrcode_module}\').generate(\'{qr_code}\', {{small: true}})"',
-                        shell=True
+                        ["node", "-e",
+                         f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
+                        env={**os.environ, "QR_CODE": qr_code},
                     )
 
             elif event_type == "SYSTEM_READY":
                 self.connection_state = "READY"
-                print("\n[WhatsApp Alert] Connected and Ready!")
+                self._ready_event.set()
+                if self.debug:
+                    print("{GRAY}[WhatsApp] Connected and ready.{RESET}")
 
             elif event_type:
                 if self.debug:
-                    print(f"\n[WhatsApp] Unhandled event: {event_type}")
+                    print(f"{GRAY}[WhatsApp] Unhandled event: {event_type}{RESET}")
 
         except json.JSONDecodeError as e:
-            print(f"[WhatsApp] Failed to parse message (invalid JSON): {e}")
+            print(f"[WhatsApp] Bad JSON from server: {e}")
         except Exception as e:
-            print(f"[WhatsApp] Unexpected error handling message: {e}")
+            print(f"[WhatsApp] Error handling message: {e}")
 
     def _on_error(self, ws, error):
         self.connection_state = "ERROR"
-        print(f"[WhatsApp] WebSocket error: {error}")
+        if self.debug:
+            print(f"{GRAY}[WhatsApp] WebSocket error: {error}{RESET}")
 
     def _on_close(self, ws, close_status_code, close_msg):
         self.connection_state = "DISCONNECTED"
         if self.debug:
-            print(f"[WhatsApp] WebSocket closed (code={close_status_code}). Reconnecting in 5s...")
+            print(f"{GRAY}[WhatsApp] Connection closed (code={close_status_code}). Reconnecting in 5s...{RESET}")
 
-    def _normalize_direction(self, direction):
-        """Convert direction values into a predictable uppercase token."""
-        if direction is None:
-            return ""
-        return str(direction).strip().upper()
-
-    def _is_outgoing_direction(self, direction):
-        """True if a context message was sent by Orion / the bot side."""
-        d = self._normalize_direction(direction)
-        return d in {
-            "OUT", "OUTGOING", "SENT", "BOT", "REPLY", "AI", "ASSISTANT", "ORION"
-        }
-
-    def _context_has_outgoing(self, context):
-        """Detect whether the conversation already contains an outgoing message."""
-        for msg in context or []:
-            try:
-                if self._is_outgoing_direction(msg.get("direction")):
-                    return True
-            except Exception:
-                continue
-        return False
-
-    def _update_contact_state_from_context(self, sender, context):
-        """Use the incoming context history to restore state for this contact."""
-        if not sender:
-            return
-
-        has_outgoing = self._context_has_outgoing(context)
-
-        with self.state_lock:
-            state = self.contact_state.get(sender, {
-                "has_introduced": False,
-                "auto_reply_count": 0,
-                "last_seen": None,
-                "last_direction_out": False
-            })
-
-            # If context already contains outgoing history, Orion has introduced itself before
-            if has_outgoing:
-                state["has_introduced"] = True
-                state["last_direction_out"] = True
-
-            state["last_seen"] = datetime.now().isoformat()
-            self.contact_state[sender] = state
-
-    def _build_reply_rules(self, sender, context):
-        """
-        Decide whether this reply should introduce Orion or stay silent about identity.
-        """
-        with self.state_lock:
-            state = self.contact_state.get(sender, {
-                "has_introduced": False,
-                "auto_reply_count": 0,
-                "last_seen": None,
-                "last_direction_out": False
-            })
-
-        # If the chat history already has outgoing messages, do not introduce again.
-        already_introduced = state["has_introduced"] or self._context_has_outgoing(context)
-
-        if already_introduced:
-            intro_rule = (
-                "Do NOT introduce yourself again. "
-                "Reply naturally, as a continuation of the same conversation."
-            )
-        else:
-            intro_rule = (
-                "This is the first reply in the conversation. "
-                "Introduce yourself briefly as Orion, the user's assistant."
-            )
-
-        return already_introduced, intro_rule
-
-    def _sanitize_reply(self, reply_text, already_introduced):
-        """
-        Light cleanup so the model cannot keep saying 'I'm Orion' forever.
-        This is a guardrail, not the main fix.
-        """
-        if not reply_text:
-            return reply_text
-
-        text = reply_text.strip()
-
-        if not already_introduced:
-            return text
-
-        # Remove repeated self-intro if the model still insists on doing it.
-        patterns = [
-            r'^(hi|hello|hey)[,!\s]+i\'?m\s+orion[,!\s-]*',
-            r'^(hi|hello|hey)[,!\s]+this is orion[,!\s-]*',
-            r'^(hi|hello|hey)[,!\s]+i am orion[,!\s-]*',
-            r'^i\'?m\s+orion[,!\s-]*',
-            r'^this is orion[,!\s-]*',
-        ]
-
-        for pattern in patterns:
-            new_text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
-            if new_text != text and new_text:
-                return new_text
-
-        return text
+    #  Auto-reply
 
     def _handle_auto_reply(self, sender, profile_name, text, context):
-        """Generates and sends an automatic polite response when user is busy."""
         if self.debug:
-            print(f"[WhatsApp Auto-Reply] Generating automatic response for {profile_name}...")
+            print(f"{GRAY}[WhatsApp] Auto-reply generating for {profile_name}...{RESET}")
 
-        system_prompt, prompt, has_prior_outgoing = self._build_auto_reply_prompt(
+        system_prompt, prompt, already_introduced = self._build_auto_reply_prompt(
             sender, profile_name, text, context
         )
 
@@ -396,12 +349,23 @@ class WhatsAppManager:
             reply_text = ask_ai_simple(prompt, "gemini-2.5-flash-lite", system_prompt)
 
             if reply_text and not reply_text.startswith("[EMPTY"):
-                reply_text = self._sanitize_reply(reply_text, has_prior_outgoing)
+                reply_text = self._sanitize_reply(reply_text, already_introduced)
+                success    = self.send_message(sender, reply_text)
 
-                success = self.send_message(sender, reply_text)
                 if success:
                     if self.debug:
-                        print(f'[WhatsApp Auto-Reply] Sent to {profile_name}: "{reply_text}"')
+                        print(f"{GRAY}[WhatsApp] Auto-reply sent to {profile_name}: \"{reply_text}\"{RESET}")
+                    with self.state_lock:
+                        state = self.contact_state.get(sender, {
+                            "has_introduced"     : False,
+                            "auto_reply_count"   : 0,
+                            "last_seen"          : None,
+                            "last_direction_out" : False,
+                        })
+                        state["has_introduced"]     = True
+                        state["last_direction_out"] = True
+                        state["auto_reply_count"]   = state.get("auto_reply_count", 0) + 1
+                        self.contact_state[sender]  = state
                     try:
                         from tools import wa_log_write
                         wa_log_write("SENT (auto-reply)", profile_name, sender, reply_text)
@@ -409,29 +373,29 @@ class WhatsAppManager:
                         pass
                 else:
                     if self.debug:
-                        print(f"[WhatsApp Auto-Reply] Send failed for {profile_name}.")
+                        print(f"{GRAY}[WhatsApp] Auto-reply send failed for {profile_name}.{RESET}")
             else:
                 if self.debug:
-                    print("[WhatsApp Auto-Reply] Generated empty response. No reply sent.")
+                    print(f"{GRAY}[WhatsApp] Empty response generated. No reply sent.{RESET}")
+
         except Exception as e:
-            print(f"[WhatsApp Auto-Reply] Failed to generate/send reply: {e}")
+            print(f"[WhatsApp] Auto-reply error: {e}")
+
+    #  HTTP API
 
     def send_message(self, to_phone, message_text):
-        """Sends an outbound WhatsApp message via HTTP POST request."""
-        url = f"{BASE_URL}/api/send"
+        url     = f"{BASE_URL}/api/send"
         payload = {"to": to_phone, "message": message_text}
         try:
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            data = response.json()
-            return data.get("success", False)
+            return response.json().get("success", False)
         except Exception as e:
-            print(f"[WhatsApp Manager] Send breakdown: {e}")
+            print(f"[WhatsApp] Send error: {e}")
             return False
 
     def fetch_context(self, to_phone, limit=5):
-        """Fetches the last N messages for a specific number from WhatsApp cloud."""
-        url = f"{BASE_URL}/api/context"
+        url     = f"{BASE_URL}/api/context"
         payload = {"to": to_phone, "limit": limit}
         try:
             response = requests.post(url, json=payload, timeout=15)
@@ -440,11 +404,12 @@ class WhatsAppManager:
             if data.get("success"):
                 return data.get("history", [])
         except Exception as e:
-            print(f"[WhatsApp Manager] Fetch context error: {e}")
+            print(f"[WhatsApp] Fetch context error: {e}")
         return []
 
+    #  Public API
+
     def get_pending_messages(self, clear=True):
-        """Returns and optionally clears any pending received messages."""
         with self.lock:
             messages = list(self.pending_messages)
             if clear:
@@ -452,18 +417,9 @@ class WhatsAppManager:
             return messages
 
     def set_busy(self, enabled, instruction=""):
-        """Enables or disables busy mode with an optional status/instruction."""
         self.is_busy = enabled
         if instruction:
             self.busy_instruction = instruction
-
-    def reset_contact_state(self, sender=None):
-        """Reset state for one contact or for all contacts."""
-        with self.state_lock:
-            if sender is None:
-                self.contact_state.clear()
-            else:
-                self.contact_state.pop(sender, None)
 
 
 # Singleton instance
