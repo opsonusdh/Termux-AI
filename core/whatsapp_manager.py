@@ -23,7 +23,6 @@ BASE_URL = "http://localhost:3000"
 WS_URL   = "ws://localhost:3000"
 
 GRAY  = "\033[90m"
-YELLOW = "\033[93m"
 RESET = "\033[0m"
 
 
@@ -48,6 +47,10 @@ class WhatsAppManager:
         self.connection_state = "DISCONNECTED"
         self.debug            = False
         self._ready_event     = threading.Event()
+        self._seen_msg_ids    = set()
+        self._seen_msg_lock   = threading.Lock()
+        self._active_senders  = set()  # senders with an auto-reply in progress
+        self._active_lock     = threading.Lock()
 
     #  Direction helpers
 
@@ -255,6 +258,17 @@ class WhatsAppManager:
                 profile_name = payload.get("profileName", "Anonymous")
                 text         = payload.get("text", "")
                 context      = payload.get("context_history", [])
+                msg_id       = payload.get("messageId")
+
+                # Deduplicate: drop if we already processed this message ID
+                if msg_id:
+                    with self._seen_msg_lock:
+                        if msg_id in self._seen_msg_ids:
+                            return
+                        self._seen_msg_ids.add(msg_id)
+                        # Keep the set bounded — drop oldest if over 200
+                        if len(self._seen_msg_ids) > 200:
+                            self._seen_msg_ids.pop()
 
                 if self.debug:
                     print(f"{GRAY}[WhatsApp] Message from {profile_name} ({sender}): \"{text}\"{RESET}")
@@ -285,7 +299,7 @@ class WhatsAppManager:
 
             elif event_type == "SYSTEM_QR_REQUIRED":
                 qr_code = payload.get("qr")
-                print(f"\n{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
+                print("\n[WhatsApp] QR scan required. Please scan with WhatsApp:")
                 if qr_code:
                     subprocess.run(
                         ["node", "-e",
@@ -299,10 +313,9 @@ class WhatsAppManager:
                 self.connection_state = state
                 self._ready_event.set()
                 if state not in ("READY", "CONNECTED"):
-                    if self.debug:
-                        print(f"{GRAY}[WhatsApp] Status: {state}{RESET}")
+                    print(f"[WhatsApp] Status: {state}")
                 if state == "QR_REQUIRED" and qr_code:
-                    print(f"{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
+                    print("[WhatsApp] QR scan required. Please scan with WhatsApp:")
                     subprocess.run(
                         ["node", "-e",
                          f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
@@ -312,8 +325,7 @@ class WhatsAppManager:
             elif event_type == "SYSTEM_READY":
                 self.connection_state = "READY"
                 self._ready_event.set()
-                if self.debug:
-                    print("{GRAY}[WhatsApp] Connected and ready.{RESET}")
+                print("[WhatsApp] Connected and ready.")
 
             elif event_type:
                 if self.debug:
@@ -337,6 +349,21 @@ class WhatsAppManager:
     #  Auto-reply
 
     def _handle_auto_reply(self, sender, profile_name, text, context):
+        # Drop duplicate concurrent calls for the same sender
+        with self._active_lock:
+            if sender in self._active_senders:
+                if self.debug:
+                    print(f"{GRAY}[WhatsApp] Auto-reply already in progress for {profile_name}, skipping.{RESET}")
+                return
+            self._active_senders.add(sender)
+
+        try:
+            self._do_auto_reply(sender, profile_name, text, context)
+        finally:
+            with self._active_lock:
+                self._active_senders.discard(sender)
+
+    def _do_auto_reply(self, sender, profile_name, text, context):
         if self.debug:
             print(f"{GRAY}[WhatsApp] Auto-reply generating for {profile_name}...{RESET}")
 

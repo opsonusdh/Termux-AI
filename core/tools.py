@@ -863,7 +863,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "set_whatsapp_busy_mode",
-            "description": "Enable or disable auto-reply 'busy' mode with a specific instruction for when contacts message you.",
+            "description": "Enable or disable auto-reply 'busy' mode with a instruction for when contacts message user.",
             "parameters": {
                 "type": "object",
                 "properties": {
