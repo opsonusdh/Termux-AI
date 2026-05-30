@@ -21,6 +21,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from permissions import validate_command
 from renderer import RED, GRAY, RESET, render_for_voice, render_markdown_terminal
 
+# Import WhatsApp Manager
+try:
+    from whatsapp_manager import whatsapp_manager
+    wp_configured = True
+except ImportError:
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from whatsapp_manager import whatsapp_manager
+    wp_configured = True
+except FileNotFoundError:
+    wp_configured = False
+    
+    
 WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
@@ -45,15 +57,30 @@ API_KEYS = _load_google_keys()
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILE  = os.path.join(BASE_DIR, "log.txt")
+WA_LOG_FILE = os.path.join(BASE_DIR, "whatsapp_log.jsonl")
 
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, "a", encoding="utf-8").close()
+if not os.path.exists(WA_LOG_FILE):
+    open(WA_LOG_FILE, "a", encoding="utf-8").close()
 
 
 def log_write(message: str) -> None:
     with open(LOG_FILE, "a", encoding="utf-8") as fh:
         fh.write(message.rstrip("\n") + "\n")
 
+
+def wa_log_write(direction: str, sender_name: str, sender_id: str, message: str) -> None:
+    """Append one WhatsApp conversation entry to the persistent log file."""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "direction": direction,
+        "sender_name": sender_name,
+        "sender_id": sender_id,
+        "message": message,
+    }
+    with open(WA_LOG_FILE, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 #  MEMORY STORE
 
@@ -758,6 +785,115 @@ TOOLS_DESCRIPTION = [
                     },
                 },
                 "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_whatsapp_message",
+            "description": "Send a WhatsApp message to a specific phone number or contact ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_phone": {
+                        "type": "string",
+                        "description": "The destination phone number (with country code, e.g., '919876543210') or contact ID.",
+                    },
+                    "message_text": {
+                        "type": "string",
+                        "description": "The text content of the message to send.",
+                    },
+                },
+                "required": ["to_phone", "message_text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_whatsapp_status",
+            "description": "Get the current status of the WhatsApp bot client and see if there are any pending received messages.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pending_whatsapp_messages",
+            "description": "Retrieve and optionally clear any pending received WhatsApp messages from the background queue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Whether to clear the messages from the queue after retrieving them. Default is true.",
+                        "default": True,
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_whatsapp_chat_history",
+            "description": "Fetch the recent chat message history timeline for a specific phone number or contact ID from WhatsApp.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_phone": {
+                        "type": "string",
+                        "description": "The phone number (e.g., '919876543210') or contact ID to fetch chat history for.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "The maximum number of recent messages to fetch. Default is 5.",
+                        "default": 5,
+                    },
+                },
+                "required": ["to_phone"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_whatsapp_busy_mode",
+            "description": "Enable or disable auto-reply 'busy' mode with a specific instruction for when contacts message you.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Whether busy mode should be enabled or disabled.",
+                    },
+                    "instruction": {
+                        "type": "string",
+                        "description": "The instructions for generating auto-replies, or empty to use the default instruction.",
+                    },
+                },
+                "required": ["enabled"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_whatsapp_report",
+            "description": "Get a full report of all WhatsApp messages received and sent during busy mode (or since last cleared). Shows who messaged, what they said, and what auto-replies were sent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "clear": {
+                        "type": "boolean",
+                        "description": "Whether to clear the log after generating the report. Default is false.",
+                        "default": False,
+                    }
+                },
             },
         },
     },
@@ -1504,7 +1640,7 @@ def sleep_mode() -> None:
         sys.path.append(STT_PATH)
 
     try:
-        from main import listen
+        from main import listen, _calibrate
         if subprocess.run(
             "which edge-tts",
             shell=True,
@@ -1522,9 +1658,10 @@ def sleep_mode() -> None:
     except Exception as e:
         return f"[ERR] Wake mode not initiated. Reason: {e}"
     print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
-
+    print(f"{GRAY}[SLEEP MODE] Calibrating...{RESET}")
+    _threshold = _calibrate(debug=False)
     while True:
-        heard = listen(once=True, cleaned=False, calibrate_once=True, use_groq=config.get("use_groq", False))
+        heard = listen(once=True, cleaned=False, calibrate_once=True, use_groq=config.get("use_groq", False), threshold=_threshold)
 
         if not heard:
             continue
@@ -1723,3 +1860,188 @@ def run_diagnosis() -> dict:
                 results[name] = {"error": str(e)}
     return results
 
+
+
+# --- WHATSAPP CORE TOOLS ---
+
+def send_whatsapp_message(to_phone: str, message_text: str) -> str:
+    """Send a WhatsApp message to a specific phone number or contact ID."""
+    log_write(f"[send_whatsapp_message] to:{to_phone} msg:{message_text}")
+    print(f"{GRAY}[WhatsApp] Sending message to {to_phone}...{RESET}")
+    try:
+        if not wp_configured:
+            e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+            out = f"[ERROR] Failed to send WhatsApp message: {e}"
+            print(f"{RED}[WhatsApp] {out}{RESET}")
+            return out
+        success = whatsapp_manager.send_message(to_phone, message_text)
+        if success:
+            out = f"Successfully sent WhatsApp message to {to_phone}."
+            print(f"{GRAY}[WhatsApp] {out}{RESET}")
+            wa_log_write("SENT (manual)", to_phone, to_phone, message_text)
+            return out
+        else:
+            out = f"Failed to send WhatsApp message to {to_phone}."
+            print(f"{RED}[WhatsApp] {out}{RESET}")
+            return out
+    except Exception as e:
+        out = f"[ERROR] Failed to send WhatsApp message: {e}"
+        print(f"{RED}[WhatsApp] {out}{RESET}")
+        return out
+
+
+def get_whatsapp_status() -> str:
+    """Get the current status of the WhatsApp bot client and any pending received messages."""
+    log_write("[get_whatsapp_status]")
+    if not wp_configured:
+        e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+        out = f"[ERROR] Failed to send WhatsApp message: {e}"
+        print(f"{RED}[WhatsApp] {out}{RESET}")
+        return out
+    state = whatsapp_manager.connection_state
+
+    pending = whatsapp_manager.get_pending_messages(clear=False)
+    pending_str = ""
+    if pending:
+        pending_str = f"\nPending Messages count: {len(pending)}\n"
+        for idx, msg in enumerate(pending):
+            pending_str += f"- [{idx+1}] From {msg['profileName']} ({msg['sender']}): \"{msg['text']}\"\n"
+    else:
+        pending_str = "\nNo pending messages in queue."
+        
+    busy_status = "ENABLED" if whatsapp_manager.is_busy else "DISABLED"
+    out = (
+        f"WhatsApp Service State: {state}\n"
+        f"Busy Auto-Reply Mode: {busy_status}\n"
+        f"Busy Instruction: \"{whatsapp_manager.busy_instruction}\""
+        f"{pending_str}"
+    )
+    return out
+
+
+def get_pending_whatsapp_messages(clear: bool = True) -> str:
+    """Retrieve and clear any pending received WhatsApp messages from the background queue."""
+    log_write(f"[get_pending_whatsapp_messages] clear:{clear}")
+    if not wp_configured:
+        e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+        out = f"[ERROR] Failed to send WhatsApp message: {e}"
+        print(f"{RED}[WhatsApp] {out}{RESET}")
+        return out
+    pending = whatsapp_manager.get_pending_messages(clear=clear)
+    if not pending:
+        return "No pending WhatsApp messages."
+    print(f"{GRAY}[WhatsApp] {len(pending)} pending message(s) retrieved.{RESET}")
+    
+    out_lines = []
+    for msg in pending:
+        out_lines.append(
+            f"From: {msg['profileName']} ({msg['sender']})\n"
+            f"Time: {msg['timestamp']}\n"
+            f"Message: {msg['text']}\n"
+            f"History context available: {len(msg.get('context_history', []))} messages\n"
+            "---"
+        )
+    return "\n".join(out_lines)
+
+
+def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
+    """Fetch the recent chat message history timeline for a specific phone number or contact ID from WhatsApp."""
+    log_write(f"[fetch_whatsapp_chat_history] to:{to_phone} limit:{limit}")
+    print(f"{GRAY}[WhatsApp] Fetching chat history for {to_phone}...{RESET}")
+    try:
+        history = whatsapp_manager.fetch_context(to_phone, limit=limit)
+        if not wp_configured:
+            e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+            out = f"[ERROR] Failed to send WhatsApp message: {e}"
+            print(f"{RED}[WhatsApp] {out}{RESET}")
+            return out
+        if not history:
+            return f"No chat history found or could not fetch history for {to_phone}."
+        
+        out_lines = []
+        for msg in history:
+            direction = msg.get("direction", "UNKNOWN")
+            body = msg.get("body", "")
+            ts = msg.get("timestamp", "")
+            out_lines.append(f"[{ts}] {direction}: {body}")
+        return "\n".join(out_lines)
+    except Exception as e:
+        return f"[ERROR] Failed to fetch chat history: {e}"
+
+
+def set_whatsapp_busy_mode(enabled: bool, instruction: str = "") -> str:
+    """Enable or disable auto-reply 'busy' mode with a specific instruction for when contacts message you."""
+    log_write(f"[set_whatsapp_busy_mode] enabled:{enabled} instruction:{instruction}")
+    status_str = "ENABLED" if enabled else "DISABLED"
+    print(f"{GRAY}[WhatsApp] Busy mode → {status_str}{RESET}")
+    if not wp_configured:
+        e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+        out = f"[ERROR] Failed to send WhatsApp message: {e}"
+        print(f"{RED}[WhatsApp] {out}{RESET}")
+        return out
+    whatsapp_manager.set_busy(enabled, instruction)
+    active_instruction = instruction or whatsapp_manager.busy_instruction
+    if enabled:
+        print(f"{GRAY}[WhatsApp] Instruction: \"{active_instruction}\"{RESET}")
+    return f"WhatsApp Busy Mode set to {status_str} with instruction: \"{active_instruction}\""
+
+
+def get_whatsapp_report(clear: bool = False) -> str:
+    """Read whatsapp_log.jsonl and return a human-readable conversation report."""
+    log_write(f"[get_whatsapp_report] clear:{clear}")
+    try:
+        if not wp_configured:
+            e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
+            out = f"[ERROR] Failed to send WhatsApp message: {e}"
+            print(f"{RED}[WhatsApp] {out}{RESET}")
+            return out
+        if not os.path.exists(WA_LOG_FILE):
+            return "No WhatsApp log file found. No conversations have been recorded yet."
+        
+
+        with open(WA_LOG_FILE, "r", encoding="utf-8") as fh:
+            lines = [l.strip() for l in fh if l.strip()]
+
+        if not lines:
+            return "WhatsApp log is empty. No conversations recorded yet."
+
+        entries = []
+        for line in lines:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+        if not entries:
+            return "WhatsApp log contains no valid entries."
+
+        # Group by sender_id for a per-contact summary
+        from collections import defaultdict
+        by_contact = defaultdict(list)
+        for e in entries:
+            by_contact[e["sender_id"]].append(e)
+
+        report_lines = [f" WhatsApp Report — {len(entries)} total message(s) across {len(by_contact)} contact(s)\n"]
+        report_lines.append("=" * 50)
+
+        for contact_id, msgs in by_contact.items():
+            contact_name = msgs[0]["sender_name"]
+            report_lines.append(f"\n {contact_name} ({contact_id})")
+            report_lines.append(f"   {len(msgs)} message(s):")
+            for m in msgs:
+                ts = m["timestamp"][:16].replace("T", " ")
+                direction = m["direction"]
+                text = m["message"]
+                arrow = "←" if direction == "RECEIVED" else "→"
+                report_lines.append(f"   [{ts}] {arrow} [{direction}] {text}")
+
+        report_lines.append("\n" + "=" * 50)
+
+        if clear:
+            open(WA_LOG_FILE, "w", encoding="utf-8").close()
+            report_lines.append(" Log cleared.")
+
+        return "\n".join(report_lines)
+
+    except Exception as e:
+        return f"[ERROR] Failed to read WhatsApp report: {e}"

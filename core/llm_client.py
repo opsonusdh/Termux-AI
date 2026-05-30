@@ -282,6 +282,25 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 text  = g("text", ""),
                                 voice = voice,
                             ),
+        "send_whatsapp_message": lambda: send_whatsapp_message(
+                                to_phone     = g("to_phone", ""),
+                                message_text = g("message_text", ""),
+                            ),
+        "get_whatsapp_status": lambda: get_whatsapp_status(),
+        "get_pending_whatsapp_messages": lambda: get_pending_whatsapp_messages(
+                                clear        = bool(g("clear", True)),
+                            ),
+        "fetch_whatsapp_chat_history": lambda: fetch_whatsapp_chat_history(
+                                to_phone     = g("to_phone", ""),
+                                limit        = int(g("limit", 5)),
+                            ),
+        "set_whatsapp_busy_mode": lambda: set_whatsapp_busy_mode(
+                                enabled      = bool(g("enabled", False)),
+                                instruction  = g("instruction", ""),
+                            ),
+        "get_whatsapp_report": lambda: get_whatsapp_report(
+                                clear        = bool(g("clear", False)),
+                            ),
     }
 
     fn = routes.get(name)

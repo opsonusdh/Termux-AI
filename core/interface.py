@@ -79,6 +79,12 @@ def _get_diag_history():
 
 
 def chat_loop():
+    # Start WhatsApp Manager
+    try:
+        whatsapp_manager.start()
+    except Exception as e:
+        print(f"⚠️ Failed to start WhatsApp Manager: {e}")
+
     history: list[dict] = []
     _diag_injected = False
 
