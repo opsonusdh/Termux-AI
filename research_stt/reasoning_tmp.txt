@@ -1,3 +1,0 @@
-1. Research STT acceleration: Completed (Identified whisper.cpp + quantization/GGML).
-2. Evaluate applicability: Completed (Highly applicable via native binary compilation in Termux).
-3. Propose improvements: Drafted below.
