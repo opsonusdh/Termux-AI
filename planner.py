@@ -6,7 +6,7 @@ GRAY  = "\033[90m"
 RESET = "\033[0m"
 
 class Planner:
-    def __init__(self, state_path="~/ai_root/data/state.json"):
+    def __init__(self, state_path="~/Termux-AI/data/state.json"):
         self.state_path = os.path.expanduser(state_path)
 
     def create_plan(self, task_description):
