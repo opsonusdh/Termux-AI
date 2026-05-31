@@ -1,6 +1,6 @@
 import os
 
-ROOT = os.path.expanduser("~/ai_root")
+ROOT = os.path.expanduser("~/Termux-AI")
 ORCHESTRATION_DIR = os.path.join(ROOT, "orchestration")
 TOOLS_DIR = os.path.join(ROOT, "tools")
 REFLECTION_DIR = os.path.join(ROOT, "reflection")
