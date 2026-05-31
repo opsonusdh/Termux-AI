@@ -101,25 +101,9 @@ def _reset_provider(provider_id: str) -> None:
 
 
 def _msg_to_dict(msg) -> dict:
-    """
-    Convert a ChatCompletionMessage object to a plain dict.
-
-    Gemini thinking models attach extra_content.google.thought_signature to
-    every tool call. It must be round-tripped back exactly or Gemini 3 returns
-    a 400 error.
-
-    The OpenAI SDK stores non-standard API fields in model_extra (Pydantic v2),
-    NOT as direct attributes. We check three locations in priority order:
-      1. tc.extra_content         — direct attribute (some SDK versions)
-      2. tc.model_extra           — Pydantic v2 extra fields dict
-      3. tc.model_dump()          — full serialisation, catches everything else
-    """
     if isinstance(msg, dict):
         return msg
 
-    # model_dump() is the most complete — use it as primary approach.
-    # It serialises ALL fields including Pydantic extra fields (model_extra),
-    # so extra_content is preserved automatically if the SDK captured it.
     if hasattr(msg, "model_dump"):
         try:
             return msg.model_dump(exclude_none=True)
@@ -164,21 +148,12 @@ def _msg_to_dict(msg) -> dict:
     return d
 
 
-# Dummy signature accepted by Google to skip validation when history
-# originates from a non-Gemini model that never produced real signatures.
 _DUMMY_SIG = "context_engineering_is_the_way_to_go"
 
-_GEMINI_PROVIDERS = {"google"}   # providers that require thought_signatures
+_GEMINI_PROVIDERS = {"google"}
 
 
 def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict]:
-    """
-    Adapt message history when switching between providers mid-fallback.
-
-    Gemini → non-Gemini : strip extra_content (Nvidia/Groq don't understand it)
-    non-Gemini → Gemini  : inject dummy thought_signature so Gemini 3 doesn't 400
-    Same provider        : return as-is
-    """
     going_to_gemini = pid in _GEMINI_PROVIDERS
     result = []
 
@@ -189,20 +164,17 @@ def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict
 
         new_tcs = []
         for i, tc in enumerate(m["tool_calls"]):
-            tc = dict(tc)  # shallow copy — don't mutate original
+            tc = dict(tc)
             has_sig = (
                 isinstance(tc.get("extra_content"), dict)
                 and tc["extra_content"].get("google", {}).get("thought_signature")
             )
 
             if going_to_gemini and not has_sig:
-                # Inject dummy signature on the first tool call of each step.
-                # Subsequent parallel calls in the same message don't need one.
                 if i == 0:
                     tc["extra_content"] = {"google": {"thought_signature": _DUMMY_SIG}}
 
             elif not going_to_gemini and has_sig:
-                # Strip Gemini-specific extra_content — other providers reject it
                 tc.pop("extra_content", None)
 
             new_tcs.append(tc)
@@ -330,8 +302,9 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
     base_messages.append({"role": "user", "content": prompt})
 
     slot      = 0
-    last_slot = -1   # track slot changes to know when to reset messages
-    messages  = []   # preserved across key-retries within the same slot
+    last_slot = -1
+    messages  = []
+    base_len  = len(base_messages)
 
     while True:
         if slot >= len(MODEL_SLOTS):
@@ -366,15 +339,16 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
             slot += 1
             continue
 
-        # FIX: only reset messages when slot actually changes.
-        # Previously messages were reset on EVERY outer loop iteration,
-        # including key-retries within the same slot — losing tool call history.
+        
         if slot != last_slot:
-            messages  = _sanitize_messages_for_provider(list(base_messages), pid)
+            source    = messages if messages else list(base_messages)
+            messages  = _sanitize_messages_for_provider(source, pid)
             last_slot = slot
-            base_len  = len(messages)
-            _dbg(f"Slot changed → [{pid}/{model_name}]. Messages reset. "
-                 f"History depth: {len(messages)}")
+            carried   = len(messages) - len(base_messages)
+            if carried > 0:
+                print(f"{YELLOW}[{pid}/{model_name}] Continuing with {carried} accumulated message(s) from previous model.{RESET}")
+            _dbg(f"Slot changed → [{pid}/{model_name}]. "
+                 f"Messages carried: {len(messages)} (base: {len(base_messages)})")
         else:
             _dbg(f"Key retry on [{pid}/{model_name}]. "
                  f"Preserving {len(messages)} messages.")
@@ -396,10 +370,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                      f"messages: {len(messages)} | "
                      f"max_tokens: {max_tok}")
 
-                # Use with_raw_response to capture the raw JSON BEFORE the SDK
-                # parses it. The OpenAI SDK Pydantic models silently drop unknown
-                # fields like extra_content (which carries thought_signature).
-                # model_dump() / getattr cannot recover what was already thrown away.
                 raw           = client.chat.completions.with_raw_response.create(**kwargs)
                 response      = raw.parse()
                 raw_json      = json.loads(raw.text)
@@ -408,8 +378,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                 finish_reason = choice.finish_reason
                 msg_dict      = _msg_to_dict(choice.message)
 
-                # Merge extra_content back from raw JSON into each tool call dict.
-                # This restores thought_signature that the SDK dropped during parsing.
                 if msg_dict.get("tool_calls"):
                     raw_tcs = (
                         raw_json.get("choices", [{}])[0]

@@ -23,6 +23,8 @@ BASE_URL = "http://localhost:3000"
 WS_URL   = "ws://localhost:3000"
 
 GRAY  = "\033[90m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
 RESET = "\033[0m"
 
 
@@ -35,12 +37,7 @@ class WhatsAppManager:
         self.state_lock    = threading.Lock()
 
         self.is_busy = False
-        self.busy_instruction = (
-            "You are Orion, the personal AI assistant of the user. "
-            "The user is currently busy and cannot respond. "
-            "Reply briefly, politely, and naturally. "
-            "Do not repeat your identity unless this is the first reply in the conversation."
-        )
+        self.busy_instruction = ""  # Personal context about the user (name, occupation, etc.)
 
         self.ws_thread        = None
         self.running          = False
@@ -79,9 +76,10 @@ class WhatsAppManager:
 
     #  Context helpers
 
-    def _fetch_context_window(self, sender, context, limit=20):
+    def _fetch_context_window(self, sender, context, limit=20, skip_http_fetch=False):
         normalized = self._normalize_context_messages(context)
-        if sender:
+        
+        if sender and not skip_http_fetch:
             try:
                 fetched      = self.fetch_context(sender, limit=limit) or []
                 fetched_norm = self._normalize_context_messages(fetched)
@@ -166,7 +164,7 @@ class WhatsAppManager:
         return text
 
     def _build_auto_reply_prompt(self, sender, profile_name, text, context):
-        context20 = self._fetch_context_window(sender, context, limit=20)
+        context20 = self._fetch_context_window(sender, context, limit=20, skip_http_fetch=True)
         primary5  = context20[-5:]
         extended  = context20[:-5] if len(context20) > 5 else []
 
@@ -188,17 +186,20 @@ class WhatsAppManager:
                 "Do NOT repeat the introduction in the same message."
             )
 
+        context_section = f"Context about the user:\n{self.busy_instruction}\n\n" if self.busy_instruction else ""
         system_prompt = (
-            "You are Orion, a personal AI assistant managing WhatsApp messages for a busy user.\n\n"
-            "CORE RULES — follow these strictly:\n"
-            "1. Write like a real person texting, not an AI assistant. Short, natural sentences.\n"
-            "2. Never start a reply with the contact's name (e.g. never write 'Hi Sumana,' or 'Hello Sumana,').\n"
-            "3. Never repeat yourself across messages. Read the conversation history and vary your response.\n"
-            "4. If they ask a real question, answer it. Do not ignore it and just say the user is busy.\n"
-            "5. If they ask how long the user will be busy, say you don't know exactly but you'll pass the message on.\n"
-            "6. Keep replies to 1-2 sentences unless the question genuinely needs more.\n"
-            f"7. {intro_rule}\n\n"
-            f"User instruction: {self.busy_instruction}"
+            "You are Orion, a personal AI assistant managing WhatsApp messages on behalf of a user who is currently busy.\n\n"
+            f"{context_section}"
+            "CORE RULES - follow these strictly:\n"
+            "1. The user is busy and cannot respond personally. Your job is to handle the conversation for them.\n"
+            "2. Write like a real person texting, not an AI. Short, natural sentences.\n"
+            "3. Tell the contact the user is busy and ask them to leave a message - but only if it feels natural to do so, not on every reply.\n"
+            "4. Never start a reply with a greeting after the initial reply.\n"
+            "5. Never repeat yourself across messages. Read the conversation history and vary your response.\n"
+            "6. If they ask a real question, answer it. Do not just deflect with 'the user is busy'.\n"
+            "7. If asked how long the user will be busy, say you don't know exactly but you'll pass the message on.\n"
+            "8. Keep replies to 1-2 sentences unless the question genuinely needs more.\n"
+            f"9. {intro_rule}"
         )
 
         prompt_parts = [
@@ -299,7 +300,7 @@ class WhatsAppManager:
 
             elif event_type == "SYSTEM_QR_REQUIRED":
                 qr_code = payload.get("qr")
-                print("\n[WhatsApp] QR scan required. Please scan with WhatsApp:")
+                print(f"\n{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
                 if qr_code:
                     subprocess.run(
                         ["node", "-e",
@@ -311,11 +312,12 @@ class WhatsAppManager:
                 state   = payload.get("state", "UNKNOWN")
                 qr_code = payload.get("qr")
                 self.connection_state = state
-                self._ready_event.set()
-                if state not in ("READY", "CONNECTED"):
+                if state in ("READY", "CONNECTED"):
+                    self._ready_event.set()
+                else:
                     print(f"[WhatsApp] Status: {state}")
                 if state == "QR_REQUIRED" and qr_code:
-                    print("[WhatsApp] QR scan required. Please scan with WhatsApp:")
+                    print(f"{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
                     subprocess.run(
                         ["node", "-e",
                          f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
@@ -332,19 +334,19 @@ class WhatsAppManager:
                     print(f"{GRAY}[WhatsApp] Unhandled event: {event_type}{RESET}")
 
         except json.JSONDecodeError as e:
-            print(f"[WhatsApp] Bad JSON from server: {e}")
+            print(f"{RED}[WhatsApp] Bad JSON from server: {e}{RESET}")
         except Exception as e:
-            print(f"[WhatsApp] Error handling message: {e}")
+            print(f"{RED}[WhatsApp] Error handling message: {e}{RESET}")
 
     def _on_error(self, ws, error):
         self.connection_state = "ERROR"
         if self.debug:
-            print(f"{GRAY}[WhatsApp] WebSocket error: {error}{RESET}")
+            print(f"{RED}[WhatsApp] WebSocket error: {error}{RESET}")
 
     def _on_close(self, ws, close_status_code, close_msg):
         self.connection_state = "DISCONNECTED"
         if self.debug:
-            print(f"{GRAY}[WhatsApp] Connection closed (code={close_status_code}). Reconnecting in 5s...{RESET}")
+            print(f"{YELLOW}[WhatsApp] Connection closed (code={close_status_code}). Reconnecting in 5s...{RESET}")
 
     #  Auto-reply
 
@@ -418,7 +420,7 @@ class WhatsAppManager:
             response.raise_for_status()
             return response.json().get("success", False)
         except Exception as e:
-            print(f"[WhatsApp] Send error: {e}")
+            print(f"{RED}[WhatsApp] Send error: {e}{RESET}")
             return False
 
     def fetch_context(self, to_phone, limit=5):
@@ -431,7 +433,7 @@ class WhatsAppManager:
             if data.get("success"):
                 return data.get("history", [])
         except Exception as e:
-            print(f"[WhatsApp] Fetch context error: {e}")
+            print(f"{RED}[WhatsApp] Fetch context error: {e}{RESET}")
         return []
 
     #  Public API

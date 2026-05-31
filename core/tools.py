@@ -24,15 +24,10 @@ from renderer import RED, GRAY, RESET, render_for_voice, render_markdown_termina
 # Import WhatsApp Manager
 try:
     from whatsapp_manager import whatsapp_manager
-    wp_configured = True
 except ImportError:
+    import sys
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from whatsapp_manager import whatsapp_manager
-    wp_configured = True
-except FileNotFoundError:
-    wp_configured = False
-    
-    
 WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
@@ -863,7 +858,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "set_whatsapp_busy_mode",
-            "description": "Enable or disable auto-reply 'busy' mode with a instruction for when contacts message user.",
+            "description": "Enable or disable auto-reply 'busy' mode with a specific instruction for when contacts message you.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -894,6 +889,23 @@ TOOLS_DESCRIPTION = [
                         "default": False,
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_whatsapp_user_profile",
+            "description": "Set personal context about the user that Orion will always include in its WhatsApp auto-reply system prompt. Use this to tell Orion the user's name, occupation, location, or any context that helps replies feel more personal and accurate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "A plain text description of the user. E.g. 'The user's name is Subhradeep. He is a student currently attending biology coaching. He lives in Kolkata.'",
+                    },
+                },
+                "required": ["profile"],
             },
         },
     },
@@ -1640,7 +1652,7 @@ def sleep_mode() -> None:
         sys.path.append(STT_PATH)
 
     try:
-        from main import listen, _calibrate
+        from main import listen
         if subprocess.run(
             "which edge-tts",
             shell=True,
@@ -1658,10 +1670,9 @@ def sleep_mode() -> None:
     except Exception as e:
         return f"[ERR] Wake mode not initiated. Reason: {e}"
     print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
-    print(f"{GRAY}[SLEEP MODE] Calibrating...{RESET}")
-    _threshold = _calibrate(debug=False)
+
     while True:
-        heard = listen(once=True, cleaned=False, calibrate_once=True, use_groq=config.get("use_groq", False), threshold=_threshold)
+        heard = listen(once=True, cleaned=False, calibrate_once=True, use_groq=config.get("use_groq", False))
 
         if not heard:
             continue
@@ -1869,11 +1880,6 @@ def send_whatsapp_message(to_phone: str, message_text: str) -> str:
     log_write(f"[send_whatsapp_message] to:{to_phone} msg:{message_text}")
     print(f"{GRAY}[WhatsApp] Sending message to {to_phone}...{RESET}")
     try:
-        if not wp_configured:
-            e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
-            out = f"[ERROR] Failed to send WhatsApp message: {e}"
-            print(f"{RED}[WhatsApp] {out}{RESET}")
-            return out
         success = whatsapp_manager.send_message(to_phone, message_text)
         if success:
             out = f"Successfully sent WhatsApp message to {to_phone}."
@@ -1893,11 +1899,6 @@ def send_whatsapp_message(to_phone: str, message_text: str) -> str:
 def get_whatsapp_status() -> str:
     """Get the current status of the WhatsApp bot client and any pending received messages."""
     log_write("[get_whatsapp_status]")
-    if not wp_configured:
-        e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
-        out = f"[ERROR] Failed to send WhatsApp message: {e}"
-        print(f"{RED}[WhatsApp] {out}{RESET}")
-        return out
     state = whatsapp_manager.connection_state
 
     pending = whatsapp_manager.get_pending_messages(clear=False)
@@ -1922,11 +1923,6 @@ def get_whatsapp_status() -> str:
 def get_pending_whatsapp_messages(clear: bool = True) -> str:
     """Retrieve and clear any pending received WhatsApp messages from the background queue."""
     log_write(f"[get_pending_whatsapp_messages] clear:{clear}")
-    if not wp_configured:
-        e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
-        out = f"[ERROR] Failed to send WhatsApp message: {e}"
-        print(f"{RED}[WhatsApp] {out}{RESET}")
-        return out
     pending = whatsapp_manager.get_pending_messages(clear=clear)
     if not pending:
         return "No pending WhatsApp messages."
@@ -1950,11 +1946,6 @@ def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
     print(f"{GRAY}[WhatsApp] Fetching chat history for {to_phone}...{RESET}")
     try:
         history = whatsapp_manager.fetch_context(to_phone, limit=limit)
-        if not wp_configured:
-            e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
-            out = f"[ERROR] Failed to send WhatsApp message: {e}"
-            print(f"{RED}[WhatsApp] {out}{RESET}")
-            return out
         if not history:
             return f"No chat history found or could not fetch history for {to_phone}."
         
@@ -1974,11 +1965,6 @@ def set_whatsapp_busy_mode(enabled: bool, instruction: str = "") -> str:
     log_write(f"[set_whatsapp_busy_mode] enabled:{enabled} instruction:{instruction}")
     status_str = "ENABLED" if enabled else "DISABLED"
     print(f"{GRAY}[WhatsApp] Busy mode → {status_str}{RESET}")
-    if not wp_configured:
-        e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
-        out = f"[ERROR] Failed to send WhatsApp message: {e}"
-        print(f"{RED}[WhatsApp] {out}{RESET}")
-        return out
     whatsapp_manager.set_busy(enabled, instruction)
     active_instruction = instruction or whatsapp_manager.busy_instruction
     if enabled:
@@ -1986,18 +1972,20 @@ def set_whatsapp_busy_mode(enabled: bool, instruction: str = "") -> str:
     return f"WhatsApp Busy Mode set to {status_str} with instruction: \"{active_instruction}\""
 
 
+def set_whatsapp_user_profile(profile: str) -> str:
+    """Set personal context about the user injected into every Orion auto-reply."""
+    log_write(f"[set_whatsapp_user_profile] {profile}")
+    whatsapp_manager.set_user_profile(profile)
+    print(f"{GRAY}[WhatsApp] User profile updated.{RESET}")
+    return f'User profile set: "{profile}"'
+
+
 def get_whatsapp_report(clear: bool = False) -> str:
     """Read whatsapp_log.jsonl and return a human-readable conversation report."""
     log_write(f"[get_whatsapp_report] clear:{clear}")
     try:
-        if not wp_configured:
-            e = f"Termux-WP is not installed or not properly configured at {BASE_DIR}"
-            out = f"[ERROR] Failed to send WhatsApp message: {e}"
-            print(f"{RED}[WhatsApp] {out}{RESET}")
-            return out
         if not os.path.exists(WA_LOG_FILE):
             return "No WhatsApp log file found. No conversations have been recorded yet."
-        
 
         with open(WA_LOG_FILE, "r", encoding="utf-8") as fh:
             lines = [l.strip() for l in fh if l.strip()]
