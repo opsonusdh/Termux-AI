@@ -146,8 +146,8 @@ YOU > Hey Orion, I will be busy for an hour or so. Can you enable busy mode in w
 Setting up Whatsapp is as easy as drinking water 
 ```bash
 cd ~/Termux-AI
-git clone https://github.com/opsonusdh/Termux-STT
-cd Termux-STT
+git clone https://github.com/opsonusdh/Termux-WP
+cd Termux-WP
 bash setup.sh
 ```
 
