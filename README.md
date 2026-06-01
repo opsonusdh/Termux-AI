@@ -29,6 +29,8 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 | `edge-tts` | `pip install edge-tts` |
 | `mpv` | `pkg install mpv` |
 | Termux-STT | See [Termux-STT repo](https://github.com/opsonusdh/Termux-STT) |
+| Termux-WP (WhatsApp support) | See [Termux-WP repo](https://github.com/opsonusdh/Termux-WP) |
+
 
 ---
 
@@ -74,6 +76,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 │   ├── prompt.py            # System prompt
 │   ├── renderer.py          # Terminal markdown renderer
 │   └── permissions.py       # Command safety validator
+│   └── whatsapp_manager.py       # whatsapp integration 
 ├── orchestration/
 │   ├── orchestrator.py      # High-level task delegation
 │   ├── manager.py           # Multi-process task manager
@@ -113,6 +116,19 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 ## Voice Mode
 
 Voice requires [Termux-STT](https://github.com/opsonusdh/Termux-STT), `edge-tts`, and `mpv` installed.
+
+```
+# In the chat loop:
+YOU > start voice      # switch to voice input + TTS output
+YOU > stop voice       # switch back to keyboard
+```
+
+Set `"tts_enabled": true` in `config.json` to start in voice mode by default.
+
+---
+## Whatsapp integration 
+
+Termux-STT [Termux-STT](https://github.com/opsonusdh/Termux-STT), `edge-tts`, and `mpv` installed.
 
 ```
 # In the chat loop:
