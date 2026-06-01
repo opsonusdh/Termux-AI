@@ -131,8 +131,10 @@ Set `"tts_enabled": true` in `config.json` to start in voice mode by default.
 Requires [Termux-WP](https://github.com/opsonusdh/Termux-STT), `node` and various node modules.
 
 ```
-# In the chhhhatoop
-hatoopatoopatoop
+# In the chat loop
+YOU > Hey Orion, I will be busy for an hour or so. Can you enable busy mode in whatsapp?
+
+---
 ## api.keys Format
 
 `api.keys` uses JSON. Multiple keys per provider are rotated round-robin and retired on rate-limit:
