@@ -122,6 +122,14 @@ Voice requires [Termux-STT](https://github.com/opsonusdh/Termux-STT), `edge-tts`
 YOU > start voice      # switch to voice input + TTS output
 YOU > stop voice       # switch back to keyboard
 ```
+### Setup
+It is easy to set up the voice mode
+```bash
+cd ~/Termux-AI
+git clone https://github.com/opsonusdh/Termux-STT
+cd Termux-STT
+bash setup.sh
+```
 
 Set `"tts_enabled": true` in `config.json` to start in voice mode by default.
 
@@ -133,6 +141,15 @@ Requires [Termux-WP](https://github.com/opsonusdh/Termux-STT), `node` and variou
 ```
 # In the chat loop
 YOU > Hey Orion, I will be busy for an hour or so. Can you enable busy mode in whatsapp?
+```
+### Setup
+Setting up Whatsapp is as easy as drinking water 
+```bash
+cd ~/Termux-AI
+git clone https://github.com/opsonusdh/Termux-STT
+cd Termux-STT
+bash setup.sh
+```
 
 ---
 ## api.keys Format
