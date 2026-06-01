@@ -13,7 +13,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 - **Agentic orchestration** — `planner.py` → `executor.py` → `validator.py` pipeline with multi-process delegation via `orchestration/`.
 - **Self-correction** — `reflection/` module logs execution outcomes and retries failures automatically.
 - **Safe execution** — `permissions.py` validates every shell command before dispatch.
-- **Whatsapp integration** — `whatsapp_manager.py`
+- **Whatsapp integration** — `whatsapp_manager.py` via [Termux-WP](https://github.com/opsonusdh/Termux-WP)
 ---
 
 ## Requirements
