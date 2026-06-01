@@ -13,7 +13,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 - **Agentic orchestration** — `planner.py` → `executor.py` → `validator.py` pipeline with multi-process delegation via `orchestration/`.
 - **Self-correction** — `reflection/` module logs execution outcomes and retries failures automatically.
 - **Safe execution** — `permissions.py` validates every shell command before dispatch.
-
+- **Whatsapp integration** — `whatsapp_manager.py`
 ---
 
 ## Requirements
@@ -56,7 +56,7 @@ cat > ~/Termux-AI/api.keys << 'EOF'
 EOF
 
 # 4. Run
-cd ~/Termux-AI/core
+cd ~/Termux-AI/
 python3 core
 ```
 
@@ -128,18 +128,11 @@ Set `"tts_enabled": true` in `config.json` to start in voice mode by default.
 ---
 ## Whatsapp integration 
 
-Termux-STT [Termux-STT](https://github.com/opsonusdh/Termux-STT), `edge-tts`, and `mpv` installed.
+Requires [Termux-WP](https://github.com/opsonusdh/Termux-STT), `node` and various node modules.
 
 ```
-# In the chat loop:
-YOU > start voice      # switch to voice input + TTS output
-YOU > stop voice       # switch back to keyboard
-```
-
-Set `"tts_enabled": true` in `config.json` to start in voice mode by default.
-
----
-
+# In the chhhhatoop
+hatoopatoopatoop
 ## api.keys Format
 
 `api.keys` uses JSON. Multiple keys per provider are rotated round-robin and retired on rate-limit:
