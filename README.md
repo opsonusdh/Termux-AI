@@ -76,7 +76,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 │   ├── prompt.py            # System prompt
 │   ├── renderer.py          # Terminal markdown renderer
 │   └── permissions.py       # Command safety validator
-│   └── whatsapp_manager.py       # whatsapp integration 
+│   └── whatsapp_manager.py  # whatsapp integration 
 ├── orchestration/
 │   ├── orchestrator.py      # High-level task delegation
 │   ├── manager.py           # Multi-process task manager
