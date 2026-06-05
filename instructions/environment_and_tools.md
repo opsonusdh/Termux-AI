@@ -1,75 +1,138 @@
-# Environment, Security, and Tool Integration Guidelines
+# Environment, Security, and Tool Integration
 
-This document provides instructions on how to interact with the Termux shell environment, access native Android capabilities safely, execute system commands, and manage localized utility tools within the Orion architecture.
+This document covers safe operation in the Termux sandbox, Termux API usage, the `tools/` wrapper pattern, and package management.
 
 ---
 
 ## 1. Operating Safely in Termux
 
-Operating inside Termux on a personal Android device requires maintaining a strict balance between high autonomy and device safety.
+### Sandbox Boundaries
+- **Write only inside `~/Termux-AI`** for all file creation, modification, or deletion. Read-only access outside this boundary is permitted where standard UNIX permissions allow.
+- **No global paths.** Do not assume `/tmp`, `/var`, or `/usr` are writable. Use paths from `paths.py` — all of which resolve under `~/Termux-AI`.
+- **Sensitive operations** — commands involving networking changes, package removal, or credential configuration must pass through `permissions.py` (`validate_command()`) before execution.
 
-### Permissions & Context Limits:
-- **Sandbox Boundary:** All active modifications, creations, or deletions must be strictly confined to `~/ai_root`. 
-- **Outside `~/ai_root` access:** Read-only access is permitted anywhere standard UNIX permissions allow (such as reading shared storage or inspecting logs). Never write, alter, or delete any files outside `~/ai_root` without explicit per-action authorization from the user.
-- **Sensitive Commands:** Commands involving device modification, networking adjustments, package removals, or credential configurations must be verified for safety before execution.
+### IPC Restrictions
+- Avoid named pipes (FIFOs) and POSIX shared memory — Android's security sandbox restricts them.
+- Use `multiprocessing.Queue` for inter-process communication (see `orchestration/protocol.py`).
+- Use append-only `.jsonl` files for persistent event logs (see `logs/reflection.jsonl`, `logs/chunks.jsonl`).
+
+### Resource Limits
+- Mobile CPUs throttle aggressively. Keep background threads lightweight — the context summariser and reflection logger are the only permitted daemon threads.
+- Always close file handles and join subprocesses. Use `finally` blocks for cleanup.
+- If battery is critically low (< 15%, not charging), skip non-essential background work.
 
 ---
 
 ## 2. Termux API Integration
 
-Termux provides extensive bridges to Android hardware and OS-level telemetry. Utilize these capabilities to contextualize actions:
+| Command | Use |
+|---|---|
+| `termux-battery-status` | Current charge level and charging state |
+| `termux-wifi-connectioninfo` | Active Wi-Fi connection details |
+| `termux-wifi-scaninfo` | Nearby network scan |
+| `termux-vibrate` | Haptic alert on task completion or failure |
+| `termux-notification` | System notification |
 
-- **Battery Status (`termux-battery-status`):** Monitor device power levels. Do not run heavy processing tasks, complex model training, or high-concurrency loops if battery levels are critically low (< 15%) and not charging.
-- **Wi-Fi Details (`termux-wifi-connectioninfo`, `termux-wifi-scaninfo`):** Used to verify connectivity state. Handle failures gracefully if Wi-Fi or GPS services are disabled on the device.
-- **Vibrate/Notifications (`termux-vibrate`, `termux-notification`):** Can be used to signal the user upon completion of long-running operations or during system failures.
-- **Speech-to-Text (STT) & Telemetry:** Utilize the local whisper integration under `~/ai_root/Termux-STT/` for parsing spoken voice prompts.
+Wrappers for battery and Wi-Fi are in `tools/`:
+- `tools/wrapper_termux_battery_status.py`
+- `tools/wrapper_termux_wifi_scaninfo.py`
 
-### Device Capability Discovery:
-Never assume a command or API is missing. Before reporting that a feature is unavailable, perform programmatic discovery:
-1. Check if the binary exists using `which <command>` or `type <command>`.
-2. Inspect if the package is available in repositories via `pkg search <package>`.
-3. Test permission states using local test script runs.
+These are also callable from `agent/state_manager.py` via `get_battery_status()` and `get_wifi_scan_info()`.
 
----
-
-## 3. Tool Architecture & Wrapper Pattern
-
-All tool integration must reside inside `~/ai_root/tools/`. Do not write loose script files in the system. Use the standardized Wrapper Pattern.
-
-### The Wrapper Pattern:
-Every system command or external API must be wrapped in a clean Python class. This guarantees standardized schema processing and type-safety:
-
-```python
-# Standard Tool Wrapper Schema example
-import json
-import subprocess
-from paths import LOGS_DIR
-
-class TermuxToolWrapper:
-    def __init__(self):
-        pass
-
-    def run_command(self, cmd_args):
-        try:
-            result = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                return {"status": "success", "data": json.loads(result.stdout)}
-            else:
-                return {"status": "failed", "error": result.stderr}
-        except Exception as e:
-            return {"status": "error", "error_type": type(e).__name__, "message": str(e)}
+### Discovery Before Reporting Unavailability
+Before reporting that a command or API is unavailable, verify programmatically:
+```bash
+which termux-battery-status          # check binary exists
+pkg search termux-api                # check if package is available
 ```
 
-### Directory Placement:
-- Core wrappers: `~/ai_root/tools/tool_wrappers.py`
-- Specialized standalone wrappers: `~/ai_root/tools/wrapper_<capability_name>.py`
-- Expose the capabilities: Expose through `~/ai_root/tools/__init__.py` so they can be imported cleanly across the architecture.
+---
+
+## 3. The `tools/` Wrapper Pattern
+
+All Termux API calls must be wrapped in a clean Python class inside `~/Termux-AI/tools/`. Do not write loose scripts elsewhere.
+
+**Note:** `tools/` (Termux API wrappers) and `core/tools.py` (LLM-callable tool implementations) are separate. Do not confuse them.
+
+### Standard Wrapper Structure
+
+```python
+# tools/wrapper_<capability_name>.py
+import json
+import subprocess
+
+def get_<capability>() -> dict:
+    try:
+        result = subprocess.run(
+            ["termux-<capability>"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            return {"status": "success", "data": json.loads(result.stdout)}
+        return {"status": "failed", "error": result.stderr.strip()}
+    except Exception as e:
+        return {"status": "error", "error_type": type(e).__name__, "message": str(e)}
+```
+
+### Placement Rules
+- Core wrappers and shared utilities: `tools/tool_wrappers.py`
+- Standalone per-capability wrappers: `tools/wrapper_<capability_name>.py`
+- Export through `tools/__init__.py` for clean imports
+
+### Adding a New LLM-Callable Tool
+
+1. Write the implementation function in `core/tools.py`.
+2. Add the JSON schema to `TOOLS_DESCRIPTION` in `core/llm_client.py`.
+3. Add the dispatch case to `_dispatch_tool()` in `core/llm_client.py`.
+4. If it wraps a Termux API, create the wrapper in `tools/` first and call it from `core/tools.py`.
 
 ---
 
-## 4. Package & Dependency Management
+## 4. sys.path Convention
 
-When code requires external third-party Python packages or Termux packages:
-1. **Detect Availability:** Check if the package is already installed (`import pkg_resources` or `pip list`).
-2. **Local Scope Isolation:** If installing python packages, make sure they do not break existing modules. Use standard library modules (`sqlite3`, `json`, `multiprocessing`, `subprocess`, `pathlib`) as much as possible to avoid dependency bloat.
-3. **User-Friendly Installation:** If an external system binary is required (e.g., `jq`, `curl`, `ffmpeg`), notify the user or run safe programmatic `pkg install` commands inside isolated workers only when absolutely necessary and safe.
+Every module that needs to import across packages must set up `sys.path` the same way — `core/` first, root second:
+
+```python
+import os, sys
+_CORE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_CORE)
+if _CORE not in sys.path: sys.path.insert(0, _CORE)
+if _ROOT not in sys.path: sys.path.insert(1, _ROOT)
+```
+
+This ensures:
+- `import tools` → `core/tools.py` (not `tools/` package)
+- `import paths` → `paths.py` at project root
+- `from agent import state_manager` → `agent/state_manager.py`
+- `from orchestration import Manager` → `orchestration/__init__.py`
+
+---
+
+## 5. Config and Secrets
+
+| File | Purpose | Gitignored |
+|---|---|---|
+| `config/api.keys` | LLM provider API keys (JSON) | ✓ |
+| `config/config.json` | Runtime settings (STT path, TTS toggle) | ✓ |
+| `config/capability_registry.json` | Module/function capability registry | ✗ |
+
+Always load via `paths` constants — never hardcode:
+
+```python
+import paths
+
+api_keys_path = paths.API_KEYS_FILE    # config/api.keys
+config_path   = paths.CONFIG_FILE      # config/config.json
+registry_path = paths.CAPABILITY_REGISTRY  # config/capability_registry.json
+```
+
+---
+
+## 6. Package and Dependency Management
+
+1. **Check first.** Run `pip list | grep <package>` or `import <package>` before installing.
+2. **Standard library first.** Prefer `json`, `subprocess`, `multiprocessing`, `pathlib`, `sqlite3`, and `threading` to avoid dependency bloat.
+3. **Required packages** — installed by `setup.sh`:
+   - `openai`, `requests`, `beautifulsoup4`, `jsonschema`
+4. **Optional packages** — `edge-tts` (voice TTS), `mpv` (audio playback).
+5. **Termux system packages** — install via `pkg install <package>`, not `apt`. Never run `pkg remove` or system-level changes without explicit user authorization.

@@ -30,16 +30,16 @@ STT_DIR   = os.path.join(AI_ROOT, "Termux-STT")
 WORKSPACE = os.path.join(AI_ROOT, "workspace")
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.json")
 DEFAULT_CONFIG = {
     "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,
 }
 
 if not os.path.exists(CONFIG_PATH):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(DEFAULT_CONFIG, f, indent=4)
-
 def is_voice_available():
     try:
         with open(CONFIG_PATH, "r") as f:

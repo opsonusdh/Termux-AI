@@ -18,7 +18,6 @@ MAG    = "\033[35m"
 CYAN   = "\033[36m"
 GRAY   = "\033[90m"
 
-DIVIDER = "─" * 38
 
 
 # Inline markdown regex (shared by both renderers)
@@ -28,8 +27,17 @@ ITALIC_RE      = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 
 
-#  TERMINAL RENDERER
+def make_divider(term_width: int) -> str:
+    line_len = int(term_width * 0.8)
+    padding = max(0, (term_width - line_len) // 2)
 
+    return (
+        " " * padding +
+        "─" * line_len +
+        " " * (term_width - padding - line_len)
+    )
+    
+#  TERMINAL RENDERER
 def render_inline(text: str) -> str:
     """Apply inline markdown formatting (colour + style) for terminal output."""
 
@@ -290,8 +298,8 @@ def render_markdown_terminal(text: str) -> str:
                 continue
 
         # Divider
-        if stripped == "---":
-            rendered.append(f"{GRAY}{DIVIDER}{RESET}")
+        if stripped in ("---", "***", "___", "- - -", "* * *", "_ _ _"):
+            rendered.append(f"{GRAY}{make_divider(shutil.get_terminal_size().columns)}{RESET}")
             i += 1
             continue
 
@@ -306,6 +314,11 @@ def render_markdown_terminal(text: str) -> str:
             continue
         if stripped.startswith("### "):
             rendered.append(f"{BOLD}{MAG}{render_inline(stripped[4:])}{RESET}")
+            i += 1
+            continue
+        
+        if stripped.startswith("#### "):
+            rendered.append(f"{BOLD}{GREEN}{render_inline(stripped[5:])}{RESET}")
             i += 1
             continue
 

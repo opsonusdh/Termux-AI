@@ -1,27 +1,36 @@
 import os
 import json
 import sys
+import time
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from llm_client import ask_ai
-from renderer import render_markdown_terminal, GRAY, RESET
-from tools import *
 
+# Path bootstrap
+_CORE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_CORE)
 sys.dont_write_bytecode = True
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
+if _ROOT not in sys.path:
+    sys.path.insert(1, _ROOT)
 
-# Start sys diagnosis in background immediately
-_diag_executor = ThreadPoolExecutor(max_workers=1)
-_diag_future   = _diag_executor.submit(run_diagnosis)
+import paths
 
-# Add Termux-STT to path
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Project imports
+from llm_client import ask_ai
+from renderer import render_markdown_terminal, GRAY, RESET, RED
+from tools import *
+import context_manager as _cm
 
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+# Config
+BASE_DIR    = _ROOT
+CONFIG_PATH = paths.CONFIG_FILE
 DEFAULT_CONFIG = {
-    "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
+    "stt_path":    os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,
-    "use_groq": False
+    "use_groq":    False,
 }
+os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
 if not os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, "w") as f:
         json.dump(DEFAULT_CONFIG, f, indent=4)
@@ -57,6 +66,10 @@ try:
 except Exception:
     HAS_STT = False
 
+# Start sys diagnosis in background immediately (after HAS_STT so run_diagnosis is defined)
+_diag_executor = ThreadPoolExecutor(max_workers=1)
+_diag_future   = _diag_executor.submit(run_diagnosis)
+
 
 def _get_diag_history():
     """Return a one-shot system message with diagnosis data, or None."""
@@ -80,10 +93,11 @@ def _get_diag_history():
 
 def chat_loop():
     # Start WhatsApp Manager
+    global config
     try:
         whatsapp_manager.start()
     except Exception as e:
-        print(f"⚠️ Failed to start WhatsApp Manager: {e}")
+        print(f"{RED}[Whatsapp] Failed to start WhatsApp Manager: {e}{RESET}")
 
     history: list[dict] = []
     _diag_injected = False
@@ -121,6 +135,8 @@ def chat_loop():
         print()
 
     while True:
+        with open(CONFIG_PATH, "r") as f:
+            config = json.load(f)
         if not config.get("tts_enabled") or not HAS_STT:
             try:
                 user_input = input("\nYOU > ").strip()
@@ -174,6 +190,17 @@ def chat_loop():
                  json.dump(config, f, indent=4)
             continue
 
+        if user_input.lower().startswith("agent"):
+            import llm_client
+            is_auto = "auto" in user_input.lower()
+            while True:
+                result = llm_client.run_agent_step(voice=config.get("tts_enabled", False))
+                print(render_markdown_terminal(f"**Agent Status:** {result}"))
+                if not is_auto or "No pending" in result or "failed" in result:
+                    break
+                time.sleep(1)
+            continue
+
         print("\n[Thinking]")
 
         # Inject diagnosis on first user message if not already done at greeting
@@ -183,6 +210,16 @@ def chat_loop():
             if diag_msg:
                 call_history = [diag_msg] + call_history
                 _diag_injected = True
+
+        # Open a new chunk for this turn
+        _cm.open_chunk(user_input)
+
+        # Prepend chunk-based history (summaries + recent raw) before any
+        # other history items. Chunk history goes first so the model sees
+        # the full conversation arc before the current session's messages.
+        chunk_history = _cm.build_history()
+        if chunk_history:
+            call_history = chunk_history + call_history
 
         try:
             reply = ask_ai(
@@ -208,8 +245,12 @@ def chat_loop():
         if config.get("tts_enabled") and HAS_STT:
             speak(reply, block=True)
 
-        history.append({"role": "user",     "content": user_input})
-        history.append({"role": "assistant", "content": reply})
+        # Close the chunk with the final reply, then trigger background summarization.
+        # NOTE: do NOT append user/assistant to the session 'history' list here.
+        # build_history() reconstructs the full conversation from chunks on every turn.
+        # The session-level 'history' is reserved for pre-loop one-time injections only.
+        _cm.close_chunk(reply)
+        _cm.maybe_summarize_async()
 
 
 if __name__ == "__main__":

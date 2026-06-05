@@ -1,100 +1,202 @@
 # Agentic Orchestration & Collaboration Workflows
 
-This document details the architectural blueprints and operational patterns of the Orion multi-agent orchestration system. It guides the creation, execution, and monitoring of specialized "Worker" subprocesses by the central "Manager" coordinating agent.
+This document covers the multi-process delegation system in `orchestration/`, the agent execution loop in `agent/`, and the reflection pipeline in `reflection/`.
 
 ---
 
-## 1. Architectural Topology
-
-Orion separates task management (high-level orchestration) from task execution (low-level script running) using an actor-like process-isolation model:
+## 1. Architecture Overview
 
 ```
-                  ┌──────────────────────┐
-                  │  Manager (Primary)   │
-                  └──────────┬───────────┘
-                             │ Spawns
-            ┌────────────────┼────────────────┐
-            ▼                ▼                ▼
-     ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-     │  Worker A   │  │  Worker B   │  │  Worker C   │
-     │   (Shell)   │  │  (Python)   │  │   (Mock)    │
-     └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-            │                │                │
-            └───────────┬────┴────────────────┘
-                        ▼ Writes to
-             ┌─────────────────────┐
-             │ multiprocessing.Queue│ (non-blocking)
-             └──────────┬──────────┘
-                        │ Reads from
-                        ▼
-                  ┌───────────┐
-                  │  Manager  │
-                  └───────────┘
+                     ┌─────────────────────┐
+                     │   interface.py      │
+                     │   /agent trigger    │
+                     └──────────┬──────────┘
+                                │
+                     ┌──────────▼──────────┐
+                     │  run_agent_step()   │  ← llm_client.py
+                     │  Supervisor loop    │
+                     └──┬──────────────┬───┘
+                        │              │
+               ┌────────▼───┐    ┌─────▼──────┐
+               │  Worker    │    │   Critic   │
+               │  ask_ai()  │    │  ask_ai()  │
+               └────────┬───┘    └─────┬──────┘
+                        │              │
+               ┌────────▼──────────────▼──────┐
+               │      agent/state_manager     │
+               │  persist outputs, advance    │
+               │  cursor, write state.json    │
+               └──────────────────────────────┘
 ```
 
-- **Manager (`manager.py` / `orchestrator.py`):** Holds the high-level goal, schedules sequence of execution, handles runtime dependency injection, and acts on feedback/errors.
-- **Worker (`worker.py`):** Isolated, sandboxed processes executing specific commands or scripts.
-- **IPCProtocol (`protocol.py`):** Standardized, synchronized communication pipeline implemented using Python's robust `multiprocessing.Queue` to avoid environment deadlocks common with FIFO pipes in Termux.
+For multi-process tasks, `orchestration/Manager` delegates to `Worker` processes over a `multiprocessing.Queue`:
+
+```
+orchestration/Manager
+    ├── spawns → Worker A (shell)
+    ├── spawns → Worker B (python)
+    └── spawns → Worker C (mock)
+              ↓ writes to
+    multiprocessing.Queue  (IPCProtocol)
+              ↓ reads from
+    Manager (collects results, aborts on failure)
+```
 
 ---
 
-## 2. Worker Abstraction
+## 2. Agent Execution Loop (`run_agent_step`)
 
-Every Worker script or class must inherit from or conform to the standard `Worker` structure in `~/ai_root/orchestration/worker.py`.
+Location: `core/llm_client.py`
 
-### Task Input Configuration:
-A task delegated to a worker is structured as a JSON-compatible dictionary:
+### Task Recovery Priority
+When `/agent` is triggered, the supervisor resolves the next task in this order:
+
+1. `active_task_id` — a task was interrupted mid-execution; resume it.
+2. `cursor` — last known position; pick up from there.
+3. First `pending` or `active` task — fallback for fresh starts or corrupt cursors.
+
+### Execution Flow (one step)
+```
+resolve task
+    ↓
+mark status="active", persist worker_output="" 
+    ↓
+Worker: ask_ai(worker_prompt)
+    ↓
+persist worker_output to state.json
+    ↓
+Critic: ask_ai(critic_prompt)
+    ↓
+persist critic_output to state.json
+    ↓
+"VERIFIED" → mark completed, advance cursor
+"FAILED"   → retry_count < 1 → run Worker again → run Critic again
+           → retry_count ≥ 1 → mark failed, advance cursor
+```
+
+### One-Retry Rule
+The retry executes **immediately** in the same call — it does not return and wait for another `/agent` trigger. `retry_count` is an integer field on the subtask, not a string flag.
+
+### State Persistence Contract
+- `worker_output` is written to disk **before** the critic call.
+- `critic_output` is written to disk **before** any status update.
+- A restart at any point can resume from `active_task_id`.
+
+---
+
+## 3. Worker Abstraction (`orchestration/worker.py`)
+
+Task input schema:
+
 ```json
 {
-  "task_id": "unique_task_01",
-  "name": "SystemStatusCheck",
-  "type": "shell",
-  "command": "termux-battery-status"
+  "id":          "task_01",
+  "worker_name": "SystemCheck",
+  "type":        "shell",
+  "command":     "termux-battery-status"
 }
 ```
-*Supported Types:*
-1. `shell`: Direct shell executions (bash commands).
-2. `python`: Inline Python snippets or targeted python script execution.
-3. `mock`: Simulation mode for dry-run testing.
 
-### Standardized Execution Report (Output):
-Every worker must transmit its status back through the queue using a strictly formatted output schema:
+Supported types:
+
+| Type | Behaviour |
+|---|---|
+| `shell` | Runs via `bash -c <command>` |
+| `python` | Runs as `python3 <file>` or `python3 -c <code>` |
+| `mock` | Returns `mock_response` dict immediately, no subprocess |
+
+Output schema (reported via `multiprocessing.Queue`):
+
 ```json
 {
-  "task_id": "unique_task_01",
-  "status": "success",
-  "exit_code": 0,
-  "stdout": "{\n  \"health\": \"good\",\n  \"percentage\": 84\n}",
-  "stderr": "",
-  "duration": 0.245
+  "worker":     "SystemCheck",
+  "task_type":  "shell",
+  "status":     "success",
+  "returncode": 0,
+  "stdout":     "...",
+  "stderr":     "",
+  "duration":   0.24
 }
 ```
-*Valid Statuses:*
-- `success`: Task executed completely with zero exit code.
-- `failed`: Task executed but returned a non-zero exit code.
-- `error`: Uncaught Python exception, timeout, or system failure occurred preventing execution.
+
+Valid statuses: `success`, `failed`, `error`.
 
 ---
 
-## 3. Communication Protocol & Lifecycle
+## 4. IPC Lifecycle (`orchestration/protocol.py` + `manager.py`)
 
-To ensure system stability, process creation and cleanup must follow a strict lifecycle protocol:
+Strict sequence — do not deviate:
 
-### Sequence of Delegation & Cleanup:
-1. **Queue Initialization:** The Manager instantiates a shared `multiprocessing.Queue()`.
-2. **Worker Preparation:** The Manager maps a subtask to a task definition, instantiating the `Worker` with the necessary parameters and injecting the communication queue reference.
-3. **Process Spawn:** The Manager instantiates a `multiprocessing.Process(target=worker.run)` and calls `process.start()`.
-4. **Non-Blocking Listen:** The Manager listens for the status report using `queue.get(timeout=T)` where `T` is the task-specific timeout limit.
-5. **Process Join:** Once the report is received (or a timeout exception occurs), the Manager calls `process.join(timeout=5)`.
-6. **Force Cleanup:** If the process is still alive after the join timeout, the Manager calls `process.terminate()` followed by `process.close()`.
-7. **Queue Management:** The Queue should remain open across tasks but must be properly drained and closed during system shutdown.
+1. `Manager.load_tasks([...])` — loads and normalises the task list.
+2. For each task:
+   - Spawn `multiprocessing.Process(target=_run_worker_process, args=(queue, ...))`.
+   - `process.start()`
+   - `IPCProtocol.receive_status(timeout=30)` — blocks until the worker puts to queue.
+   - `process.join()` — always join, even after receiving status.
+   - If status is not `success`/`completed`, abort remaining tasks.
+3. `Manager.run_all()` returns `{"status": "success"|"failed", "tasks": [...], "history": [...]}`.
+
+Never use FIFOs or shared memory — Android's security sandbox restricts them. Always use `multiprocessing.Queue`.
 
 ---
 
-## 4. Expanding Worker Capabilities
+## 5. Reflection Pipeline (`reflection/`)
 
-To register a new capability or worker type within Orion:
+Every plan executed through `agent/executor.py` is automatically recorded:
 
-1. **Register in `capability_registry.json`:** Add the schema, constraints, and operational metadata.
-2. **Update `worker.py` Execute Logic:** If a new execution engine is required (e.g., SQLite execution, direct API connection), implement the logic as a discrete method inside the `Worker` class.
-3. **Verify via Integration Tests:** Run the E2E verification suite (`test_orchestration.py`) to confirm that task delegation, IPC reporting, and process teardown are completely functional.
+```python
+from reflection import ReflectionLoop, attempt_correction
+
+# Record an outcome
+ReflectionLoop.record(plan, result, success=True)
+
+# Read the most recent entry
+entry = ReflectionLoop.latest_entry()   # dict or None
+
+# Analyse failure
+diagnosis = ReflectionLoop.analyze()   # runs Reflector on latest entry
+
+# Auto-retry if last result was Failure
+outcome = attempt_correction()
+# {"attempted": bool, "result": dict | None, "reason": str}
+```
+
+Log file: `logs/reflection.jsonl` (append-only, one JSON object per line).
+
+---
+
+## 6. Capability Registration (`config/capability_registry.json`)
+
+When adding a new capability:
+
+1. Add an entry to `config/capability_registry.json`:
+
+```json
+{
+  "name":        "my_new_capability",
+  "module":      "orchestration.worker",
+  "function":    "Worker",
+  "description": "What this does."
+}
+```
+
+2. Implement the logic in the appropriate module (`orchestration/worker.py` for new task types, `agent/executor.py` for new execution wrappers).
+
+3. If a new LLM-callable tool is needed, add:
+   - A function in `core/tools.py`
+   - A JSON schema entry in `TOOLS_DESCRIPTION` in `core/llm_client.py`
+   - A dispatch case in `_dispatch_tool()` in `core/llm_client.py`
+
+4. Run an integration test that exercises the full delegation + IPC + teardown chain before merging.
+
+---
+
+## 7. Prohibited Patterns
+
+| Pattern | Reason |
+|---|---|
+| `subprocess.run(cmd, shell=True)` for validation | Security — arbitrary shell execution as a validation mechanism |
+| `if "some string" in output: mark_completed()` | Not validation — presence of a string is not proof of success |
+| Wrapping `ask_ai()` | Breaks tool loop, key rotation, and rate-limit handling |
+| State injection into `ask_ai()` system prompt | Violates normal chat isolation — agent state belongs only in `run_agent_step()` |
+| Adding orchestration layers before proving minimal system | Technical debt — prove the flat loop works first |

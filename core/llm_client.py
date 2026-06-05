@@ -1,14 +1,25 @@
 import os
+import sys
 import time
 import json
-from openai import OpenAI
 
-from prompt import SYSTEM_PROMPT
+#  Path bootstrap 
+_CORE   = os.path.dirname(os.path.abspath(__file__))
+_ROOT   = os.path.dirname(_CORE)
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
+if _ROOT not in sys.path:
+    sys.path.insert(1, _ROOT)
+
+import paths
+from agent import state_manager
+from openai import OpenAI
 from renderer import RED, YELLOW, RESET
 from tools import *
+import context_manager as _cm
 
-AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
+with open(paths.PROMPT_FILE) as file:
+    SYSTEM_PROMPT = file.read()
 
 PROVIDERS: dict[str, dict] = {
     "google": {
@@ -25,21 +36,22 @@ PROVIDERS: dict[str, dict] = {
 
 MODEL_SLOTS: list[dict] = [
     {"provider_id": "google",  "name": "gemini-3.5-flash",                     "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3.1-flash-lite",                "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3-flash-preview",               "max_tokens": None},
-    {"provider_id": "groq",    "name": "groq/compound",                        "max_tokens": 8192},
-    {"provider_id": "nvidia",  "name": "openai/gpt-oss-120b",                  "max_tokens": 4096},
+    {"provider_id":"google",  "name": "gemini-3-flash-preview",                "max_tokens": None},
+    {"provider_id": "groq",  "name": "openai/gpt-oss-120b",                  "max_tokens": 4096},
     {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-v4-flash",        "max_tokens": 4096},
-    {"provider_id": "nvidia",  "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "max_tokens": 4096},
     {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-r1",              "max_tokens": 4096},
     {"provider_id": "google",  "name": "gemma-4-31b-it",                       "max_tokens": None},
     {"provider_id": "google",  "name": "gemini-2.5-flash",                     "max_tokens": None},
+    {"provider_id": "google",  "name": "gemini-3.1-flash-lite",                "max_tokens": None},
+    {"provider_id": "groq",    "name": "qwen/qwen3-32b",                       "max_tokens": None},
+    {"provider_id": "groq",    "name": "deepseek-r1-distill-llama-70b",        "max_tokens": None},
+    {"provider_id": "nvidia",  "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "max_tokens": 4096},
     {"provider_id": "google",  "name": "gemini-2.5-flash-lite",                "max_tokens": None},
 ]
 
 
 def _load_api_keys() -> dict[str, list[str]]:
-    path = os.path.join(AI_ROOT, "api.keys")
+    path = paths.API_KEYS_FILE
     raw  = open(path, "r", encoding="utf-8").read().strip()
     try:
         data = json.loads(raw)
@@ -258,8 +270,11 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 to_phone     = g("to_phone", ""),
                                 message_text = g("message_text", ""),
                             ),
-        "get_whatsapp_status": lambda: get_whatsapp_status(),
-        "get_pending_whatsapp_messages": lambda: get_pending_whatsapp_messages(
+          "get_whatsapp_status": lambda: get_whatsapp_status(),
+          "get_whatsapp_chats": lambda: get_whatsapp_chats(
+                                  filter_type  = g("filter_type", "all")
+                              ),
+          "get_pending_whatsapp_messages": lambda: get_pending_whatsapp_messages(
                                 clear        = bool(g("clear", True)),
                             ),
         "fetch_whatsapp_chat_history": lambda: fetch_whatsapp_chat_history(
@@ -269,9 +284,65 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "set_whatsapp_busy_mode": lambda: set_whatsapp_busy_mode(
                                 enabled      = bool(g("enabled", False)),
                                 instruction  = g("instruction", ""),
+                                exclude_all_groups_except = g("exclude_all_groups_except", None)
                             ),
         "get_whatsapp_report": lambda: get_whatsapp_report(
                                 clear        = bool(g("clear", False)),
+                            ),
+        "set_whatsapp_user_profile": lambda: set_whatsapp_user_profile(
+                                profile      = g("profile", ""),
+                            ),
+        "initialize_project": lambda: json.dumps(state_manager.initialize_project(
+                                 name = g("name", ""),
+                                 goal = g("goal", ""),
+                             )),
+        "add_subtask":     lambda: state_manager.add_subtask(
+                                 description = g("description", ""),
+                             ),
+        "update_subtask":  lambda: state_manager.update_subtask(
+                                 task_id      = int(g("task_id", 0)),
+                                 status       = g("status"),
+                                 notes        = g("notes"),
+                                 verification = g("verification"),
+                             ),
+        "retrieve_chunk":  lambda: _cm.retrieve_chunk(
+                                 chunk_id = g("chunk_id", 0),
+                             ),
+        "list_chunks":     lambda: _cm.list_chunks(),
+        "run_diagnosis":   lambda: run_diagnosis(),
+        "silence_whatsapp_contact": lambda: silence_whatsapp_contact(
+                                jid   = g("jid",   ""),
+                                hours = float(g("hours", 24)),
+                            ),
+        "react_to_whatsapp_message": lambda: react_to_whatsapp_message(
+                                message_id = g("message_id", ""),
+                                emoji      = g("emoji", ""),
+                            ),
+        "get_whatsapp_contact_info": lambda: get_whatsapp_contact_info(
+                                jid = g("jid", ""),
+                            ),
+        "get_whatsapp_group_participants": lambda: get_whatsapp_group_participants(
+                                jid = g("jid", ""),
+                            ),
+        "download_whatsapp_media": lambda: download_whatsapp_media(
+                                message_id = g("message_id", ""),
+                            ),
+        "schedule_whatsapp_message": lambda: schedule_whatsapp_message(
+                                to      = g("to", ""),
+                                message = g("message", ""),
+                                send_at = g("send_at", ""),
+                            ),
+        "search_whatsapp_chat": lambda: search_whatsapp_chat(
+                                jid   = g("jid", ""),
+                                query = g("query", ""),
+                                limit = int(g("limit", 20)),
+                            ),
+        "archive_whatsapp_chat": lambda: archive_whatsapp_chat(
+                                jid     = g("jid", ""),
+                                archive = bool(g("archive", True)),
+                            ),
+        "set_whatsapp_seen": lambda: set_whatsapp_seen(
+                                jid = g("jid", ""),
                             ),
     }
 
@@ -295,6 +366,9 @@ def _dbg(*args) -> None:
 def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) -> str:
     memory_block   = build_memory_block(prompt)
     system_content = (memory_block + "\n\n" + SYSTEM_PROMPT) if memory_block else SYSTEM_PROMPT
+
+    # NOTE: No state injection here. Agent context is only active during
+    # run_agent_step() calls triggered by /agent. Normal chat is unaffected.
 
     base_messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
@@ -444,6 +518,10 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     })
                     continue
 
+                # Capture tool context into the open chunk BEFORE returning.
+                # messages[base_len:] contains every intermediate assistant
+                # tool-call turn and tool-result turn accumulated this call.
+                _cm.set_tool_context(messages[base_len:])
                 return _stitch_assistant_turns(messages[base_len:], partial) or "[EMPTY RESPONSE]"
 
         except Exception as e:
@@ -477,3 +555,108 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
             else:
                 _dbg(f"  Unhandled exception: {s[:300]}")
                 raise
+
+
+def run_agent_step(voice: bool = False) -> str:
+    """Execute a single step of the agent: Supervisor -> Worker -> Critic loop.
+
+    Recovery priority:
+      1. active_task_id (interrupted mid-execution)
+      2. cursor (last known position)
+      3. first pending task (fallback for fresh start or corrupt cursor)
+
+    One retry maximum: the retry executes immediately in the same call.
+    worker_output and critic_output are persisted after every LLM call.
+    No subprocess. No shell execution.
+    """
+    state = state_manager.load_state()
+    if not state or state.get("status") != "active":
+        return "No active project found."
+
+    subtasks = state.get("subtasks", [])
+    goal = state.get("goal", "Unknown")
+
+    # --- Supervisor: resolve which task to run (priority chain) ---
+    task = None
+
+    # 1. active_task_id takes priority — we were interrupted mid-execution
+    active_id = state.get("active_task_id")
+    if active_id is not None:
+        task = next((t for t in subtasks if t["id"] == active_id and t["status"] in ("pending", "active")), None)
+
+    # 2. cursor position
+    if task is None:
+        cursor = state.get("cursor")
+        if cursor is not None:
+            task = next((t for t in subtasks if t["id"] == cursor and t["status"] in ("pending", "active")), None)
+
+    # 3. first pending task (recovery fallback)
+    if task is None:
+        task = next((t for t in subtasks if t["status"] in ("pending", "active")), None)
+
+    if task is None:
+        return "No pending or active subtasks found."
+
+    task_id = task["id"]
+    desc    = task["description"]
+    retry_count = task.get("retry_count", 0)
+
+    def _worker_call() -> str:
+        prompt = (
+            f"AGENT WORKER MODE\nProject Goal: {goal}\n"
+            f"Execute Subtask {task_id}: {desc}\n\n"
+            "Complete the task using available tools. Be precise and thorough."
+        )
+        return ask_ai(prompt, voice=voice)
+
+    def _critic_call(worker_reply: str) -> str:
+        prompt = (
+            f"AGENT CRITIC MODE\nTask: {desc}\nWorker Output:\n{worker_reply}\n\n"
+            "Verify if the task was completed correctly. "
+            "Reply with exactly 'VERIFIED' or 'FAILED: <reason>'."
+        )
+        return ask_ai(prompt, voice=voice)
+
+    # --- Worker Phase (attempt 1) ---
+    state_manager.update_subtask(task_id, status="active",
+                                 notes=f"Execution attempt {retry_count + 1} started.")
+    worker_reply = _worker_call()
+    state_manager.update_subtask(task_id, worker_output=worker_reply)
+
+    # --- Critic Phase (attempt 1) ---
+    critic_reply = _critic_call(worker_reply)
+    state_manager.update_subtask(task_id, critic_output=critic_reply,
+                                 verification=critic_reply)
+
+    if "VERIFIED" in critic_reply.upper():
+        state_manager.update_subtask(task_id, status="completed",
+                                     notes="Verified by LLM critic.")
+        return f"Subtask {task_id} completed and verified."
+
+    # Critic says FAILED. One retry allowed.
+    if retry_count >= 1:
+        # Already used the one retry — mark final failure.
+        state_manager.update_subtask(task_id, status="failed",
+                                     notes=f"Final failure after retry. {critic_reply}")
+        return f"Subtask {task_id} failed after retry."
+
+    # --- Single retry: actually re-execute, don't just mark pending ---
+    print(f"{YELLOW}[Agent] Critic rejected task {task_id}. Running retry...{RESET}")
+    state_manager.update_subtask(task_id, retry_count=1, status="active",
+                                 notes=f"Retry 1 triggered. Previous: {critic_reply}")
+
+    retry_worker_reply = _worker_call()
+    state_manager.update_subtask(task_id, worker_output=retry_worker_reply)
+
+    retry_critic_reply = _critic_call(retry_worker_reply)
+    state_manager.update_subtask(task_id, critic_output=retry_critic_reply,
+                                 verification=retry_critic_reply)
+
+    if "VERIFIED" in retry_critic_reply.upper():
+        state_manager.update_subtask(task_id, status="completed",
+                                     notes="Verified by LLM critic on retry.")
+        return f"Subtask {task_id} completed on retry."
+    else:
+        state_manager.update_subtask(task_id, status="failed",
+                                     notes=f"Final failure after retry. {retry_critic_reply}")
+        return f"Subtask {task_id} failed after retry."

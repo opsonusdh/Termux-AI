@@ -18,28 +18,42 @@ from collections import defaultdict
 from bs4 import BeautifulSoup, NavigableString, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Path bootstrap
+_CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_CORE_DIR)
+if _CORE_DIR not in sys.path:
+    sys.path.insert(0, _CORE_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(1, _ROOT_DIR)
+
 from permissions import validate_command
 from renderer import RED, GRAY, RESET, render_for_voice, render_markdown_terminal
+import paths
 
-# Import WhatsApp Manager
+# Import WhatsApp Manager (same package, safe relative import)
 try:
     from whatsapp_manager import whatsapp_manager
-except ImportError:
-    import sys
-    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from whatsapp_manager import whatsapp_manager
+    WP_AVAILABLE = True
+except (ImportError, FileNotFoundError):
+    try:
+        sys.path.append(_CORE_DIR)
+        from whatsapp_manager import whatsapp_manager
+        WP_AVAILABLE = True
+    except FileNotFoundError:
+        WP_AVAILABLE = False
+
 WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
-AI_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+AI_ROOT = _ROOT_DIR
 DIAGNOSIS_TIMEOUT = 10
 
 _speak_thread: threading.Thread | None = None
 
 def _load_google_keys() -> list:
-    """Load Google API keys from api.keys.
+    """Load Google API keys from config/api.keys.
     Supports both the new JSON dict format and legacy plain-text (one key per line)."""
-    path = os.path.join(AI_ROOT, "api.keys")
+    path = paths.API_KEYS_FILE
     raw = open(path, "r", encoding="utf-8").read().strip()
     try:
         data = json.loads(raw)
@@ -50,9 +64,9 @@ def _load_google_keys() -> list:
 
 API_KEYS = _load_google_keys()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LOG_FILE  = os.path.join(BASE_DIR, "log.txt")
-WA_LOG_FILE = os.path.join(BASE_DIR, "whatsapp_log.jsonl")
+BASE_DIR    = _ROOT_DIR
+LOG_FILE    = os.path.join(paths.LOGS_DIR, "log.txt")
+WA_LOG_FILE = os.path.join(paths.LOGS_DIR, "whatsapp_log.jsonl")
 
 if not os.path.exists(LOG_FILE):
     open(LOG_FILE, "a", encoding="utf-8").close()
@@ -67,6 +81,8 @@ def log_write(message: str) -> None:
 
 def wa_log_write(direction: str, sender_name: str, sender_id: str, message: str) -> None:
     """Append one WhatsApp conversation entry to the persistent log file."""
+    if not WP_AVAILABLE:
+        return
     entry = {
         "timestamp": datetime.now().isoformat(),
         "direction": direction,
@@ -81,8 +97,8 @@ def wa_log_write(direction: str, sender_name: str, sender_id: str, message: str)
 
 #  Paths
 
-MEMORY_FILE = os.path.join(BASE_DIR, "memories.txt")       # personal / conversational
-INDEX_FILE  = os.path.join(BASE_DIR, "indexed_memory.txt") # bulk file / code chunks
+MEMORY_FILE = paths.MEMORY_FILE        # personal / conversational facts
+INDEX_FILE  = paths.INDEXED_MEMORY_FILE  # bulk file / code chunks
 
 #  Stop-word filter
 
@@ -818,6 +834,157 @@ TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
+            "name": "get_whatsapp_chats",
+            "description": "List all WhatsApp chats and groups with their names, JIDs, unread counts, and metadata. Use this to discover JIDs before setting filters, ignoring contacts/groups, or sending messages to someone whose number you don't know.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter_type": {
+                        "type": "string",
+                        "enum": ["all", "dm", "group"],
+                        "description": "Filter results: 'all' returns everything, 'dm' returns only direct messages, 'group' returns only groups. Default is 'all'.",
+                        "default": "all",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "silence_whatsapp_contact",
+            "description": "Silence auto-replies to a specific contact or group for a given number of hours. Use when someone asks Orion to stop replying, or when you want to manually pause replies. Pass hours=0 to lift an existing silence immediately.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jid":   {"type": "string", "description": "WhatsApp JID of the contact or group to silence."},
+                    "hours": {"type": "number",  "description": "How many hours to silence (default 24). Pass 0 to lift immediately.", "default": 24},
+                },
+                "required": ["jid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "react_to_whatsapp_message",
+            "description": "React to a specific WhatsApp message with an emoji (e.g. 👍 ❤️ 😂). Use the messageId from a received message.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The serialized message ID to react to."},
+                    "emoji":      {"type": "string", "description": "The emoji to react with, e.g. '👍' or '❤️'."},
+                },
+                "required": ["message_id", "emoji"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_whatsapp_contact_info",
+            "description": "Fetch profile information for a WhatsApp contact: display name, phone number, about/status text, and profile picture URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jid": {"type": "string", "description": "WhatsApp JID of the contact (e.g. '919876543210@c.us')."},
+                },
+                "required": ["jid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_whatsapp_group_participants",
+            "description": "List all participants in a WhatsApp group along with their roles (admin, member). Requires a group JID ending in @g.us.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jid": {"type": "string", "description": "Group JID (ends in @g.us)."},
+                },
+                "required": ["jid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download_whatsapp_media",
+            "description": "Download the media file from a WhatsApp message (image, video, audio, document, sticker). Returns the base64 data and mimetype. Only call this when the user explicitly asks to see/save a file — do not call automatically on every media message.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The serialized message ID of the media message."},
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_whatsapp_message",
+            "description": "Schedule a WhatsApp message to be sent automatically at a specific future time. Useful for reminders, follow-ups, or timed announcements.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to":      {"type": "string", "description": "Recipient JID or phone number."},
+                    "message": {"type": "string", "description": "The message text to send."},
+                    "send_at": {"type": "string", "description": "ISO 8601 datetime string for when to send, e.g. '2026-06-06T09:00:00'."},
+                },
+                "required": ["to", "message", "send_at"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_whatsapp_chat",
+            "description": "Search for messages containing a keyword or phrase within a specific WhatsApp chat.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jid":   {"type": "string", "description": "Chat JID to search in."},
+                    "query": {"type": "string", "description": "The keyword or phrase to search for."},
+                    "limit": {"type": "integer", "description": "Max results to return (default 20).", "default": 20},
+                },
+                "required": ["jid", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "archive_whatsapp_chat",
+            "description": "Archive or unarchive a WhatsApp chat to reduce clutter.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jid":     {"type": "string",  "description": "Chat JID to archive/unarchive."},
+                    "archive": {"type": "boolean", "description": "True to archive, False to unarchive. Default is True.", "default": True},
+                },
+                "required": ["jid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_whatsapp_seen",
+            "description": "Mark a WhatsApp chat as read, clearing the unread message count on the phone.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jid": {"type": "string", "description": "Chat JID to mark as read."},
+                },
+                "required": ["jid"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_pending_whatsapp_messages",
             "description": "Retrieve and optionally clear any pending received WhatsApp messages from the background queue.",
             "parameters": {
@@ -858,7 +1025,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "set_whatsapp_busy_mode",
-            "description": "Enable or disable auto-reply 'busy' mode with a specific instruction for when contacts message you.",
+            "description": "Enable or disable auto-reply 'busy' mode with a specific instruction and optional group exclusions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -869,6 +1036,11 @@ TOOLS_DESCRIPTION = [
                     "instruction": {
                         "type": "string",
                         "description": "The instructions for generating auto-replies, or empty to use the default instruction.",
+                    },
+                    "exclude_all_groups_except": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of group names or JIDs to include; all other groups will be excluded from auto-replies.",
                     },
                 },
                 "required": ["enabled"],
@@ -906,6 +1078,104 @@ TOOLS_DESCRIPTION = [
                     },
                 },
                 "required": ["profile"],
+            },
+        },
+    },
+        {
+        "type": "function",
+        "function": {
+            "name": "initialize_project",
+            "description": "Initialize a new project and set the global goal.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The name of the project."},
+                    "goal": {"type": "string", "description": "The main goal of the project."}
+                },
+                "required": ["name", "goal"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_subtask",
+            "description": "Add a new subtask to the active project.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "Description of the subtask."}
+                },
+                "required": ["description"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_subtask",
+            "description": "Update status, notes, or verification of an existing subtask.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "integer", "description": "The 1-based ID of the subtask to update."},
+                    "status": {"type": "string", "enum": ["pending", "active", "completed", "failed"], "description": "New status for the subtask."},
+                    "notes": {"type": "string", "description": "Progress notes for the subtask."},
+                    "verification": {"type": "string", "description": "Verification steps or outputs."}
+                },
+                "required": ["task_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retrieve_chunk",
+            "description": (
+                "Retrieve the full raw conversation chunk or subchunk by its stable ID. "
+                "Use when you need detailed history from an earlier turn. "
+                "Call list_chunks first to find available IDs. "
+                "Parent IDs are integers (e.g. 3). Subchunk IDs are strings (e.g. '3.1'). "
+                "If a parent was split, this returns the split index with subchunk references."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chunk_id": {
+                        "type": "string",
+                        "description": (
+                            "The stable chunk ID to retrieve. "
+                            "Use '3' for parent chunk 3, or '3.1' for its first subchunk."
+                        )
+                    }
+                },
+                "required": ["chunk_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_chunks",
+            "description": (
+                "List all stored conversation chunks with their IDs and one-line summaries. "
+                "Use this to find which chunk ID to pass to retrieve_chunk."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_diagnosis",
+            "description": "Run a system diagnosis to check battery, weather, storage, memory, network, and datetime information. Returns a structured dictionary of current system status.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -1175,7 +1445,7 @@ def write_file(
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(content)
             lines_written = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-            print(f"{GRAY}[OK] Wrote {lines_written} line(s) to {path}{RESET}.")
+            print(f"{GRAY}[OK] Wrote {lines_written} line(s) to {path}.{RESET}")
             return f"[OK] Wrote {lines_written} line(s) to {path}."
 
         # append
@@ -1632,13 +1902,14 @@ def _speak_blocking(text: str, debug: bool = False) -> str:
 
 
 def sleep_mode() -> None:
-    CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+    CONFIG_PATH = paths.CONFIG_FILE
     DEFAULT_CONFIG = {
-        "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
+        "stt_path":    os.path.join(BASE_DIR, "Termux-STT"),
         "tts_enabled": False,
-        "use_groq": False
+        "use_groq":    False,
     }
     if not os.path.exists(CONFIG_PATH):
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
             json.dump(DEFAULT_CONFIG, f, indent=4)
     try:
@@ -1879,6 +2150,8 @@ def send_whatsapp_message(to_phone: str, message_text: str) -> str:
     """Send a WhatsApp message to a specific phone number or contact ID."""
     log_write(f"[send_whatsapp_message] to:{to_phone} msg:{message_text}")
     print(f"{GRAY}[WhatsApp] Sending message to {to_phone}...{RESET}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
     try:
         success = whatsapp_manager.send_message(to_phone, message_text)
         if success:
@@ -1899,6 +2172,8 @@ def send_whatsapp_message(to_phone: str, message_text: str) -> str:
 def get_whatsapp_status() -> str:
     """Get the current status of the WhatsApp bot client and any pending received messages."""
     log_write("[get_whatsapp_status]")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
     state = whatsapp_manager.connection_state
 
     pending = whatsapp_manager.get_pending_messages(clear=False)
@@ -1920,9 +2195,175 @@ def get_whatsapp_status() -> str:
     return out
 
 
+def get_whatsapp_chats(filter_type: str = "all") -> str:
+    """List all WhatsApp chats and groups with JIDs, names, unread counts, and metadata."""
+    log_write(f"[get_whatsapp_chats] filter:{filter_type}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+
+    chats = whatsapp_manager.get_chats(filter_type=filter_type)
+    if not chats:
+        return "No chats found or WhatsApp not ready."
+
+    dms    = [c for c in chats if c.get("type") == "dm"]
+    groups = [c for c in chats if c.get("type") == "group"]
+    lines  = []
+
+    def _fmt(c):
+        parts = [f"  {c['name']}"]
+        if c.get("isPinned"):  parts.append("📌")
+        if c.get("isMuted"):   parts.append("🔇")
+        if c.get("unread"):    parts.append(f"[{c['unread']} unread]")
+        return " ".join(parts) + f"\n    JID: {c['jid']}"
+
+    if dms:
+        lines.append(f"── DMs ({len(dms)}) ──")
+        lines.extend(_fmt(c) for c in dms)
+
+    if groups:
+        if lines:
+            lines.append("")
+        lines.append(f"── Groups ({len(groups)}) ──")
+        lines.extend(_fmt(c) for c in groups)
+
+    lines.append(f"\nTotal: {len(chats)} chat(s).")
+    return "\n".join(lines)
+
+
+def silence_whatsapp_contact(jid: str, hours: float = 24) -> str:
+    """Silence auto-replies to a contact/group for N hours. hours=0 lifts immediately."""
+    log_write(f"[silence_whatsapp_contact] jid:{jid} hours:{hours}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    ok, msg = whatsapp_manager.silence_contact(jid, hours=hours)
+    return msg
+
+
+def react_to_whatsapp_message(message_id: str, emoji: str) -> str:
+    """React to a WhatsApp message with an emoji."""
+    log_write(f"[react_to_whatsapp_message] id:{message_id} emoji:{emoji}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    ok = whatsapp_manager.react(message_id, emoji)
+    return f"Reacted with {emoji}." if ok else "Failed to react — message may no longer be available."
+
+
+def get_whatsapp_contact_info(jid: str) -> str:
+    """Fetch profile info for a WhatsApp contact."""
+    log_write(f"[get_whatsapp_contact_info] jid:{jid}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    info = whatsapp_manager.get_contact_info(jid)
+    if not info:
+        return f"Could not fetch contact info for {jid}."
+    lines = [
+        f"Name:        {info.get('name') or 'Unknown'}",
+        f"Number:      {info.get('number', 'N/A')}",
+        f"JID:         {info.get('jid', jid)}",
+        f"In contacts: {'Yes' if info.get('isMyContact') else 'No'}",
+        f"Business:    {'Yes' if info.get('isBusiness') else 'No'}",
+        f"Blocked:     {'Yes' if info.get('isBlocked') else 'No'}",
+    ]
+    if info.get("about"):
+        lines.append(f"About:       {info['about']}")
+    if info.get("profilePicUrl"):
+        lines.append(f"Profile pic: {info['profilePicUrl']}")
+    return "\n".join(lines)
+
+
+def get_whatsapp_group_participants(jid: str) -> str:
+    """List all participants of a WhatsApp group with their roles."""
+    log_write(f"[get_whatsapp_group_participants] jid:{jid}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    participants, group_name = whatsapp_manager.get_group_participants(jid)
+    if not participants:
+        return f"No participants found for {jid} (may not be a group or not ready)."
+    lines = [f"Group: {group_name or jid} ({len(participants)} members)", ""]
+    admins  = [p for p in participants if p.get("isAdmin") or p.get("isSuperAdmin")]
+    members = [p for p in participants if not p.get("isAdmin") and not p.get("isSuperAdmin")]
+    if admins:
+        lines.append("Admins:")
+        for p in admins:
+            tag = " [owner]" if p.get("isSuperAdmin") else ""
+            lines.append(f"  {p.get('number', p['jid'])}{tag}  ({p['jid']})")
+    if members:
+        lines.append("Members:")
+        for p in members:
+            lines.append(f"  {p.get('number', p['jid'])}  ({p['jid']})")
+    return "\n".join(lines)
+
+
+def download_whatsapp_media(message_id: str) -> str:
+    """Download and save media from a WhatsApp message to /tmp."""
+    log_write(f"[download_whatsapp_media] id:{message_id}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    result = whatsapp_manager.download_media(message_id)
+    if not result:
+        return "Media download failed — message may be expired or have no media."
+    import base64, mimetypes, os
+    mimetype = result.get("mimetype", "application/octet-stream")
+    filename = result.get("filename") or f"wa_media_{message_id[:8]}"
+    if "." not in filename:
+        ext = mimetypes.guess_extension(mimetype) or ".bin"
+        filename += ext
+    out_path = f"/tmp/{filename}"
+    with open(out_path, "wb") as f:
+        f.write(base64.b64decode(result["data"]))
+    size_kb = os.path.getsize(out_path) // 1024
+    return f"Saved to {out_path} ({size_kb} KB, {mimetype})"
+
+
+def schedule_whatsapp_message(to: str, message: str, send_at: str) -> str:
+    """Schedule a WhatsApp message to be sent at a specific ISO datetime."""
+    log_write(f"[schedule_whatsapp_message] to:{to} send_at:{send_at}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    ok, info = whatsapp_manager.schedule_message(to, message, send_at)
+    return info if ok else f"Failed to schedule: {info}"
+
+
+def search_whatsapp_chat(jid: str, query: str, limit: int = 20) -> str:
+    """Search for messages containing a keyword in a specific chat."""
+    log_write(f"[search_whatsapp_chat] jid:{jid} query:{query}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    results = whatsapp_manager.search_chat(jid, query, limit=limit)
+    if not results:
+        return f"No messages found containing '{query}'."
+    lines = [f"Found {len(results)} message(s) matching '{query}':", ""]
+    for r in results:
+        direction = "→ OUT" if r.get("direction") == "OUTBOUND" else "← IN"
+        lines.append(f"[{r.get('timestamp', '')[:16]}] {direction}: {r.get('body', '')}")
+        lines.append(f"  ID: {r.get('messageId', '')}")
+    return "\n".join(lines)
+
+
+def archive_whatsapp_chat(jid: str, archive: bool = True) -> str:
+    """Archive or unarchive a WhatsApp chat."""
+    log_write(f"[archive_whatsapp_chat] jid:{jid} archive:{archive}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    ok = whatsapp_manager.archive_chat(jid, archive=archive)
+    action = "Archived" if archive else "Unarchived"
+    return f"{action} {jid}." if ok else f"Failed to {'archive' if archive else 'unarchive'} {jid}."
+
+
+def set_whatsapp_seen(jid: str) -> str:
+    """Mark a WhatsApp chat as read, clearing the unread count on the phone."""
+    log_write(f"[set_whatsapp_seen] jid:{jid}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    whatsapp_manager.set_seen(jid)
+    return f"Marked {jid} as read."
+
+
 def get_pending_whatsapp_messages(clear: bool = True) -> str:
     """Retrieve and clear any pending received WhatsApp messages from the background queue."""
     log_write(f"[get_pending_whatsapp_messages] clear:{clear}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
     pending = whatsapp_manager.get_pending_messages(clear=clear)
     if not pending:
         return "No pending WhatsApp messages."
@@ -1930,8 +2371,9 @@ def get_pending_whatsapp_messages(clear: bool = True) -> str:
     
     out_lines = []
     for msg in pending:
+        group_tag = f" [GROUP: {msg.get('chatName', msg.get('sender'))}]" if msg.get('isGroup') else ""
         out_lines.append(
-            f"From: {msg['profileName']} ({msg['sender']})\n"
+            f"From: {msg['profileName']} ({msg['sender']}){group_tag}\n"
             f"Time: {msg['timestamp']}\n"
             f"Message: {msg['text']}\n"
             f"History context available: {len(msg.get('context_history', []))} messages\n"
@@ -1944,6 +2386,8 @@ def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
     """Fetch the recent chat message history timeline for a specific phone number or contact ID from WhatsApp."""
     log_write(f"[fetch_whatsapp_chat_history] to:{to_phone} limit:{limit}")
     print(f"{GRAY}[WhatsApp] Fetching chat history for {to_phone}...{RESET}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
     try:
         history = whatsapp_manager.fetch_context(to_phone, limit=limit)
         if not history:
@@ -1960,21 +2404,40 @@ def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
         return f"[ERROR] Failed to fetch chat history: {e}"
 
 
-def set_whatsapp_busy_mode(enabled: bool, instruction: str = "") -> str:
-    """Enable or disable auto-reply 'busy' mode with a specific instruction for when contacts message you."""
-    log_write(f"[set_whatsapp_busy_mode] enabled:{enabled} instruction:{instruction}")
+def set_whatsapp_busy_mode(enabled: bool, instruction: str = "", exclude_all_groups_except: list = None) -> str:
+    """Enable or disable auto-reply 'busy' mode with a specific instruction and optional group exclusions."""
+    log_write(f"[set_whatsapp_busy_mode] enabled:{enabled} instruction:{instruction} exclude_all_groups_except:{exclude_all_groups_except}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    
     status_str = "ENABLED" if enabled else "DISABLED"
     print(f"{GRAY}[WhatsApp] Busy mode → {status_str}{RESET}")
+    
     whatsapp_manager.set_busy(enabled, instruction)
+    
+    if enabled and exclude_all_groups_except is not None:
+        whatsapp_manager.set_exclude_all_groups_except(exclude_all_groups_except)
+        print(f"{GRAY}[WhatsApp] Group Whitelist: {exclude_all_groups_except}{RESET}")
+    elif not enabled:
+        whatsapp_manager.set_exclude_all_groups_except([])
+
     active_instruction = instruction or whatsapp_manager.busy_instruction
     if enabled:
         print(f"{GRAY}[WhatsApp] Instruction: \"{active_instruction}\"{RESET}")
-    return f"WhatsApp Busy Mode set to {status_str} with instruction: \"{active_instruction}\""
+    
+    msg = f"WhatsApp Busy Mode set to {status_str}."
+    if enabled:
+        msg += f" Instruction: \"{active_instruction}\"."
+        if exclude_all_groups_except:
+            msg += f" Groups included: {exclude_all_groups_except} (others excluded)."
+    return msg
 
 
 def set_whatsapp_user_profile(profile: str) -> str:
     """Set personal context about the user injected into every Orion auto-reply."""
     log_write(f"[set_whatsapp_user_profile] {profile}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
     whatsapp_manager.set_user_profile(profile)
     print(f"{GRAY}[WhatsApp] User profile updated.{RESET}")
     return f'User profile set: "{profile}"'
@@ -1983,6 +2446,9 @@ def set_whatsapp_user_profile(profile: str) -> str:
 def get_whatsapp_report(clear: bool = False) -> str:
     """Read whatsapp_log.jsonl and return a human-readable conversation report."""
     log_write(f"[get_whatsapp_report] clear:{clear}")
+    if not WP_AVAILABLE:
+        return "Termux-WP not available. Probably Termux-WP not installed."
+    
     try:
         if not os.path.exists(WA_LOG_FILE):
             return "No WhatsApp log file found. No conversations have been recorded yet."
