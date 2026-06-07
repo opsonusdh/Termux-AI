@@ -1,14 +1,18 @@
 import re
 import shutil
 import textwrap
+from typing import List, Sequence, Tuple
 
-#  ANSI colour codes
+# -----------------------------
+# ANSI colour / style codes
+# -----------------------------
 
 RESET  = "\033[0m"
 
 BOLD   = "\033[1m"
 ITALIC = "\033[3m"
 DIM    = "\033[2m"
+UNDER  = "\033[4m"
 
 RED    = "\033[31m"
 GREEN  = "\033[32m"
@@ -18,219 +22,503 @@ MAG    = "\033[35m"
 CYAN   = "\033[36m"
 GRAY   = "\033[90m"
 
+# -----------------------------
+# Regex patterns
+# -----------------------------
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mK]")
+
+BOLD_RE        = re.compile(r"(?<!\\)\*\*(.+?)\*\*")
+ITALIC_RE      = re.compile(r"(?<!\\)(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
+INLINE_CODE_RE = re.compile(r"(?<!\\)`([^`]+)`")
+STRIKE_RE      = re.compile(r"(?<!\\)~~(.+?)~~")
+LINK_RE        = re.compile(r"(?<!\\)\[([^\]]+)\]\(([^)]+)\)")
+
+TABLE_SEP_CELL_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
+DIVIDER_RE        = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
+
+# Voice renderer regex
+_STRIKE_RE_VOICE    = re.compile(r"~~(.+?)~~")
+_LINK_RE_VOICE      = re.compile(r"\[([^\]]+)\]\([^\)]*\)")
+_BARE_URL_RE        = re.compile(r"https?://\S+")
+_TABLE_ROW_RE       = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_ROW_NOPIPE_RE = re.compile(r"^\s*[^|].*[^|]\s*$")
+
+# -----------------------------
+# Voice renderer config
+# -----------------------------
+
+_VOICE_SHORT_LINES = 3
+_VOICE_SHORT_CHARS  = 200
+
+_CODE_PLACEHOLDER = "You can see the code in our conversation history."
+_TEXT_PLACEHOLDER = "You can see the text in our conversation history."
+_TABLE_PLACEHOLDER = "See the table in our conversation history."
+
+_TEXT_FENCE_LABELS = {"text", "txt", ""}
 
 
-# Inline markdown regex (shared by both renderers)
+# ============================================================
+# Width helpers
+# ============================================================
 
-BOLD_RE        = re.compile(r"\*\*(.+?)\*\*")
-ITALIC_RE      = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
-INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+def _term_size() -> Tuple[int, int]:
+    return shutil.get_terminal_size((80, 24))
 
 
-def make_divider(term_width: int) -> str:
-    line_len = int(term_width * 0.8)
-    padding = max(0, (term_width - line_len) // 2)
+def visible_len(s: str) -> int:
+    """Length after removing ANSI escape sequences."""
+    return len(ANSI_ESCAPE.sub("", s))
 
-    return (
-        " " * padding +
-        "─" * line_len +
-        " " * (term_width - padding - line_len)
-    )
-    
-#  TERMINAL RENDERER
-def render_inline(text: str) -> str:
-    """Apply inline markdown formatting (colour + style) for terminal output."""
 
-    # inline code first (avoids collisions with bold/italic)
-    text = INLINE_CODE_RE.sub(
-        lambda m: f"{YELLOW}`{m.group(1)}`{RESET}",
-        text,
-    )
-    text = BOLD_RE.sub(lambda m: f"{BOLD}{m.group(1)}{RESET}", text)
-    text = ITALIC_RE.sub(lambda m: f"{ITALIC}{m.group(1)}{RESET}", text)
+def display_width(s: str) -> int:
+    """
+    Best-effort display width.
+    Uses wcwidth if available, otherwise falls back to visible_len().
+    """
+    try:
+        from wcwidth import wcswidth  # type: ignore
+        width = wcswidth(ANSI_ESCAPE.sub("", s))
+        return max(0, width) if width is not None else visible_len(s)
+    except Exception:
+        return visible_len(s)
+
+
+def truncate_to_width(text: str, width: int) -> str:
+    """Truncate text to a given display width."""
+    if width <= 0:
+        return ""
+    try:
+        from wcwidth import wcwidth  # type: ignore
+        out = []
+        used = 0
+        for ch in text:
+            w = wcwidth(ch)
+            if w is None:
+                w = 1
+            if used + w > width:
+                break
+            out.append(ch)
+            used += w
+        return "".join(out)
+    except Exception:
+        return text[:width]
+
+
+def _plain_for_measurement(text: str) -> str:
+    """
+    Remove markdown markers for width measurement.
+    Not a full parser, but enough to keep layout sane.
+    """
+    text = _LINK_RE.sub(r"\1", text)
+    text = _STRIKE_RE.sub(r"\1", text)
+    text = INLINE_CODE_RE.sub(r"\1", text)
+    text = BOLD_RE.sub(r"\1", text)
+    text = ITALIC_RE.sub(r"\1", text)
     return text
 
 
-# TABLE RENDERING HELPERS
+def _visible_measure(text: str) -> int:
+    return display_width(text)
 
-ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mK]')
 
-def visible_len(s: str) -> int:
-    """Return the length of a string minus ANSI escape sequences."""
-    return len(ANSI_ESCAPE.sub('', s))
+# ============================================================
+# Inline rendering
+# ============================================================
 
-def wrap_cell(text: str, width: int) -> list:
-    """Wrap cell text to a given width, breaking lines if necessary."""
+def _stash(pattern: re.Pattern, text: str, formatter):
+    stash: list[str] = []
+
+    def repl(match):
+        token = f"\x00{len(stash)}\x00"
+        stash.append(formatter(match))
+        return token
+
+    return pattern.sub(repl, text), stash
+
+
+def _restore_stash(text: str, stash: Sequence[str]) -> str:
+    for i, value in enumerate(stash):
+        text = text.replace(f"\x00{i}\x00", value)
+    return text
+
+
+def _apply_emphasis(text: str) -> str:
+    """
+    Stack-ish emphasis handling.
+    This is still limited markdown, not a full parser, but it handles the common
+    nested cases better than naive regex stacking.
+    """
+    if not text:
+        return text
+
+    # Combined strong+emphasis first
+    text = re.sub(r"(?<!\\)\*\*\*(.+?)\*\*\*", lambda m: f"{BOLD}{ITALIC}{m.group(1)}{RESET}", text)
+
+    # Process bold and italic repeatedly until stable.
+    prev = None
+    while prev != text:
+        prev = text
+        text = BOLD_RE.sub(lambda m: f"{BOLD}{m.group(1)}{RESET}", text)
+        text = ITALIC_RE.sub(lambda m: f"{ITALIC}{m.group(1)}{RESET}", text)
+
+    return text
+
+
+def render_inline(text: str) -> str:
+    """Apply inline markdown formatting for terminal output."""
+    if not text:
+        return ""
+
+    # Protect code spans and links first.
+    text, code_stash = _stash(
+        INLINE_CODE_RE,
+        text,
+        lambda m: f"{YELLOW}`{m.group(1)}`{RESET}",
+    )
+    text, link_stash = _stash(
+        LINK_RE,
+        text,
+        lambda m: f"{UNDER}{BLUE}{m.group(1)}{RESET}",
+    )
+
+    text = STRIKE_RE.sub(lambda m: f"{DIM}{m.group(1)}{RESET}", text)
+    text = _apply_emphasis(text)
+
+    text = _restore_stash(text, link_stash)
+    text = _restore_stash(text, code_stash)
+
+    return text
+
+
+# ============================================================
+# Table helpers
+# ============================================================
+
+def split_md_table_row(line: str) -> List[str]:
+    """Split a markdown table row on unescaped pipes."""
+    s = line.strip()
+    has_outer_pipes = s.startswith("|") and s.endswith("|")
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+
+    cells = []
+    cur = []
+    escaped = False
+
+    for ch in s:
+        if escaped:
+            cur.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == "|":
+            cells.append("".join(cur).strip().replace(r"\|", "|"))
+            cur = []
+        else:
+            cur.append(ch)
+
+    cells.append("".join(cur).strip().replace(r"\|", "|"))
+
+    # For no-outer-pipe tables, preserve the split only if it actually looks tabular.
+    if not has_outer_pipes and len(cells) < 2:
+        return [line.rstrip()]
+
+    return cells
+
+
+def is_table_separator_row(cells: Sequence[str]) -> bool:
+    return len(cells) >= 2 and all(TABLE_SEP_CELL_RE.match(cell or "") for cell in cells)
+
+
+def _is_table_block_start(lines: Sequence[str], i: int) -> bool:
+    """
+    Detect:
+    1) standard pipe tables
+    2) no-outer-pipe tables
+
+    Requires a separator row directly after the header row.
+    """
+    if i + 1 >= len(lines):
+        return False
+
+    row1 = split_md_table_row(lines[i])
+    row2 = split_md_table_row(lines[i + 1])
+
+    if not is_table_separator_row(row2):
+        return False
+
+    return len(row1) >= 2 and len(row1) == len(row2)
+
+
+def _table_row_looks_valid(row: Sequence[str]) -> bool:
+    return len(row) >= 2
+
+
+def _wrap_plain_by_width(text: str, width: int) -> List[str]:
+    """
+    Wrap plain text by display width.
+    This is used for tables after markdown markers have been stripped for layout.
+    """
+    width = max(1, width)
     if not text:
         return [""]
-    lines = []
-    for line in text.splitlines():
-        wrapped = textwrap.wrap(line, width=width, break_long_words=True, break_on_hyphens=False)
-        if not wrapped:
-            lines.append("")
-        else:
-            lines.extend(wrapped)
-    return lines
 
-def pad_ansi_string(s: str, width: int, align: str = 'left') -> str:
+    words = text.split()
+    if not words:
+        return [""]
+
+    lines: List[str] = []
+    cur = ""
+
+    def cur_w(s: str) -> int:
+        return display_width(s)
+
+    for word in words:
+        candidate = word if not cur else f"{cur} {word}"
+        if cur_w(candidate) <= width:
+            cur = candidate
+            continue
+
+        if cur:
+            lines.append(cur)
+            cur = ""
+
+        # Word itself too long, break hard by display width.
+        if cur_w(word) <= width:
+            cur = word
+        else:
+            chunk = ""
+            for ch in word:
+                if cur_w(chunk + ch) <= width:
+                    chunk += ch
+                else:
+                    if chunk:
+                        lines.append(chunk)
+                    chunk = ch
+            cur = chunk
+
+    if cur:
+        lines.append(cur)
+
+    return lines or [""]
+
+
+def pad_ansi_string(s: str, width: int, align: str = "left") -> str:
     """Pad a string containing ANSI escape codes to a visible width."""
-    vis_len = visible_len(s)
+    vis_len = display_width(s)
     if vis_len >= width:
         return s
+
     needed = width - vis_len
-    if align == 'center':
+    if align == "center":
         left = needed // 2
         right = needed - left
         return " " * left + s + " " * right
-    elif align == 'right':
+    if align == "right":
         return " " * needed + s
-    else:
-        return s + " " * needed
+    return s + " " * needed
 
-def make_border(col_widths: list, left: str, mid: str, right: str, line_char: str = '─') -> str:
-    """Create a unicode box-drawing horizontal border."""
-    parts = []
-    for w in col_widths:
-        parts.append(line_char * (w + 2))  # +2 for padding space on both sides
+
+def make_border(col_widths: Sequence[int], left: str, mid: str, right: str, line_char: str = "─") -> str:
+    parts = [line_char * (w + 2) for w in col_widths]
     return f"{left}{mid.join(parts)}{right}"
 
-def render_table(raw_rows: list, term_width: int, header_color: str = BOLD+CYAN, border_color: str = GRAY) -> str:
-    """Render a table prettily based on terminal width."""
+
+def fit_column_widths(max_widths: Sequence[int], term_width: int, min_col_width: int = 3) -> List[int]:
+    """
+    Fit columns into terminal width.
+    Keeps things sane in narrow terminals instead of pretending every terminal is a cathedral.
+    """
+    num_cols = len(max_widths)
+    if num_cols == 0:
+        return []
+
+    overhead = 3 * num_cols + 1  # borders + padding + separators
+    available = max(1, term_width - overhead)
+
+    widths = [max(min_col_width, w) for w in max_widths]
+    total = sum(widths)
+
+    if total > available:
+        excess = total - available
+        while excess > 0:
+            shrinkable = [i for i, w in enumerate(widths) if w > min_col_width]
+            if not shrinkable:
+                break
+            i = max(shrinkable, key=lambda idx: widths[idx])
+            widths[i] -= 1
+            excess -= 1
+    elif total < available:
+        extra = available - total
+        i = 0
+        while extra > 0 and num_cols > 0:
+            widths[i % num_cols] += 1
+            extra -= 1
+            i += 1
+
+    return widths
+
+
+def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int) -> List[str]:
+    """
+    Render a fenced code block with a consistent box.
+    Border width is fixed from one calculation so top and bottom always match.
+    """
+    clean_lang = (lang_str or "code").strip()
+    max_line_width = max((display_width(x) for x in code_lines), default=20)
+
+    # Keep the label visible, but don't let it push the box wider than the screen.
+    max_box_width = max(10, term_width - 4)
+    label = clean_lang
+    label_room = max(0, max_box_width - 3)  # ┌ + ┐ consume 2, want at least one dash/space
+    if display_width(label) > max(0, label_room - 4):
+        label = truncate_to_width(label, max(0, label_room - 4))
+
+    inner_width = max(
+        20,
+        max_line_width + 2,
+        display_width(label) + 4,
+    )
+    inner_width = min(inner_width, max_box_width)
+
+    # Top border: corners + one dash + label + one dash + fill dashes
+    left_dash = 1
+    label_fragment = f" {label} "
+    right_dash = max(1, inner_width - left_dash - display_width(label_fragment))
+    top = f"{GRAY}┌{'─' * left_dash}{label_fragment}{'─' * right_dash}┐{RESET}"
+    bottom = f"{GRAY}└{'─' * inner_width}┘{RESET}"
+
+    rendered = [top]
+    for code_line in code_lines:
+        rendered.append(f"{GRAY}{code_line}{RESET}")
+    rendered.append(bottom)
+    return rendered
+
+
+def render_table(raw_rows: List[List[str]], term_width: int, header_color: str = BOLD + CYAN, border_color: str = GRAY) -> str:
+    """Render a markdown table cleanly in the terminal."""
+    if not raw_rows:
+        return ""
+
     num_cols = max(len(row) for row in raw_rows)
     if num_cols == 0:
         return ""
-        
-    for row in raw_rows:
-        while len(row) < num_cols:
-            row.append("")
-            
-    # Check if there is a separator row at index 1
-    has_separator = False
-    alignments = ['left'] * num_cols
-    
-    if len(raw_rows) >= 2:
-        second_row = raw_rows[1]
-        if all(re.match(r"^\s*:?-+:?\s*$", cell) for cell in second_row):
-            has_separator = True
-            # Parse alignments
-            for col_idx, cell in enumerate(second_row):
-                if col_idx >= num_cols:
-                    break
-                c = cell.strip()
-                if c.startswith(':') and c.endswith(':'):
-                    alignments[col_idx] = 'center'
-                elif c.startswith(':'):
-                    alignments[col_idx] = 'left'
-                elif c.endswith(':'):
-                    alignments[col_idx] = 'right'
-                else:
-                    alignments[col_idx] = 'left'
-                    
-    # Separate headers, separator, and data rows
-    if has_separator:
-        headers = raw_rows[0]
-        data_rows = raw_rows[2:]
-    else:
-        headers = None
-        data_rows = raw_rows
-        
-    # Calculate column width requirements (based on cell content)
+
+    rows = [row[:] + [""] * (num_cols - len(row)) for row in raw_rows]
+
+    has_header = False
+    alignments = ["left"] * num_cols
+
+    if len(rows) >= 2 and is_table_separator_row(rows[1]) and len(rows[0]) == len(rows[1]):
+        has_header = True
+        for i, cell in enumerate(rows[1]):
+            c = cell.strip()
+            if c.startswith(":") and c.endswith(":"):
+                alignments[i] = "center"
+            elif c.endswith(":"):
+                alignments[i] = "right"
+            else:
+                alignments[i] = "left"
+
+    headers = rows[0] if has_header else None
+    data_rows = rows[2:] if has_header else rows
+
+    # Measure visible content width.
     max_widths = [0] * num_cols
-    all_content_rows = data_rows + ([headers] if headers else [])
-    for row in all_content_rows:
-        for col_idx, cell in enumerate(row):
-            max_widths[col_idx] = max(max_widths[col_idx], len(cell))
-            
-    # Calculate terminal overhead:
-    # │ col1 │ col2 │ -> 1 left, 1 right, (num_cols-1) dividers, and 2 spaces padding per column.
-    overhead = 1 + 1 + (num_cols - 1) + 2 * num_cols
-    available_text_width = term_width - overhead
-    
-    # Distribute column widths
-    if available_text_width <= 0:
-        col_widths = [max(1, w) for w in max_widths]
-    else:
-        min_col_width = min(5, max(1, available_text_width // num_cols))
-        col_widths = [min(max_widths[i], min_col_width) for i in range(num_cols)]
-        remaining_width = available_text_width - sum(col_widths)
-        
-        if remaining_width > 0:
-            active_cols = [i for i in range(num_cols) if col_widths[i] < max_widths[i]]
-            while remaining_width > 0 and active_cols:
-                sum_active_max = sum(max_widths[i] for i in active_cols)
-                if sum_active_max == 0:
-                    break
-                for i in list(active_cols):
-                    needed = max_widths[i] - col_widths[i]
-                    share = int(remaining_width * (max_widths[i] / sum_active_max))
-                    to_add = min(needed, share, remaining_width)
-                    if to_add == 0 and remaining_width > 0:
-                        to_add = 1
-                    col_widths[i] += to_add
-                    remaining_width -= to_add
-                    if col_widths[i] == max_widths[i]:
-                        active_cols.remove(i)
-                    if remaining_width <= 0:
-                        break
-                        
-    # Now build the table strings
-    output = []
-    
-    # Top border
-    output.append(f"{border_color}{make_border(col_widths, '┌', '┬', '┐')}{RESET}")
-    
-    # Helper to render a single row of cells (possibly multi-line due to wrapping)
-    def format_row(cells, is_header=False):
-        wrapped_cells = [wrap_cell(cell, w) for cell, w in zip(cells, col_widths)]
-        num_lines = max(len(w) for w in wrapped_cells)
+    content_rows = data_rows + ([headers] if headers else [])
+    for row in content_rows:
+        for i, cell in enumerate(row):
+            plain = _plain_for_measurement(cell)
+            cell_width = max((display_width(part) for part in plain.splitlines()), default=0)
+            max_widths[i] = max(max_widths[i], cell_width)
+
+    # Tiny terminal fallback: stacked layout.
+    overhead = 3 * num_cols + 1
+    if term_width < 30 or term_width - overhead < num_cols * 3:
+        lines = []
+        all_rows = [headers] + data_rows if headers else data_rows
+        for idx, row in enumerate(all_rows):
+            if headers and idx == 0:
+                lines.append(f"{border_color}{'─' * max(10, min(term_width, 40))}{RESET}")
+                for c_idx, cell in enumerate(row):
+                    label = render_inline(headers[c_idx]) if headers else f"Col {c_idx + 1}"
+                    value = render_inline(cell)
+                    lines.append(f"{header_color}{label}{RESET}: {value}")
+                lines.append(f"{border_color}{'─' * max(10, min(term_width, 40))}{RESET}")
+            else:
+                if headers:
+                    for c_idx, cell in enumerate(row):
+                        label = render_inline(headers[c_idx])
+                        value = render_inline(cell)
+                        lines.append(f"{header_color}{label}{RESET}: {value}")
+                    lines.append("")
+                else:
+                    for c_idx, cell in enumerate(row):
+                        lines.append(f"{CYAN}{c_idx + 1}.{RESET} {render_inline(cell)}")
+                    lines.append("")
+        return "\n".join(line.rstrip() for line in lines).rstrip()
+
+    col_widths = fit_column_widths(max_widths, term_width, min_col_width=3)
+    output = [f"{border_color}{make_border(col_widths, '┌', '┬', '┐')}{RESET}"]
+
+    def format_row(cells: Sequence[str], is_header: bool = False) -> str:
+        # Render each cell after measuring/wrapping by plain text.
+        wrapped_cells: List[List[str]] = []
+        for cell, width in zip(cells, col_widths):
+            plain = _plain_for_measurement(cell)
+            wrapped_plain = _wrap_plain_by_width(plain, width)
+            wrapped_cells.append(wrapped_plain)
+
+        line_count = max((len(w) for w in wrapped_cells), default=1)
         row_lines = []
-        for line_idx in range(num_lines):
-            line_parts = []
+
+        for line_idx in range(line_count):
+            parts = []
             for col_idx, width in enumerate(col_widths):
                 cell_lines = wrapped_cells[col_idx]
                 raw_text = cell_lines[line_idx] if line_idx < len(cell_lines) else ""
-                
-                # Apply inline formatting
-                formatted_text = render_inline(raw_text)
+                formatted = render_inline(raw_text)
                 if is_header:
-                    formatted_text = f"{header_color}{formatted_text}{RESET}"
-                
-                # Pad
-                align = alignments[col_idx]
-                padded = pad_ansi_string(formatted_text, width, align)
-                line_parts.append(f" {padded} ")
-            
-            col_sep = f"{border_color}│{RESET}"
-            row_lines.append(f"{border_color}│{RESET}{col_sep.join(line_parts)}{border_color}│{RESET}")
+                    formatted = f"{header_color}{formatted}{RESET}"
+                padded = pad_ansi_string(formatted, width, alignments[col_idx])
+                parts.append(f" {padded} ")
+
+            sep = f"{border_color}│{RESET}"
+            row_lines.append(f"{border_color}│{RESET}{sep.join(parts)}{border_color}│{RESET}")
+
         return "\n".join(row_lines)
-        
-    # Render header
-    if headers:
+
+    if headers is not None:
         output.append(format_row(headers, is_header=True))
         output.append(f"{border_color}{make_border(col_widths, '├', '┼', '┤')}{RESET}")
-        
-    # Render data rows
+
     for row in data_rows:
         output.append(format_row(row, is_header=False))
-        
-    # Bottom border
+
     output.append(f"{border_color}{make_border(col_widths, '└', '┴', '┘')}{RESET}")
-    
     return "\n".join(output)
 
 
+# ============================================================
+# Markdown terminal renderer
+# ============================================================
+
 def render_markdown_terminal(text: str) -> str:
     """Transform markdown into ANSI-coloured terminal output."""
-    term_width, _ = shutil.get_terminal_size((80, 24))
+    term_width, _ = _term_size()
 
-    lines    = text.splitlines()
-    rendered = []
-    in_code  = False
-    code_lines = []
+    lines = text.splitlines()
+    rendered: List[str] = []
+    in_code = False
+    code_lines: List[str] = []
     code_lang = "code"
 
     i = 0
     num_lines = len(lines)
+
     while i < num_lines:
         line = lines[i]
         stripped = line.strip()
@@ -238,68 +526,39 @@ def render_markdown_terminal(text: str) -> str:
         # Code block open / close
         if stripped.startswith("```"):
             if in_code:
-                # Optimized block
-                max_width = max((len(x) for x in code_lines), default=20)
-                lang_str = code_lang
-                
-                min_width = max(20, len(lang_str) + 4)
-                target_width = min(term_width - 4, max(max_width, min_width))
-                target_width = max(target_width, len(lang_str) + 4)
-                
-                dash_count = target_width - len(lang_str) - 3
-                rendered.append(f"{GRAY}┌─ {lang_str} {'─' * dash_count}{RESET}")
-                for code_line in code_lines:
-                    rendered.append(f"{GRAY}{code_line}{RESET}")
-                rendered.append(f"{GRAY}└{'─' * (target_width + 2)}{RESET}")
+                rendered.extend(_render_code_block(code_lines, code_lang, term_width))
                 code_lines = []
-                in_code    = False
+                in_code = False
+                code_lang = "code"
             else:
                 in_code = True
-                try:
-                    # Capture language tag: ```bash -> bash, ``` bash -> bash
-                    content = stripped[3:].strip()
-                    code_lang = content if content else "code"
-                except Exception:
-                    code_lang = "code"
+                content = stripped[3:].strip()
+                code_lang = content.split()[0] if content else "code"
             i += 1
             continue
 
-        # Inside code block
         if in_code:
             code_lines.append(line.rstrip())
             i += 1
             continue
 
-        # Check for table block (only when not in code block)
-        if re.match(r"^\s*\|.*\|\s*$", line):
-            # Collect all consecutive table lines
-            table_lines = []
+        # Table block
+        if _is_table_block_start(lines, i):
+            table_lines: List[str] = []
             j = i
-            while j < num_lines and re.match(r"^\s*\|.*\|\s*$", lines[j]):
+            while j < num_lines and re.search(r"(?<!\\)\|", lines[j]):
                 table_lines.append(lines[j])
                 j += 1
-                
-            if len(table_lines) >= 1:
-                raw_rows = []
-                for t_line in table_lines:
-                    s = t_line.strip()
-                    if s.startswith('|'):
-                        s = s[1:]
-                    if s.endswith('|'):
-                        s = s[:-1]
-                    cells = [cell.strip().replace(r'\|', '|') for cell in re.split(r'(?<!\\)\|', s)]
-                    raw_rows.append(cells)
-                
-                rendered_table = render_table(raw_rows, term_width)
-                for r_line in rendered_table.splitlines():
-                    rendered.append(r_line)
-                    
-                i = j
-                continue
+
+            raw_rows = [split_md_table_row(t_line) for t_line in table_lines]
+            rendered_table = render_table(raw_rows, term_width)
+            rendered.extend(rendered_table.splitlines())
+            i = j
+            continue
 
         # Divider
-        if stripped in ("---", "***", "___", "- - -", "* * *", "_ _ _"):
-            rendered.append(f"{GRAY}{make_divider(shutil.get_terminal_size().columns)}{RESET}")
+        if DIVIDER_RE.match(stripped) or stripped in ("---", "***", "___", "- - -", "* * *", "_ _ _"):
+            rendered.append(f"{GRAY}{make_divider(term_width)}{RESET}")
             i += 1
             continue
 
@@ -316,9 +575,14 @@ def render_markdown_terminal(text: str) -> str:
             rendered.append(f"{BOLD}{MAG}{render_inline(stripped[4:])}{RESET}")
             i += 1
             continue
-        
         if stripped.startswith("#### "):
             rendered.append(f"{BOLD}{GREEN}{render_inline(stripped[5:])}{RESET}")
+            i += 1
+            continue
+
+        # Blockquote
+        if stripped.startswith(">"):
+            rendered.append(f"{DIM}│ {render_inline(stripped[1:].lstrip())}{RESET}")
             i += 1
             continue
 
@@ -346,61 +610,25 @@ def render_markdown_terminal(text: str) -> str:
         rendered.append(render_inline(line))
         i += 1
 
-    # Unclosed code block (safety net)
+    # Unclosed code block safety net
     if in_code and code_lines:
-        max_width = max((len(x) for x in code_lines), default=20)
-        lang_str = code_lang if ('code_lang' in locals() and code_lang) else "code"
-        
-        min_width = max(20, len(lang_str) + 4)
-        target_width = min(term_width - 4, max(max_width, min_width))
-        target_width = max(target_width, len(lang_str) + 4)
-        
-        dash_count = target_width - len(lang_str) - 3
-        rendered.append(f"{GRAY}┌─ {lang_str} {'─' * dash_count}{RESET}")
-        for code_line in code_lines:
-            rendered.append(f"{GRAY}{code_line}{RESET}")
-        rendered.append(f"{GRAY}└{'─' * (target_width + 2)}{RESET}")
+        rendered.extend(_render_code_block(code_lines, code_lang, term_width))
 
     return "\n".join(rendered)
 
-# Alias for user-friendly script capability
+
 render_for_printing = render_markdown_terminal
 
+# ============================================================
+# Voice / TTS sanitiser
+# ============================================================
 
-#  VOICE / TTS SANITISER
-
-
-# Voice config
-
-_VOICE_SHORT_LINES = 3    # text-fence content at or below this → read aloud
-_VOICE_SHORT_CHARS = 200  # text-fence content at or below this → read aloud
-
-_CODE_PLACEHOLDER = "You can see the code in our conversation history."
-_TEXT_PLACEHOLDER = "You can see the text in our conversation history."
-_TABLE_PLACEHOLDER = "See the table in our conversation history."
-
-# Fence labels treated as plain text (length-checked before speaking)
-_TEXT_FENCE_LABELS = {"text", "txt", ""}
-
-# Additional regex for voice
-
-_STRIKE_RE    = re.compile(r"~~(.+?)~~")
-_LINK_RE      = re.compile(r"\[([^\]]+)\]\([^\)]*\)")
-_BARE_URL_RE  = re.compile(r"https?://\S+")
-_DIVIDER_RE   = re.compile(r"^[-*_]{3,}$")
-_TABLE_ROW_RE = re.compile(r"^\|.+\|[ \t]*$")
-
-
-# Helpers
-
-def _is_short_content(lines: list) -> bool:
-    """True when block content is compact enough to be read aloud."""
+def _is_short_content(lines: List[str]) -> bool:
     joined = " ".join(lines).strip()
     return len(lines) <= _VOICE_SHORT_LINES and len(joined) <= _VOICE_SHORT_CHARS
 
 
 def _shorten_url(url: str) -> str:
-    """Reduce a bare URL to its hostname for clean TTS output."""
     try:
         from urllib.parse import urlparse
         host = urlparse(url).netloc
@@ -411,31 +639,30 @@ def _shorten_url(url: str) -> str:
 
 def _strip_inline(text: str) -> str:
     """
-    Strip all inline markdown markers and return plain, speakable text.
-
-    Processes in this order to avoid partial matches:
-        links → URLs → strikethrough → inline code → bold → italic
+    Strip markdown markers into speakable text.
     """
-    text = _LINK_RE.sub(r"\1", text)                                  # [label](url) → label
-    text = _BARE_URL_RE.sub(lambda m: _shorten_url(m.group(0)), text) # https://… → domain
-    text = _STRIKE_RE.sub(r"\1", text)                                 # ~~text~~ → text
-    text = INLINE_CODE_RE.sub(r"\1", text)                             # `code` → code
-    text = BOLD_RE.sub(r"\1", text)                                    # **bold** → bold
-    text = ITALIC_RE.sub(r"\1", text)                                  # *italic* → italic
+    text = _LINK_RE_VOICE.sub(r"\1", text)
+    text = _BARE_URL_RE.sub(lambda m: _shorten_url(m.group(0)), text)
+    text = _STRIKE_RE_VOICE.sub(r"\1", text)
+    text = INLINE_CODE_RE.sub(r"\1", text)
+    text = BOLD_RE.sub(r"\1", text)
+    text = ITALIC_RE.sub(r"\1", text)
     return text
+
+
+def _is_table_row(line: str) -> bool:
+    s = line.rstrip()
+    return bool(_TABLE_ROW_RE.match(s) or ("|" in s and _TABLE_ROW_NOPIPE_RE.match(s)))
 
 
 def _preprocess_tables(text: str) -> str:
     """
-    Replace markdown tables with a short spoken placeholder before
-    line-by-line processing begins.
-
-    A table is two or more consecutive lines whose first and last
-    non-whitespace character is '|'.
+    Replace markdown tables with a short spoken placeholder before line-by-line processing.
+    Uses the same broad table detection as the terminal renderer.
     """
-    lines  = text.splitlines(keepends=True)
+    lines = text.splitlines(keepends=True)
     result = []
-    buf    = []
+    buf = []
 
     def flush():
         if len(buf) >= 2:
@@ -445,7 +672,7 @@ def _preprocess_tables(text: str) -> str:
         buf.clear()
 
     for line in lines:
-        if _TABLE_ROW_RE.match(line.rstrip()):
+        if _is_table_row(line):
             buf.append(line)
         else:
             if buf:
@@ -458,33 +685,38 @@ def _preprocess_tables(text: str) -> str:
     return "".join(result)
 
 
-# Main voice renderer
-
 def render_for_voice(text: str) -> str:
-    """
-    Sanitise markdown for voice / TTS output.
-
-    Returns plain text suitable for passing directly to a speech engine
-    (e.g. pyttsx3, espeak, Whisper TTS, gTTS).
-
-    See module docstring for the full transformation table.
-    """
-    # Tables span multiple lines – easiest handled before the main loop.
+    """Sanitise markdown for voice / TTS output."""
     text = _preprocess_tables(text)
 
-    lines      = text.splitlines()
-    output     = []
-    in_code    = False
+    # Leading emoji / symbol clusters often appear in generated headings.
+    # Remove them only at the start of heading content, not everywhere.
+    LEADING_EMOJI_RE = re.compile(
+        r"^(?:[\s"
+        r"\U0001F300-\U0001FAFF"  # misc emoji blocks
+        r"\U0001F1E6-\U0001F1FF"  # regional indicators
+        r"\U00002600-\U000026FF"  # misc symbols
+        r"\U00002700-\U000027BF"  # dingbats
+        r"\ufe0f"                 # variation selector
+        r"\u200d"                 # zero width joiner
+        r"]+)"
+    )
+
+    def strip_leading_heading_emoji(s: str) -> str:
+        s = LEADING_EMOJI_RE.sub("", s)
+        return s.lstrip(" -–—:|•*#")
+
+    lines = text.splitlines()
+    output: List[str] = []
+    in_code = False
     fence_lang = ""
-    code_lines = []
+    code_lines: List[str] = []
 
     for line in lines:
         stripped = line.strip()
 
-        # Fenced block open / close
         if stripped.startswith("```"):
             if in_code:
-                # Closing fence ─ decide what to emit
                 if fence_lang in _TEXT_FENCE_LABELS:
                     clean = [l.strip() for l in code_lines if l.strip()]
                     if _is_short_content(clean):
@@ -494,63 +726,55 @@ def render_for_voice(text: str) -> str:
                     else:
                         output.append(_TEXT_PLACEHOLDER)
                 else:
-                    # Any programming / data language → always replace
                     output.append(_CODE_PLACEHOLDER)
 
                 code_lines = []
                 fence_lang = ""
-                in_code    = False
+                in_code = False
             else:
-                # Opening fence ─ capture language tag
                 content = stripped[3:].strip()
-                fence_lang = content.lower() if content else ""
-                in_code    = True
+                fence_lang = content.lower().split()[0] if content else ""
+                in_code = True
             continue
 
-        # Inside fenced block
         if in_code:
             code_lines.append(line.rstrip())
             continue
 
-        # Dividers (---, ***, ___)
-        if _DIVIDER_RE.match(stripped):
+        if DIVIDER_RE.match(stripped):
             continue
 
-        # Empty lines (collapse consecutive blanks)
         if stripped == "":
             if output and output[-1] != "":
                 output.append("")
             continue
 
-        # Headings
         if stripped.startswith("### "):
-            output.append(_strip_inline(stripped[4:]))
+            output.append(strip_leading_heading_emoji(_strip_inline(stripped[4:])))
             continue
         if stripped.startswith("## "):
-            output.append(_strip_inline(stripped[3:]))
+            output.append(strip_leading_heading_emoji(_strip_inline(stripped[3:])))
             continue
         if stripped.startswith("# "):
-            # H1 is uppercased so TTS engines naturally stress it more
-            output.append(_strip_inline(stripped[2:]).upper())
+            output.append(strip_leading_heading_emoji(_strip_inline(stripped[2:])).upper())
             continue
 
-        # Bullet lists
+        if stripped.startswith(">"):
+            output.append(_strip_inline(stripped[1:].lstrip()))
+            continue
+
         m = re.match(r"^(\s*)[-*•]\s+(.+)$", line)
         if m:
             output.append(_strip_inline(m.group(2)))
             continue
 
-        # Numbered lists
         m = re.match(r"^\s*(\d+)\.\s+(.+)$", line)
         if m:
-            # "1. item" reads naturally: "one. item"
             output.append(f"{m.group(1)}. {_strip_inline(m.group(2))}")
             continue
 
-        # Normal text
         output.append(_strip_inline(line))
 
-    # Unclosed code block (safety net)
     if in_code and code_lines:
         if fence_lang in _TEXT_FENCE_LABELS:
             clean = [l.strip() for l in code_lines if l.strip()]
@@ -563,7 +787,6 @@ def render_for_voice(text: str) -> str:
         else:
             output.append(_CODE_PLACEHOLDER)
 
-    # Trim leading / trailing blank lines
     while output and output[0] == "":
         output.pop(0)
     while output and output[-1] == "":
