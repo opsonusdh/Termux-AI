@@ -548,6 +548,23 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                 print(f"{RED}[{pid}/{model_name}] Overloaded. Retrying in 5 s.{RESET}")
                 time.sleep(5)
 
+            elif any(x in s.lower() for x in ("context", "token_limit", "max_tokens", "exceed", "excluding", "window")):
+                if max_tok and max_tok > 512:
+                    new_max = max_tok // 2
+                    print(
+                        f"{YELLOW}[{pid}/{model_name}] Context/token limit hit. "
+                        f"Reducing max_tokens from {max_tok} to {new_max} and retrying...{RESET}"
+                    )
+                    slot_cfg["max_tokens"] = new_max
+                    continue
+                else:
+                    print(
+                        f"{RED}[{pid}/{model_name}] Context window exceeded or max_tokens already minimal. "
+                        f"Advancing to next slot...{RESET}"
+                    )
+                    slot += 1
+                    continue
+
             elif "API_KEY_INVALID" in s:
                 print(f"{RED}[{pid}] Invalid API key — skipping '{model_name}'.{RESET}")
                 slot += 1
@@ -555,7 +572,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
             else:
                 _dbg(f"  Unhandled exception: {s[:300]}")
                 raise
-
 
 def run_agent_step(voice: bool = False) -> str:
     """Execute a single step of the agent: Supervisor -> Worker -> Critic loop.

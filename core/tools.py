@@ -50,19 +50,25 @@ DIAGNOSIS_TIMEOUT = 10
 
 _speak_thread: threading.Thread | None = None
 
-def _load_google_keys() -> list:
-    """Load Google API keys from config/api.keys.
-    Supports both the new JSON dict format and legacy plain-text (one key per line)."""
+def _load_api_keys() -> dict[str, list[str]]:
+    """Load API keys from config/api.keys.
+    Supports both JSON dict format and legacy plain-text (defaults to google)."""
     path = paths.API_KEYS_FILE
-    raw = open(path, "r", encoding="utf-8").read().strip()
+    if not os.path.exists(path):
+        return {}
     try:
+        raw = open(path, "r", encoding="utf-8").read().strip()
         data = json.loads(raw)
-        keys = data.get("google", [])
-        return keys if isinstance(keys, list) else [keys]
-    except (json.JSONDecodeError, AttributeError):
-        return [k.strip() for k in raw.splitlines() if k.strip()]
+        return {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
+    except (json.JSONDecodeError, FileNotFoundError, AttributeError):
+        # Fallback to legacy plain-text (Google only)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return {"google": [line.strip() for line in f if line.strip()]}
+        except:
+            return {}
 
-API_KEYS = _load_google_keys()
+API_KEYS = _load_api_keys()
 
 BASE_DIR    = _ROOT_DIR
 LOG_FILE    = os.path.join(paths.LOGS_DIR, "log.txt")
@@ -259,61 +265,72 @@ def _relevant_categories(prompt_kw: set) -> set:
     return top if top else set(_CATEGORY_TREE.keys())
 
 
-def make_client(key):
+def make_client(key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"):
     return OpenAI(
         api_key=key,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        base_url=base_url
     )
 
-def ask_ai_simple(prompt: str, _model, _sys_prompt,) -> str:
+def ask_ai_simple(prompt: str, _model, _sys_prompt) -> str:
+    # Build rotation stack: (provider_id, model_name, base_url)
+    providers_info = [
+        ("google", "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        ("groq",   "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/"),
+        ("nvidia", "nvidia/llama-3.1-nemotron-nano-8b-v1", "https://integrate.api.nvidia.com/v1")
+    ]
+    
+    rotation = []
+    for pid, model, url in providers_info:
+        keys = API_KEYS.get(pid, [])
+        for k in keys:
+            rotation.append({
+                "key": k,
+                "model": model,
+                "base_url": url,
+                "pid": pid
+            })
+
+    if not rotation:
+        return "[ERROR: No API keys configured in api.keys]"
+
     ind = 0
-    api_keys_len = len(API_KEYS)
-    while True:
-        client = make_client(API_KEYS[ind])
+    attempts = 0
+    max_total_attempts = len(rotation) * 2
+
+    while attempts < max_total_attempts:
+        cfg = rotation[ind]
+        client = make_client(cfg["key"], cfg["base_url"])
         try:
             response = client.chat.completions.create(
-                model=_model,
+                model=cfg["model"],
                 messages=[
-                    {
-                        "role": "system",
-                        "content": _sys_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
+                    {"role": "system", "content": _sys_prompt},
+                    {"role": "user", "content": prompt},
                 ],
+                max_tokens=1024,
             )
             msg = response.choices[0].message
-
             if msg.content:
                 return msg.content.strip()
-
             return "[EMPTY RESPONSE]"
 
         except Exception as e:
-            msg_str = str(e)
-
-            if (
-                "503" in msg_str
-                or "UNAVAILABLE" in msg_str
-                or "overloaded" in msg_str.lower()
-                or "429" in msg_str
-                or "RESOURCE_EXHAUSTED" in msg_str
-                or "rate limit" in msg_str.lower()
-            ):
-
-                print(f"{RED}Model overloaded.{RESET}")
-                time.sleep(5)
+            msg_str = str(e).upper()
+            is_transient = any(x in msg_str for x in ["503", "UNAVAILABLE", "OVERLOADED", "429", "RESOURCE_EXHAUSTED", "RATE LIMIT"])
+            
+            if is_transient:
+                print(f"{RED}[{cfg['pid']}] Key/Provider rate-limited or overloaded. Trying next...{RESET}")
+                time.sleep(2)
             elif "API_KEY_INVALID" in msg_str:
-                print(f"{RED}Invalid API key.{RESET}")
+                print(f"{RED}[{cfg['pid']}] Invalid API key detected.{RESET}")
             else:
-                raise
+                print(f"{RED}[{cfg['pid']}] API Error: {msg_str[:100]}...{RESET}")
+            
+            ind = (ind + 1) % len(rotation)
+            attempts += 1
+            
+    return "[ERROR: All providers and keys failed after multiple attempts]"
 
-            ind += 1
-            if ind >= api_keys_len:
-                ind = 0
-                
 #  Retrieve (separated budgets for primary vs indexed)
 def is_wake_relevant(text: str) -> bool:
 
@@ -1009,7 +1026,7 @@ TOOLS_DESCRIPTION = [
                 "properties": {
                     "to_phone": {
                         "type": "string",
-                        "description": "The phone number (e.g., '919876543210') or contact ID to fetch chat history for.",
+                        "description": "The phone number (e.g., '91XXXXXXXXXX') or contact ID to fetch chat history for.",
                     },
                     "limit": {
                         "type": "integer",
@@ -1074,7 +1091,7 @@ TOOLS_DESCRIPTION = [
                 "properties": {
                     "profile": {
                         "type": "string",
-                        "description": "A plain text description of the user. E.g. 'The user's name is Subhradeep. He is a student currently attending biology coaching. He lives in Kolkata.'",
+                        "description": "A plain text description of the user. E.g. The user's name, where he/she lives etc, why he/she is busy stc.",
                     },
                 },
                 "required": ["profile"],
@@ -2172,6 +2189,7 @@ def send_whatsapp_message(to_phone: str, message_text: str) -> str:
 def get_whatsapp_status() -> str:
     """Get the current status of the WhatsApp bot client and any pending received messages."""
     log_write("[get_whatsapp_status]")
+    print(f"{GRAY}[WhatsApp] Checking status...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     state = whatsapp_manager.connection_state
@@ -2198,6 +2216,7 @@ def get_whatsapp_status() -> str:
 def get_whatsapp_chats(filter_type: str = "all") -> str:
     """List all WhatsApp chats and groups with JIDs, names, unread counts, and metadata."""
     log_write(f"[get_whatsapp_chats] filter:{filter_type}")
+    print(f"{GRAY}[WhatsApp] Fetching chats (filter: {filter_type})...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
 
@@ -2233,6 +2252,7 @@ def get_whatsapp_chats(filter_type: str = "all") -> str:
 def silence_whatsapp_contact(jid: str, hours: float = 24) -> str:
     """Silence auto-replies to a contact/group for N hours. hours=0 lifts immediately."""
     log_write(f"[silence_whatsapp_contact] jid:{jid} hours:{hours}")
+    print(f"{GRAY}[WhatsApp] Silencing {jid} for {hours} hour(s)...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     ok, msg = whatsapp_manager.silence_contact(jid, hours=hours)
@@ -2242,6 +2262,7 @@ def silence_whatsapp_contact(jid: str, hours: float = 24) -> str:
 def react_to_whatsapp_message(message_id: str, emoji: str) -> str:
     """React to a WhatsApp message with an emoji."""
     log_write(f"[react_to_whatsapp_message] id:{message_id} emoji:{emoji}")
+    print(f"{GRAY}[WhatsApp] Reacting to message {message_id} with {emoji}...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     ok = whatsapp_manager.react(message_id, emoji)
@@ -2251,6 +2272,7 @@ def react_to_whatsapp_message(message_id: str, emoji: str) -> str:
 def get_whatsapp_contact_info(jid: str) -> str:
     """Fetch profile info for a WhatsApp contact."""
     log_write(f"[get_whatsapp_contact_info] jid:{jid}")
+    print(f"{GRAY}[WhatsApp] Fetching contact info for {jid}...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     info = whatsapp_manager.get_contact_info(jid)
@@ -2274,6 +2296,7 @@ def get_whatsapp_contact_info(jid: str) -> str:
 def get_whatsapp_group_participants(jid: str) -> str:
     """List all participants of a WhatsApp group with their roles."""
     log_write(f"[get_whatsapp_group_participants] jid:{jid}")
+    print(f"{GRAY}[WhatsApp] Fetching group participants for {jid}...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     participants, group_name = whatsapp_manager.get_group_participants(jid)
@@ -2297,6 +2320,7 @@ def get_whatsapp_group_participants(jid: str) -> str:
 def download_whatsapp_media(message_id: str) -> str:
     """Download and save media from a WhatsApp message to /tmp."""
     log_write(f"[download_whatsapp_media] id:{message_id}")
+    print(f"{GRAY}[WhatsApp] Downloading media for message {message_id}...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     result = whatsapp_manager.download_media(message_id)
@@ -2318,6 +2342,7 @@ def download_whatsapp_media(message_id: str) -> str:
 def schedule_whatsapp_message(to: str, message: str, send_at: str) -> str:
     """Schedule a WhatsApp message to be sent at a specific ISO datetime."""
     log_write(f"[schedule_whatsapp_message] to:{to} send_at:{send_at}")
+    print(f"{GRAY}[WhatsApp] Scheduling message to {to} at {send_at}...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     ok, info = whatsapp_manager.schedule_message(to, message, send_at)
@@ -2327,6 +2352,7 @@ def schedule_whatsapp_message(to: str, message: str, send_at: str) -> str:
 def search_whatsapp_chat(jid: str, query: str, limit: int = 20) -> str:
     """Search for messages containing a keyword in a specific chat."""
     log_write(f"[search_whatsapp_chat] jid:{jid} query:{query}")
+    print(f"{GRAY}[WhatsApp] Searching chat {jid} for '{query}'...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     results = whatsapp_manager.search_chat(jid, query, limit=limit)
@@ -2343,6 +2369,7 @@ def search_whatsapp_chat(jid: str, query: str, limit: int = 20) -> str:
 def archive_whatsapp_chat(jid: str, archive: bool = True) -> str:
     """Archive or unarchive a WhatsApp chat."""
     log_write(f"[archive_whatsapp_chat] jid:{jid} archive:{archive}")
+    print(f"{GRAY}[WhatsApp] {'Archiving' if archive else 'Unarchiving'} chat {jid}...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     ok = whatsapp_manager.archive_chat(jid, archive=archive)
@@ -2353,6 +2380,7 @@ def archive_whatsapp_chat(jid: str, archive: bool = True) -> str:
 def set_whatsapp_seen(jid: str) -> str:
     """Mark a WhatsApp chat as read, clearing the unread count on the phone."""
     log_write(f"[set_whatsapp_seen] jid:{jid}")
+    print(f"{GRAY}[WhatsApp] Marking chat {jid} as read...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     whatsapp_manager.set_seen(jid)
@@ -2362,6 +2390,7 @@ def set_whatsapp_seen(jid: str) -> str:
 def get_pending_whatsapp_messages(clear: bool = True) -> str:
     """Retrieve and clear any pending received WhatsApp messages from the background queue."""
     log_write(f"[get_pending_whatsapp_messages] clear:{clear}")
+    print(f"{GRAY}[WhatsApp] Retrieving pending messages (clear={clear})...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     pending = whatsapp_manager.get_pending_messages(clear=clear)
@@ -2407,6 +2436,7 @@ def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
 def set_whatsapp_busy_mode(enabled: bool, instruction: str = "", exclude_all_groups_except: list = None) -> str:
     """Enable or disable auto-reply 'busy' mode with a specific instruction and optional group exclusions."""
     log_write(f"[set_whatsapp_busy_mode] enabled:{enabled} instruction:{instruction} exclude_all_groups_except:{exclude_all_groups_except}")
+    print(f"{GRAY}[WhatsApp] Setting busy mode (enabled={enabled})...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     
@@ -2436,6 +2466,7 @@ def set_whatsapp_busy_mode(enabled: bool, instruction: str = "", exclude_all_gro
 def set_whatsapp_user_profile(profile: str) -> str:
     """Set personal context about the user injected into every Orion auto-reply."""
     log_write(f"[set_whatsapp_user_profile] {profile}")
+    print(f"{GRAY}[WhatsApp] Updating user profile context...{RESET}")
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     whatsapp_manager.set_user_profile(profile)
@@ -2446,6 +2477,8 @@ def set_whatsapp_user_profile(profile: str) -> str:
 def get_whatsapp_report(clear: bool = False) -> str:
     """Read whatsapp_log.jsonl and return a human-readable conversation report."""
     log_write(f"[get_whatsapp_report] clear:{clear}")
+    print(f"{GRAY}[WhatsApp] Generating conversation report (clear={clear})...{RESET}")
+    
     if not WP_AVAILABLE:
         return "Termux-WP not available. Probably Termux-WP not installed."
     

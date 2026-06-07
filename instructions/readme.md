@@ -1,6 +1,6 @@
 # Orion System Instruction Manuals
 
-This directory contains the operational guidelines, coding standards, and reasoning frameworks that govern how Orion develops, executes tasks, and reasons about its own architecture.
+This directory defines how Orion thinks, works, and makes decisions. The documents here are not checklists — they are principles. Understanding *why* a rule exists is more important than memorizing the rule, because principles generalize to situations the rules don't explicitly cover.
 
 ---
 
@@ -8,10 +8,14 @@ This directory contains the operational guidelines, coding standards, and reason
 
 | Manual | Purpose |
 | :--- | :--- |
-| [**coding.md**](./coding.md) | Coding standards, module boundaries, `paths.py` usage, error handling, and testing patterns. |
-| [**reasoning.md**](./reasoning.md) | Cognitive lifecycle for task execution: decomposition, state tracking in `workspace/`, troubleshooting protocol. |
-| [**orchestration_workflows.md**](./orchestration_workflows.md) | Multi-process delegation via `orchestration/`, worker lifecycle, IPC queue protocol, and capability registration. |
-| [**environment_and_tools.md**](./environment_and_tools.md) | Safe execution boundaries, Termux API usage, the `tools/` wrapper pattern, and package management. |
+| [**reasoning.md**](./reasoning.md) | Core cognitive framework: how to understand a task, identify operation type, plan before executing, investigate before claiming, and verify results. Start here. |
+| [**decision_making.md**](./decision_making.md) | When to act autonomously, when to ask, how to resolve ambiguity, handle partial information, and self-correct. |
+| [**verification.md**](./verification.md) | Full verification protocol: syntax checks, import checks, behavioral tests, bulk transformation counting, and what "done" actually means. |
+| [**tool_efficiency.md**](./tool_efficiency.md) | Efficient tool use: recognizing operation patterns, bulk transformation scripts, batching reads, composing tool calls, minimizing round trips. |
+| [**communication.md**](./communication.md) | Calibrated confidence, thinking out loud, reporting results (not effort), when to ask vs. act, and how to communicate when things go wrong. |
+| [**coding.md**](./coding.md) | Coding standards: module boundaries, `paths.py` usage, sys.path bootstrap, error handling, concurrency rules, and the tool addition chain. |
+| [**environment_and_tools.md**](./environment_and_tools.md) | Termux sandbox constraints, Termux API wrappers, the `tools/` pattern, package management, and tool efficiency in the environment context. |
+| [**orchestration_workflows.md**](./orchestration_workflows.md) | When to orchestrate vs. execute directly, the agent execution loop, worker lifecycle, IPC protocol, and the reflection pipeline. |
 
 ---
 
@@ -33,14 +37,26 @@ This directory contains the operational guidelines, coding standards, and reason
 └── paths.py           Single source of truth for all file paths
 ```
 
-The full annotated layout with data-flow diagrams is in `PROJECT_STRUCTURE.md` at the project root.
+---
+
+## How These Documents Work Together
+
+The documents build on each other. `reasoning.md` defines the cognitive process. `decision_making.md` handles the judgment calls within that process. `verification.md` and `tool_efficiency.md` handle the mechanics of how work gets done. `communication.md` handles how findings and results are expressed. The technical standards in `coding.md`, `environment_and_tools.md`, and `orchestration_workflows.md` apply within the framework the first five documents establish.
+
+When instructions across documents appear to conflict: more specific overrides more general, more recent overrides older, safety-preserving overrides convenience.
 
 ---
 
-## Instructions for Agents
+## The Principles Behind the Rules
 
-1. **Before writing code** — read `coding.md`. Verify module boundaries, import patterns, and `paths.py` usage before touching any file.
-2. **Before tackling a complex task** — read `reasoning.md`. Decompose the goal, create a tracking file in `workspace/`, and work step by step.
-3. **Before extending orchestration or capabilities** — read `orchestration_workflows.md` and `environment_and_tools.md` to confirm correct IPC usage and wrapper structure.
-4. **Never hardcode paths** — always use `import paths` and the named constants (`paths.STATE_FILE`, `paths.API_KEYS_FILE`, etc.).
-5. **Never modify `ask_ai()`** — it is a production-critical path. Agent context lives in `run_agent_step()`, not in the normal chat flow.
+Every rule in these documents exists for a reason. The most important ones:
+
+**Read before you touch.** You cannot safely modify a file whose current state you don't know. This is not a coding-specific rule — it applies to any file.
+
+**Verify after you change.** "I made the change" is not the same as "the change is correct." Verification is part of the work, not a final step.
+
+**Recognize the operation type.** The same logical task can require fundamentally different tool strategies depending on whether it's a single targeted change, a bulk transformation, or an investigation. Identify which before starting.
+
+**State only what you know.** The source of a claim determines how it should be phrased. Read in this session → state as fact. Inferred → label as inference. Not checked → don't claim it.
+
+**The cost of a read is always lower than the cost of a wrong write.** When in doubt, read first.

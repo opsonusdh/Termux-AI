@@ -49,6 +49,18 @@ class WhatsAppManager:
         self._active_senders  = set()  # senders with an auto-reply in progress
         self._active_lock     = threading.Lock()
 
+        # Human-first hold — after the owner manually replies to someone, Orion waits
+        # before auto-replying to that person's next message.
+        # How it works:
+        #   - Orion marks each auto-reply it sends so the WS echo can be identified
+        #   - If MESSAGE_SENT arrives and is NOT an Orion echo → owner sent manually
+        #   - On the next incoming message from that contact → defer auto-reply
+        self._orion_echo_expected = set()   # JIDs where we expect our own send echo
+        self._hold_until          = {}      # {jid: datetime} — defer auto-reply until this time
+        self._deferred_timers     = {}      # {jid: threading.Timer}
+        self._deferred_lock       = threading.Lock()
+        self.reply_hold_seconds   = 300     # default 5 min; set via set_reply_hold()
+
         # Filtering and control system config
         self.filters_path = BASE_DIR / "config" / "whatsapp_filters.json"
         self.ignore_all_groups = False
@@ -74,6 +86,11 @@ class WhatsAppManager:
                     self.muted_threads = data.get("muted_threads", {})
                     self.exclude_all_groups_except = data.get("exclude_all_groups_except", [])
                     self.per_contact = data.get("per_contact", {})
+                    self.is_busy = data.get("is_busy", False)
+                    self.busy_since = data.get("busy_since", None)
+                    self.busy_instruction = data.get("busy_instruction", "")
+                    self.user_profile = data.get("user_profile", "")
+                    self.reply_hold_seconds = int(data.get("reply_hold_seconds", 300))
             else:
                 self.exclude_all_groups_except = []
                 self.save_filters()
@@ -91,6 +108,11 @@ class WhatsAppManager:
                     "muted_threads": self.muted_threads,
                     "exclude_all_groups_except": getattr(self, "exclude_all_groups_except", []),
                     "per_contact": self.per_contact,
+                    "is_busy": self.is_busy,
+                    "busy_since": self.busy_since,
+                    "busy_instruction": self.busy_instruction,
+                    "user_profile": self.user_profile,
+                    "reply_hold_seconds": self.reply_hold_seconds,
                 }, f, indent=4)
         except Exception as e:
             print(f"[WhatsApp] Error saving filters: {e}")
@@ -223,26 +245,17 @@ class WhatsAppManager:
 
     def _is_in_cooldown(self, sender):
         """
-        Returns True if this sender is within the 30-min auto-reply cooldown window.
-        Prevents Orion from repeating 'I'm busy' every 5 minutes to the same person.
-        Exception: if the last auto-reply was > 4 hours ago, treat the conversation as fresh.
+        60-second burst guard — only prevents duplicate auto-replies if two messages
+        arrive at almost the same moment. Does NOT block conversation follow-ups.
+        The LLM prompt already handles variation through conversation history.
         """
         entry = self.per_contact.get(sender, {})
-        cooldown_until = entry.get("cooldown_until")
-        last_reply_at  = entry.get("last_auto_reply_at")
-        if not cooldown_until:
+        last_reply_at = entry.get("last_auto_reply_at")
+        if not last_reply_at:
             return False
         try:
-            now       = datetime.now()
-            until_dt  = datetime.fromisoformat(cooldown_until)
-            if now >= until_dt:
-                return False  # cooldown window has passed
-            # If it's been > 4 hours since last auto-reply, the conversation feels fresh — reset
-            if last_reply_at:
-                last_dt = datetime.fromisoformat(last_reply_at)
-                if (now - last_dt).total_seconds() > 4 * 3600:
-                    return False
-            return True
+            elapsed = (datetime.now() - datetime.fromisoformat(last_reply_at)).total_seconds()
+            return elapsed < 60
         except (ValueError, TypeError):
             return False
 
@@ -402,6 +415,76 @@ class WhatsAppManager:
             if cleaned and cleaned != text:
                 return cleaned
         return text
+
+    #  Human-first hold logic
+
+    def _should_defer_reply(self, sender):
+        """
+        Returns True if the hold window is still active for this sender —
+        meaning the owner manually replied to them recently and Orion should wait.
+        """
+        if self.reply_hold_seconds <= 0:
+            return False
+        with self._deferred_lock:
+            hold_until = self._hold_until.get(sender)
+        if not hold_until:
+            return False
+        return datetime.now() < hold_until
+
+    def _schedule_deferred_reply(self, sender, profile_name, text, context, media, msg_id):
+        """
+        Queue an auto-reply to fire when the hold window expires.
+        Each new message from the contact replaces the previous queued reply
+        so only the latest message gets replied to.
+        """
+        with self._deferred_lock:
+            old = self._deferred_timers.pop(sender, None)
+            if old:
+                old.cancel()
+
+            hold_until = self._hold_until.get(sender)
+            if not hold_until:
+                return
+            wait = max(1, (hold_until - datetime.now()).total_seconds())
+
+            timer = threading.Timer(
+                wait,
+                self._fire_deferred_reply,
+                args=(sender, profile_name, text, context, media, msg_id),
+            )
+            timer.daemon = True
+            timer.start()
+            self._deferred_timers[sender] = timer
+
+        mins, secs = int(wait // 60), int(wait % 60)
+        wait_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        print(f"[WhatsApp] Reply to {profile_name} deferred — firing in {wait_str} if owner stays silent.")
+
+    def _fire_deferred_reply(self, sender, profile_name, text, context, media, msg_id):
+        """
+        Called when the hold window expires. Sends auto-reply only if:
+          • busy mode is still on
+          • hold window has genuinely expired (owner didn't send again)
+        """
+        with self._deferred_lock:
+            self._deferred_timers.pop(sender, None)
+            hold_until = self._hold_until.get(sender)
+
+        if not self.is_busy:
+            return
+
+        # Safety net: if hold was extended since we scheduled, don't fire
+        if hold_until and datetime.now() < hold_until:
+            if self.debug:
+                print(f"{GRAY}[WhatsApp] Deferred reply to {profile_name} cancelled — hold extended.{RESET}")
+            return
+
+        print(f"[WhatsApp] Hold expired — firing deferred auto-reply to {profile_name}.")
+        threading.Thread(
+            target=self._handle_auto_reply,
+            args=(sender, profile_name, text, context, media, msg_id),
+            daemon=True,
+        ).start()
 
     def _build_auto_reply_prompt(self, sender, profile_name, text, context, media=None):
         context20 = self._fetch_context_window(sender, context, limit=20, skip_http_fetch=True)
@@ -655,11 +738,16 @@ class WhatsAppManager:
                             pass
                         return
 
-                    threading.Thread(
-                        target=self._handle_auto_reply,
-                        args=(sender, profile_name, text, context, media, msg_id),
-                        daemon=True,
-                    ).start()
+                    # 5. Human-first hold — if owner messaged this contact recently,
+                    #    defer the auto-reply until the hold window expires.
+                    if self._should_defer_reply(sender):
+                        self._schedule_deferred_reply(sender, profile_name, text, context, media, msg_id)
+                    else:
+                        threading.Thread(
+                            target=self._handle_auto_reply,
+                            args=(sender, profile_name, text, context, media, msg_id),
+                            daemon=True,
+                        ).start()
                 else:
                     with self.lock:
                         self.pending_messages.append({
@@ -680,6 +768,27 @@ class WhatsAppManager:
                     wa_log_write("RECEIVED", profile_name, sender, log_text)
                 except Exception:
                     pass
+
+            elif event_type == "MESSAGE_SENT":
+                to_jid = payload.get("to")
+                if not to_jid:
+                    pass
+                else:
+                    with self._deferred_lock:
+                        is_orion_echo = to_jid in self._orion_echo_expected
+                        if is_orion_echo:
+                            # This is the WS echo of our own auto-reply — ignore it
+                            self._orion_echo_expected.discard(to_jid)
+                        else:
+                            # Owner sent manually — activate hold window for this contact
+                            self._hold_until[to_jid] = datetime.now() + timedelta(seconds=self.reply_hold_seconds)
+                            # Cancel any queued deferred reply (owner is handling it)
+                            timer = self._deferred_timers.pop(to_jid, None)
+                            if timer:
+                                timer.cancel()
+                                print(f"[WhatsApp] Deferred reply to {to_jid} cancelled — owner replied manually.")
+                            mins = self.reply_hold_seconds // 60
+                            print(f"[WhatsApp] Owner sent to {to_jid} — hold active for {mins}m.")
 
             elif event_type == "SYSTEM_QR_REQUIRED":
                 qr_code = payload.get("qr")
@@ -787,7 +896,6 @@ class WhatsAppManager:
                         print(f"{GRAY}[WhatsApp] Auto-reply sent to {profile_name}: \"{reply_text}\"{RESET}")
 
                     now = datetime.now()
-                    # Set 30-min cooldown so we don't spam "I'm busy" repeatedly
                     with self.state_lock:
                         state = self.contact_state.get(sender, {
                             "has_introduced"     : False,
@@ -802,7 +910,6 @@ class WhatsAppManager:
 
                         pc = self.per_contact.get(sender, {})
                         pc["last_auto_reply_at"] = now.isoformat()
-                        pc["cooldown_until"]     = (now + timedelta(minutes=30)).isoformat()
                         self.per_contact[sender] = pc
 
                     self.save_filters()
@@ -832,7 +939,14 @@ class WhatsAppManager:
         try:
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            return response.json().get("success", False)
+            ok = response.json().get("success", False)
+            if ok:
+                # Mark this JID so the MESSAGE_SENT WS echo is identified as ours
+                # and not mistaken for a manual send by the owner.
+                jid = to_phone if "@" in to_phone else to_phone.replace("+", "").replace(" ", "") + "@c.us"
+                with self._deferred_lock:
+                    self._orion_echo_expected.add(jid)
+            return ok
         except Exception as e:
             print(f"{RED}[WhatsApp] Send error: {e}{RESET}")
             return False
@@ -985,6 +1099,14 @@ class WhatsAppManager:
         self.busy_since = datetime.now().isoformat() if enabled else None
         if instruction:
             self.busy_instruction = instruction
+        if not enabled:
+            with self._deferred_lock:
+                for timer in self._deferred_timers.values():
+                    timer.cancel()
+                self._deferred_timers.clear()
+                self._hold_until.clear()
+                self._orion_echo_expected.clear()
+        self.save_filters()
 
     def silence_contact(self, jid, hours=24):
         """
@@ -1008,6 +1130,18 @@ class WhatsAppManager:
 
     def set_user_profile(self, profile):
         self.user_profile = profile
+        self.save_filters()
+
+    def set_reply_hold(self, seconds):
+        """
+        Set how long (in seconds) to wait after the owner's last message before
+        auto-replying. Common values: 60, 120, 300, 600.
+        Pass 0 to disable the hold entirely (always reply immediately).
+        """
+        self.reply_hold_seconds = max(0, int(seconds))
+        self.save_filters()
+        mins = self.reply_hold_seconds // 60
+        return f"Reply hold set to {self.reply_hold_seconds}s ({mins}m)." if mins else f"Reply hold set to {self.reply_hold_seconds}s."
 
 
 # Singleton instance
