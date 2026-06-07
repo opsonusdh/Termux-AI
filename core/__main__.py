@@ -21,7 +21,7 @@ if _WP_DIR.exists():
         ["node", "bot"],
         cwd=str(_WP_DIR),
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.DEVNULL,
         text=True,
         bufsize=1,
     )
@@ -31,6 +31,7 @@ if _WP_DIR.exists():
 
         if "System Connected! Your phone is now sending and receiving." in line:
             break
+
 
 from interface import chat_loop
 chat_loop()

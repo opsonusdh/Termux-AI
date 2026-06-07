@@ -255,7 +255,7 @@ class WhatsAppManager:
             return False
         try:
             elapsed = (datetime.now() - datetime.fromisoformat(last_reply_at)).total_seconds()
-            return elapsed < 60
+            return False #elapsed < 60 | PERSONAL: KEEPING FALSE FOR INSTANT REPLIES
         except (ValueError, TypeError):
             return False
 

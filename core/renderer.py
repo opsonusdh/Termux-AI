@@ -34,7 +34,7 @@ INLINE_CODE_RE = re.compile(r"(?<!\\)`([^`]+)`")
 STRIKE_RE      = re.compile(r"(?<!\\)~~(.+?)~~")
 LINK_RE        = re.compile(r"(?<!\\)\[([^\]]+)\]\(([^)]+)\)")
 
-TABLE_SEP_CELL_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
+TABLE_SEP_CELL_RE = re.compile(r"^\s*:?-+:?\s*$")
 DIVIDER_RE        = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
 
 # Voice renderer regex
@@ -110,8 +110,8 @@ def _plain_for_measurement(text: str) -> str:
     Remove markdown markers for width measurement.
     Not a full parser, but enough to keep layout sane.
     """
-    text = _LINK_RE.sub(r"\1", text)
-    text = _STRIKE_RE.sub(r"\1", text)
+    text = LINK_RE.sub(r"\1", text)
+    text = STRIKE_RE.sub(r"\1", text)
     text = INLINE_CODE_RE.sub(r"\1", text)
     text = BOLD_RE.sub(r"\1", text)
     text = ITALIC_RE.sub(r"\1", text)
@@ -121,6 +121,19 @@ def _plain_for_measurement(text: str) -> str:
 def _visible_measure(text: str) -> int:
     return display_width(text)
 
+def make_divider(term_width: int) -> str:
+    term_width = max(1, term_width)
+
+    line_len = max(1, int(term_width * 0.8))
+    line_len = min(line_len, term_width)
+
+    padding = max(0, (term_width - line_len) // 2)
+
+    return (
+        " " * padding +
+        "─" * line_len +
+        " " * (term_width - padding - line_len)
+    )
 
 # ============================================================
 # Inline rendering
@@ -439,26 +452,19 @@ def render_table(raw_rows: List[List[str]], term_width: int, header_color: str =
     overhead = 3 * num_cols + 1
     if term_width < 30 or term_width - overhead < num_cols * 3:
         lines = []
-        all_rows = [headers] + data_rows if headers else data_rows
-        for idx, row in enumerate(all_rows):
-            if headers and idx == 0:
-                lines.append(f"{border_color}{'─' * max(10, min(term_width, 40))}{RESET}")
+        if headers:
+            for r_idx, row in enumerate(data_rows):
+                if r_idx > 0:
+                    lines.append(f"{border_color}{'-' * max(5, min(term_width, 20))}{RESET}")
                 for c_idx, cell in enumerate(row):
-                    label = render_inline(headers[c_idx]) if headers else f"Col {c_idx + 1}"
+                    label = render_inline(headers[c_idx])
                     value = render_inline(cell)
                     lines.append(f"{header_color}{label}{RESET}: {value}")
-                lines.append(f"{border_color}{'─' * max(10, min(term_width, 40))}{RESET}")
-            else:
-                if headers:
-                    for c_idx, cell in enumerate(row):
-                        label = render_inline(headers[c_idx])
-                        value = render_inline(cell)
-                        lines.append(f"{header_color}{label}{RESET}: {value}")
-                    lines.append("")
-                else:
-                    for c_idx, cell in enumerate(row):
-                        lines.append(f"{CYAN}{c_idx + 1}.{RESET} {render_inline(cell)}")
-                    lines.append("")
+        else:
+            for row in data_rows:
+                for c_idx, cell in enumerate(row):
+                    lines.append(f"{CYAN}{c_idx + 1}.{RESET} {render_inline(cell)}")
+                lines.append("")
         return "\n".join(line.rstrip() for line in lines).rstrip()
 
     col_widths = fit_column_widths(max_widths, term_width, min_col_width=3)
@@ -577,6 +583,14 @@ def render_markdown_terminal(text: str) -> str:
             continue
         if stripped.startswith("#### "):
             rendered.append(f"{BOLD}{GREEN}{render_inline(stripped[5:])}{RESET}")
+            i += 1
+            continue
+        if stripped.startswith("##### "):
+            rendered.append(f"{BOLD}{YELLOW}{render_inline(stripped[6:])}{RESET}")
+            i += 1
+            continue
+        if stripped.startswith("###### "):
+            rendered.append(f"{BOLD}{UNDER}{render_inline(stripped[7:])}{RESET}")
             i += 1
             continue
 
@@ -749,14 +763,14 @@ def render_for_voice(text: str) -> str:
                 output.append("")
             continue
 
-        if stripped.startswith("### "):
-            output.append(strip_leading_heading_emoji(_strip_inline(stripped[4:])))
-            continue
-        if stripped.startswith("## "):
-            output.append(strip_leading_heading_emoji(_strip_inline(stripped[3:])))
-            continue
-        if stripped.startswith("# "):
-            output.append(strip_leading_heading_emoji(_strip_inline(stripped[2:])).upper())
+        m = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if m:
+            level = len(m.group(1))
+            content_val = m.group(2)
+            clean_content = strip_leading_heading_emoji(_strip_inline(content_val))
+            if level == 1:
+                clean_content = clean_content.upper()
+            output.append(clean_content)
             continue
 
         if stripped.startswith(">"):
