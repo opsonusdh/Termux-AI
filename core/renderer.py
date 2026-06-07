@@ -570,23 +570,23 @@ def render_markdown_terminal(text: str) -> str:
 
         # Headings
         if stripped.startswith("# "):
-            rendered.append(f"{BOLD}{BLUE}{render_inline(stripped[2:])}{RESET}")
+            rendered.append(f"{BOLD}{UNDER}{BLUE}{render_inline(stripped[2:])}{RESET}")
             i += 1
             continue
         if stripped.startswith("## "):
-            rendered.append(f"{BOLD}{CYAN}{render_inline(stripped[3:])}{RESET}")
+            rendered.append(f"{BOLD}{UNDER}{CYAN}{render_inline(stripped[3:])}{RESET}")
             i += 1
             continue
         if stripped.startswith("### "):
-            rendered.append(f"{BOLD}{MAG}{render_inline(stripped[4:])}{RESET}")
+            rendered.append(f"{BOLD}{UNDER}{MAG}{render_inline(stripped[4:])}{RESET}")
             i += 1
             continue
         if stripped.startswith("#### "):
-            rendered.append(f"{BOLD}{GREEN}{render_inline(stripped[5:])}{RESET}")
+            rendered.append(f"{BOLD}{UNDER}{GREEN}{render_inline(stripped[5:])}{RESET}")
             i += 1
             continue
         if stripped.startswith("##### "):
-            rendered.append(f"{BOLD}{YELLOW}{render_inline(stripped[6:])}{RESET}")
+            rendered.append(f"{BOLD}{UNDER}{YELLOW}{render_inline(stripped[6:])}{RESET}")
             i += 1
             continue
         if stripped.startswith("###### "):
