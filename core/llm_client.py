@@ -170,7 +170,18 @@ def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict
     result = []
 
     for m in messages:
-        if not isinstance(m, dict) or "tool_calls" not in m:
+        if not isinstance(m, dict):
+            result.append(m)
+            continue
+
+        # All providers require content to be a string, never a raw dict/list.
+        # This guards against diagnosis dicts or other structured data being
+        # injected directly as message content (e.g. from _diag_future.result()).
+        content = m.get("content")
+        if isinstance(content, (dict, list)):
+            m = {**m, "content": json.dumps(content, ensure_ascii=False)}
+
+        if "tool_calls" not in m:
             result.append(m)
             continue
 
@@ -348,7 +359,14 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
 
     fn = routes.get(name)
     if fn:
-        return fn()
+        res = fn()
+        if res is None:
+            return "Success"
+        if isinstance(res, str):
+            return res
+        if isinstance(res, (dict, list)):
+            return json.dumps(res, ensure_ascii=False)
+        return str(res)
     print(f"{RED}[ERROR] Unknown tool: {name}{RESET}")
     return f"[ERROR] Unknown tool: {name}"
 

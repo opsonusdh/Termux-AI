@@ -271,24 +271,38 @@ def make_client(key, base_url="https://generativelanguage.googleapis.com/v1beta/
         base_url=base_url
     )
 
-def ask_ai_simple(prompt: str, _model, _sys_prompt) -> str:
+def ask_ai_simple(prompt: str, model: str, sys_prompt: str) -> str:
     # Build rotation stack: (provider_id, model_name, base_url)
-    providers_info = [
-        ("google", "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+    # The requested model is tried first (on its native provider), then
+    # the fallback providers follow so summarisation never silently dies.
+    def _provider_for(m: str):
+        if m.startswith("gemini") or m.startswith("gemma"):
+            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+        if "llama" in m or "mixtral" in m or "qwen" in m:
+            return "groq", "https://api.groq.com/openai/v1/"
+        if "nvidia" in m or "nemotron" in m or "deepseek" in m:
+            return "nvidia", "https://integrate.api.nvidia.com/v1"
+        return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    primary_pid, primary_url = _provider_for(model)
+
+    # Fallback roster — always use the lightest available model per provider
+    fallback_info = [
+        ("google", "gemini-2.5-flash-lite", "https://generativelanguage.googleapis.com/v1beta/openai/"),
         ("groq",   "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/"),
-        ("nvidia", "nvidia/llama-3.1-nemotron-nano-8b-v1", "https://integrate.api.nvidia.com/v1")
+        ("nvidia", "nvidia/llama-3.1-nemotron-nano-8b-v1", "https://integrate.api.nvidia.com/v1"),
     ]
-    
+
     rotation = []
-    for pid, model, url in providers_info:
-        keys = API_KEYS.get(pid, [])
-        for k in keys:
-            rotation.append({
-                "key": k,
-                "model": model,
-                "base_url": url,
-                "pid": pid
-            })
+    # Primary: requested model on its native provider
+    for k in API_KEYS.get(primary_pid, []):
+        rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
+    # Fallbacks: other providers with their own default models
+    for pid, fb_model, url in fallback_info:
+        if pid == primary_pid:
+            continue
+        for k in API_KEYS.get(pid, []):
+            rotation.append({"key": k, "model": fb_model, "base_url": url, "pid": pid})
 
     if not rotation:
         return "[ERROR: No API keys configured in api.keys]"
@@ -304,7 +318,7 @@ def ask_ai_simple(prompt: str, _model, _sys_prompt) -> str:
             response = client.chat.completions.create(
                 model=cfg["model"],
                 messages=[
-                    {"role": "system", "content": _sys_prompt},
+                    {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=1024,
@@ -317,7 +331,7 @@ def ask_ai_simple(prompt: str, _model, _sys_prompt) -> str:
         except Exception as e:
             msg_str = str(e).upper()
             is_transient = any(x in msg_str for x in ["503", "UNAVAILABLE", "OVERLOADED", "429", "RESOURCE_EXHAUSTED", "RATE LIMIT"])
-            
+
             if is_transient:
                 print(f"{RED}[{cfg['pid']}] Key/Provider rate-limited or overloaded. Trying next...{RESET}")
                 time.sleep(2)
@@ -325,10 +339,10 @@ def ask_ai_simple(prompt: str, _model, _sys_prompt) -> str:
                 print(f"{RED}[{cfg['pid']}] Invalid API key detected.{RESET}")
             else:
                 print(f"{RED}[{cfg['pid']}] API Error: {msg_str[:100]}...{RESET}")
-            
+
             ind = (ind + 1) % len(rotation)
             attempts += 1
-            
+
     return "[ERROR: All providers and keys failed after multiple attempts]"
 
 #  Retrieve (separated budgets for primary vs indexed)
@@ -786,7 +800,8 @@ TOOLS_DESCRIPTION = [
                 "When the wake word is detected, a lightweight AI relevance "
                 "check determines whether the speaker is actually addressing "
                 "the assistant. If relevant, sleep mode exits and returns "
-                "the detected speech as the next user prompt."
+                "the detected speech as the next user prompt. "
+                "NOTE: after enabling sleep mode you cant talk to the user, so you can use intermediate_print before sleep."
             ),
             "parameters": {
                 "type": "object",

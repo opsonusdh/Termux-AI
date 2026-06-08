@@ -22,17 +22,28 @@ MAG    = "\033[35m"
 CYAN   = "\033[36m"
 GRAY   = "\033[90m"
 
+# Fine-grained attribute reset codes — used instead of RESET to preserve
+# parent styles when closing a nested inline span.
+COLOR_RESET = "\033[39m"   # Default foreground colour (keeps bold/italic active)
+BOLD_OFF    = "\033[22m"   # Normal intensity — turns off bold and dim
+ITALIC_OFF  = "\033[23m"   # Italic off
+UNDER_OFF   = "\033[24m"   # Underline off
+STRIKE_CODE = "\033[9m"    # Crossed-out / strikethrough ON
+STRIKE_OFF  = "\033[29m"   # Crossed-out / strikethrough OFF
+
 # -----------------------------
 # Regex patterns
 # -----------------------------
 
-ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mK]")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[mK]|\x1b\][^\x1b]*(?:\x1b\\|\x07)")
 
 BOLD_RE        = re.compile(r"(?<!\\)\*\*(.+?)\*\*")
 ITALIC_RE      = re.compile(r"(?<!\\)(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 INLINE_CODE_RE = re.compile(r"(?<!\\)`([^`]+)`")
 STRIKE_RE      = re.compile(r"(?<!\\)~~(.+?)~~")
 LINK_RE        = re.compile(r"(?<!\\)\[([^\]]+)\]\(([^)]+)\)")
+# Bare https?:// URLs — trailing sentence punctuation excluded from the match.
+INLINE_URL_RE  = re.compile(r"https?://[^\s\x00<>\[\]\"']+(?<![.,;:!?])")
 
 TABLE_SEP_CELL_RE = re.compile(r"^\s*:?-+:?\s*$")
 DIVIDER_RE        = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
@@ -139,67 +150,142 @@ def make_divider(term_width: int) -> str:
 # Inline rendering
 # ============================================================
 
-def _stash(pattern: re.Pattern, text: str, formatter):
+def _stash(pattern: re.Pattern, text: str, formatter, prefix: str = "") -> tuple:
+    """Replace all *pattern* matches with opaque placeholder tokens.
+
+    *prefix* disambiguates tokens from different stash passes so they never
+    collide when multiple stashes are active simultaneously (e.g. code, link,
+    and URL stashes all live in the same text at the same time).
+    """
     stash: list[str] = []
 
     def repl(match):
-        token = f"\x00{len(stash)}\x00"
+        token = f"\x00{prefix}{len(stash)}\x00"
         stash.append(formatter(match))
         return token
 
     return pattern.sub(repl, text), stash
 
 
-def _restore_stash(text: str, stash: Sequence[str]) -> str:
+def _restore_stash(text: str, stash: Sequence[str], prefix: str = "") -> str:
     for i, value in enumerate(stash):
-        text = text.replace(f"\x00{i}\x00", value)
+        text = text.replace(f"\x00{prefix}{i}\x00", value)
     return text
 
 
 def _apply_emphasis(text: str) -> str:
-    """
-    Stack-ish emphasis handling.
-    This is still limited markdown, not a full parser, but it handles the common
-    nested cases better than naive regex stacking.
+    """Resolve bold and italic markers using targeted off-codes instead of
+    RESET, so parent styles survive when a nested span closes.
+
+    Correctly handled cases:
+        **bold *italic* still bold**    → bold / bold+italic / bold
+        *italic **bold** still italic*  → italic / italic+bold / italic
+        ***triple*** → bold+italic together
     """
     if not text:
         return text
 
-    # Combined strong+emphasis first
-    text = re.sub(r"(?<!\\)\*\*\*(.+?)\*\*\*", lambda m: f"{BOLD}{ITALIC}{m.group(1)}{RESET}", text)
+    # Combined strong+emphasis — must run first so *** isn't split into ** + *
+    text = re.sub(
+        r"(?<!\\)\*\*\*(.+?)\*\*\*",
+        lambda m: f"{BOLD}{ITALIC}{m.group(1)}{ITALIC_OFF}{BOLD_OFF}",
+        text,
+    )
 
-    # Process bold and italic repeatedly until stable.
+    # Iterate until stable: each pass resolves one additional nesting level.
     prev = None
     while prev != text:
         prev = text
-        text = BOLD_RE.sub(lambda m: f"{BOLD}{m.group(1)}{RESET}", text)
-        text = ITALIC_RE.sub(lambda m: f"{ITALIC}{m.group(1)}{RESET}", text)
+        text = BOLD_RE.sub(lambda m: f"{BOLD}{m.group(1)}{BOLD_OFF}", text)
+        text = ITALIC_RE.sub(lambda m: f"{ITALIC}{m.group(1)}{ITALIC_OFF}", text)
 
     return text
 
 
+def _osc8_link(url: str, text: str) -> str:
+    """Wrap *text* in an OSC 8 terminal hyperlink pointing at *url*.
+
+    Supported by most modern terminals (kitty, WezTerm, iTerm2, Windows
+    Terminal, GNOME Terminal ≥ 3.26, Termux with its VTE backend, etc.).
+    Falls back gracefully in terminals that do not support OSC 8 — only the
+    plain styled text is shown, without the click handler.
+
+    Wire format:
+        ESC ] 8 ; params ; uri  ST  <visible text>  ESC ] 8 ; ;  ST
+    where ST is the String Terminator  ESC \\ (\\033\\\\).
+
+    Usage:
+        _osc8_link("https://google.com", "\\033[4;34mhttps://google.com\\033[0m")
+        _osc8_link("https://example.com", "Example Site")
+    """
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
 def render_inline(text: str) -> str:
-    """Apply inline markdown formatting for terminal output."""
+    """Apply inline markdown formatting for terminal output.
+
+    Architecture — three-stash pipeline:
+      C (code)  — backtick spans, stashed verbatim before any processing.
+      L (link)  — ``[display](url)`` turned into an OSC 8 hyperlink.
+      U (url)   — bare ``https?://`` URLs turned into OSC 8 hyperlinks.
+
+    Each stash uses a distinct single-letter prefix so their placeholder
+    tokens (``\\x00C0\\x00``, ``\\x00L0\\x00``, ``\\x00U0\\x00``, …) never
+    collide, fixing the original single-namespace collision bug.
+
+    Nesting — bold / italic close with targeted off-codes (\\033[22m /
+    \\033[23m) instead of a global RESET, so a nested span does not kill its
+    parent style when it closes:
+
+        **outer *inner* still outer**  →  bold  bold+italic  bold
+
+    Strikethrough uses actual ANSI crossed-out (\\033[9m / \\033[29m) plus
+    GRAY colour, avoiding the DIM-vs-bold intensity conflict of the old code.
+    """
     if not text:
         return ""
 
-    # Protect code spans and links first.
+    # ── 1. Code spans — literal; stash before any other processing ──────────
     text, code_stash = _stash(
         INLINE_CODE_RE,
         text,
-        lambda m: f"{YELLOW}`{m.group(1)}`{RESET}",
+        lambda m: f"{YELLOW}`{m.group(1)}`{COLOR_RESET}",
+        prefix="C",
     )
+
+    # ── 2. Markdown links [display](url) → pretty name + OSC 8 hyperlink ───
     text, link_stash = _stash(
         LINK_RE,
         text,
-        lambda m: f"{UNDER}{BLUE}{m.group(1)}{RESET}",
+        lambda m: _osc8_link(
+            m.group(2),
+            f"{UNDER}{BLUE}{m.group(1)}{UNDER_OFF}{COLOR_RESET}",
+        ),
+        prefix="L",
     )
 
-    text = STRIKE_RE.sub(lambda m: f"{DIM}{m.group(1)}{RESET}", text)
+    # ── 3. Bare https?:// URLs not already covered by a link stash ──────────
+    text, url_stash = _stash(
+        INLINE_URL_RE,
+        text,
+        lambda m: _osc8_link(
+            m.group(0),
+            f"{UNDER}{BLUE}{m.group(0)}{UNDER_OFF}{COLOR_RESET}",
+        ),
+        prefix="U",
+    )
+
+    # ── 4. Remaining inline styles — targeted off-codes, not global RESET ───
+    text = STRIKE_RE.sub(
+        lambda m: f"{GRAY}{STRIKE_CODE}{m.group(1)}{STRIKE_OFF}{COLOR_RESET}",
+        text,
+    )
     text = _apply_emphasis(text)
 
-    text = _restore_stash(text, link_stash)
-    text = _restore_stash(text, code_stash)
+    # ── 5. Restore all stashes in reverse stash order ───────────────────────
+    text = _restore_stash(text, url_stash,  prefix="U")
+    text = _restore_stash(text, link_stash, prefix="L")
+    text = _restore_stash(text, code_stash, prefix="C")
 
     return text
 
@@ -512,6 +598,58 @@ def render_table(raw_rows: List[List[str]], term_width: int, header_color: str =
 # Markdown terminal renderer
 # ============================================================
 
+# Matches a leading emoji/symbol cluster and/or a common numbering token
+# (1.  I.  a.  (1)  [I]  I]  etc.) at the very start of a heading body.
+# Used by _split_heading_prefix to separate undecorated prefix from the
+# part of the heading that should receive the underline.
+_HEADING_PREFIX_RE = re.compile(
+    r"^("
+    # ① Optional emoji / special-symbol cluster (absorbs trailing whitespace)
+    r"(?:["
+    r"\U0001F300-\U0001FAFF"   # misc symbols & pictographs, emoticons
+    r"\U0001F1E6-\U0001F1FF"   # regional indicators
+    r"\U00002600-\U000026FF"   # misc symbols
+    r"\U00002700-\U000027BF"   # dingbats
+    r"\u2B50\u2605\u2606"      # ⭐ ★ ☆
+    r"\ufe0f\u200d"            # variation selector-16 / ZWJ
+    r"]+\s*)?"                 # cluster optional; \s* absorbs trailing space
+    # ② Optional numbering token + mandatory gap
+    #    \s+ is placed AFTER a wrapper group so it applies to every alternative,
+    #    not just the last one.
+    r"(?:"                     # outer nc — the whole ② group
+    r"(?:"                     # inner nc — one of the token shapes
+    r"\(\d{1,4}\)"             # (1) … (9999)
+    r"|\[[A-Za-z0-9]{1,5}\]"  # [I]  [ii]  [1]  [A2]
+    r"|[A-Za-z0-9]{1,5}\]"    # I]   ii]   1]   (at most 5 chars before ])
+    r"|(?:\d{1,4}"             # digits:  1.  12.  1)
+    r"|[IVXLCDMivxlcdm]{1,8}" # Roman:   I.  IV.  xii.
+    r"|[a-zA-Z]{1,2}"         # letters: a.  A.   ab.
+    r")[.)]"
+    r")"                       # close inner nc (token shapes)
+    r"\s+)?"                   # mandatory gap after ANY token; outer nc optional
+    r")",                      # close outer capturing group 1
+    re.UNICODE,
+)
+
+
+def _split_heading_prefix(text: str) -> tuple:
+    """Split a heading body into ``(prefix, body)``.
+
+    *prefix* — any leading emoji cluster and/or numbering token
+               (``1.``, ``I.``, ``a.``, ``(1)``, ``[I]``, ``I]``, …).
+               Receives bold + colour but **no underline**.
+    *body*   — the actual heading words that receive the underline.
+
+    Returns ``("", text)`` when no recognisable prefix is found.
+    """
+    m = _HEADING_PREFIX_RE.match(text)
+    if m:
+        prefix = m.group(1) or ""
+        body = text[len(prefix):]
+        if prefix and body:      # need a non-empty body to split
+            return prefix, body
+    return "", text
+
 def render_markdown_terminal(text: str) -> str:
     """Transform markdown into ANSI-coloured terminal output."""
     term_width, _ = _term_size()
@@ -568,29 +706,36 @@ def render_markdown_terminal(text: str) -> str:
             i += 1
             continue
 
-        # Headings
+        # Headings — prefix (emoji / numbering) gets bold+colour only;
+        # the body text alone is underlined.
         if stripped.startswith("# "):
-            rendered.append(f"{BOLD}{UNDER}{BLUE}{render_inline(stripped[2:])}{RESET}")
+            pfx, body = _split_heading_prefix(stripped[2:])
+            rendered.append(f"{BOLD}{BLUE}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
             i += 1
             continue
         if stripped.startswith("## "):
-            rendered.append(f"{BOLD}{UNDER}{CYAN}{render_inline(stripped[3:])}{RESET}")
+            pfx, body = _split_heading_prefix(stripped[3:])
+            rendered.append(f"{BOLD}{CYAN}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
             i += 1
             continue
         if stripped.startswith("### "):
-            rendered.append(f"{BOLD}{UNDER}{MAG}{render_inline(stripped[4:])}{RESET}")
+            pfx, body = _split_heading_prefix(stripped[4:])
+            rendered.append(f"{BOLD}{MAG}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
             i += 1
             continue
         if stripped.startswith("#### "):
-            rendered.append(f"{BOLD}{UNDER}{GREEN}{render_inline(stripped[5:])}{RESET}")
+            pfx, body = _split_heading_prefix(stripped[5:])
+            rendered.append(f"{BOLD}{GREEN}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
             i += 1
             continue
         if stripped.startswith("##### "):
-            rendered.append(f"{BOLD}{UNDER}{YELLOW}{render_inline(stripped[6:])}{RESET}")
+            pfx, body = _split_heading_prefix(stripped[6:])
+            rendered.append(f"{BOLD}{YELLOW}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
             i += 1
             continue
         if stripped.startswith("###### "):
-            rendered.append(f"{BOLD}{UNDER}{render_inline(stripped[7:])}{RESET}")
+            pfx, body = _split_heading_prefix(stripped[7:])
+            rendered.append(f"{BOLD}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
             i += 1
             continue
 
