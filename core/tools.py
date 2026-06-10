@@ -734,6 +734,110 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_subtask",
+            "description": (
+                "Delegate a well-defined, self-contained subtask to a smaller, faster sub-AI model "
+                "(with a shorter context window) and receive its structured report back. "
+                "Use this when you need to: offload focused research, drafting, analysis, "
+                "summarisation, or classification work that does NOT require tools or multi-step "
+                "reasoning, freeing your own long context for higher-level orchestration. "
+                "The sub-AI has NO access to tools — its output is purely text. "
+                "Always pass ALL relevant context the sub-AI will need inside 'context', "
+                "because it cannot call retrieve_memory, read_file, or run_code itself. "
+                "The returned report is the sub-AI's final answer to you."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": (
+                            "A clear, imperative instruction for what the sub-AI should produce. "
+                            "Example: 'Summarise the following log into 5 bullet points.' "
+                            "or 'Draft a polite reply to this message in the user's tone.'"
+                        ),
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "All background information, raw data, snippets, or prior conversation "
+                            "the sub-AI needs to complete the task. Be thorough — the sub-AI cannot "
+                            "look anything up on its own."
+                        ),
+                        "default": "",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Optional. The sub-AI model to use. Defaults to 'gemini-2.5-flash-lite'. "
+                            "Other light options: 'nvidia/llama-3.1-nemotron-nano-8b-v1', "
+                            "'gemini-2.5-flash', 'gemma-4-31b-it'."
+                        ),
+                        "default": "gemini-2.5-flash-lite",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Maximum tokens the sub-AI may generate. Default 2048, max 8192.",
+                        "default": 2048,
+                        "minimum": 256,
+                        "maximum": 8192,
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate an image from a text prompt using Nano Banana "
+                "(Google Gemini's native image generation models). "
+                "The image is saved to the workspace directory and the file path is returned. "
+                "Use 'flash' quality for fast generation or 'pro' for higher fidelity, "
+                "complex text rendering, and professional assets. "
+                "Always describe the desired image in vivid detail for best results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "A vivid, detailed text description of the image to generate. "
+                            "Include style, mood, lighting, colors, and composition details "
+                            "for best results. E.g. 'A photorealistic sunset over mountain peaks, "
+                            "golden hour lighting, dramatic clouds, 4K quality'."
+                        ),
+                    },
+                    "quality": {
+                        "type": "string",
+                        "enum": ["flash", "pro"],
+                        "description": (
+                            "'flash' uses gemini-3.1-flash-image-preview — fast, great for "
+                            "iteration and bulk generation. "
+                            "'pro' uses gemini-3-pro-image-preview — highest fidelity, "
+                            "complex text rendering, professional assets. Default: 'flash'."
+                        ),
+                        "default": "flash",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": (
+                            "Optional base filename for the saved image (no extension). "
+                            "Defaults to a timestamped name like 'image_20260610_143022'. "
+                            "File will always be saved as PNG in the workspace directory."
+                        ),
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
 ]
 
 def _load_api_keys() -> dict[str, list[str]]:
@@ -1031,8 +1135,290 @@ def ask_ai_simple(prompt: str, model: str, sys_prompt: str) -> str:
 
     return "[ERROR: All providers and keys failed after multiple attempts]"
 
+# ──────────────────────────────────────────────────────────────────
+#  DELEGATE SUBTASK  — main AI offloads work to a smaller sub-AI
+# ──────────────────────────────────────────────────────────────────
+
+# Sub-AI models available for delegation (prefer light, fast models)
+_DELEGATE_MODELS: list[dict] = [
+    {"provider_id": "google",  "name": "gemini-2.5-flash-lite",                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
+    {"provider_id": "nvidia",  "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "base_url": "https://integrate.api.nvidia.com/v1"},
+    {"provider_id": "google",  "name": "gemini-2.5-flash",                     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
+    {"provider_id": "groq",    "name": "qwen/qwen3-32b",                       "base_url": "https://api.groq.com/openai/v1/"},
+    {"provider_id": "google",  "name": "gemma-4-31b-it",                       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
+]
+
+_DELEGATE_SYS_PROMPT = """\
+You are a focused sub-assistant. Your sole job is to complete the specific task
+given to you as accurately and concisely as possible.
+
+Rules:
+- You have NO tools available. Do not attempt to call any functions.
+- Use ONLY the context provided in the user message.
+- Structure your output clearly so the supervising AI can parse it easily.
+- If the task is impossible given the provided context, say so explicitly and explain why.
+- Do not pad your response with pleasantries or meta-commentary.
+"""
+
+
+def delegate_subtask(
+    task: str,
+    context: str = "",
+    model: str = "gemini-2.5-flash-lite",
+    max_tokens: int = 2048,
+) -> str:
+    """
+    Delegate a focused, tool-free subtask to a smaller sub-AI model and return
+    its report as a string.  The supervising (larger) AI receives the output
+    exactly as the sub-AI produced it.
+
+    Parameters
+    ----------
+    task       : The imperative instruction for the sub-AI.
+    context    : All data / background the sub-AI needs (no tool access).
+    model      : Preferred sub-AI model name (falls back through _DELEGATE_MODELS).
+    max_tokens : Upper bound on sub-AI output length.
+    """
+    log_write(f"[delegate_subtask] model:{model} max_tokens:{max_tokens} task:{task[:80]}")
+    print(f"{GRAY}[DELEGATE] → {model} | {task[:72]}{'...' if len(task) > 72 else ''}{RESET}")
+    max_tokens = max(256, min(8192, int(max_tokens)))
+
+    # Build the user message for the sub-AI
+    user_message = f"## Task\n{task.strip()}"
+    if context and context.strip():
+        user_message += f"\n\n## Context\n{context.strip()}"
+
+    # ── Build provider rotation ─────────────────────────────────────────────
+    # 1. Try the requested model on its inferred provider first.
+    # 2. Fall through _DELEGATE_MODELS in order as fallbacks.
+
+    def _infer_provider(m: str) -> tuple[str, str]:
+        if m.startswith("gemini") or m.startswith("gemma"):
+            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+        if "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
+            return "groq", "https://api.groq.com/openai/v1/"
+        if "nvidia" in m or "nemotron" in m or "deepseek" in m:
+            return "nvidia", "https://integrate.api.nvidia.com/v1"
+        return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    primary_pid, primary_url = _infer_provider(model)
+
+    rotation: list[dict] = []
+    # Primary: all keys for the requested model
+    for k in API_KEYS.get(primary_pid, []):
+        rotation.append({"key": k, "model": model,
+                         "base_url": primary_url, "pid": primary_pid})
+    # Fallbacks from _DELEGATE_MODELS (skip primary model to avoid duplicate)
+    for slot in _DELEGATE_MODELS:
+        pid = slot["provider_id"]
+        fb_model = slot["name"]
+        if fb_model == model:
+            continue
+        for k in API_KEYS.get(pid, []):
+            rotation.append({"key": k, "model": fb_model,
+                             "base_url": slot["base_url"], "pid": pid})
+
+    if not rotation:
+        return "[ERROR] No API keys configured for any sub-AI provider."
+
+    ind = 0
+    attempts = 0
+    max_attempts = len(rotation) * 2
+
+    while attempts < max_attempts:
+        cfg = rotation[ind]
+        client = OpenAI(api_key=cfg["key"], base_url=cfg["base_url"])
+        try:
+            resp = client.chat.completions.create(
+                model=cfg["model"],
+                messages=[
+                    {"role": "system", "content": _DELEGATE_SYS_PROMPT},
+                    {"role": "user",   "content": user_message},
+                ],
+                max_tokens=max_tokens,
+            )
+            content = resp.choices[0].message.content
+            if content:
+                header = (
+                    f"[Sub-AI Report | model={cfg['model']} | "
+                    f"task={task[:60].strip()}{'...' if len(task) > 60 else ''}]\n"
+                    f"{'-' * 60}\n"
+                )
+                return header + content.strip()
+            return "[delegate_subtask] Sub-AI returned an empty response."
+
+        except Exception as e:
+            err = str(e).upper()
+            is_transient = any(x in err for x in (
+                "429", "RESOURCE_EXHAUSTED", "RATE LIMIT",
+                "503", "UNAVAILABLE", "OVERLOADED",
+            ))
+            if is_transient:
+                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] "
+                      f"Rate-limited/overloaded. Trying next...{RESET}")
+                time.sleep(2)
+            elif "API_KEY_INVALID" in err:
+                print(f"{RED}[ERROR][{cfg['pid']}] Invalid API key.{RESET}")
+            else:
+                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] "
+                      f"Error: {str(e)[:120]}{RESET}")
+            ind = (ind + 1) % len(rotation)
+            attempts += 1
+
+    return "[ERROR] All sub-AI providers and keys failed after multiple attempts."
+
+
+# ──────────────────────────────────────────────────────────────────
+#  GENERATE IMAGE  — Nano Banana (Gemini image generation)
+# ──────────────────────────────────────────────────────────────────
+
+import base64
+
+_NANO_BANANA_MODELS = {
+    "flash": "gemini-3.1-flash-image-preview",
+    "pro":   "gemini-3-pro-image-preview",
+}
+
+_NANO_BANANA_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+def generate_image(
+    prompt: str,
+    quality: str = "flash",
+    filename: str | None = None,
+) -> str:
+    """
+    Generate an image from a text prompt using Nano Banana
+    (Google Gemini native image generation).
+
+    Parameters
+    ----------
+    prompt   : Vivid text description of the desired image.
+    quality  : 'flash' (fast) or 'pro' (high fidelity). Default 'flash'.
+    filename : Base filename without extension. Defaults to timestamp.
+
+    Returns a human-readable string with the saved file path on success,
+    or an error message on failure.
+    """
+    log_write(f"[generate_image] quality:{quality} filename:{filename} prompt:{prompt[:80]}")
+    print(f"{GRAY}[IMAGE GEN] Nano Banana {quality} | {prompt[:68]}{'...' if len(prompt) > 68 else ''}{RESET}")
+    model_name = _NANO_BANANA_MODELS.get(quality, _NANO_BANANA_MODELS["flash"])
+
+    # Determine output path
+    images_dir = os.path.join(paths.WORKSPACE_DIR, "images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    if not filename or not filename.strip():
+        filename = "image_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Sanitise: strip extension if user passed one
+    filename = os.path.splitext(filename.strip())[0]
+    out_path = os.path.join(images_dir, filename + ".png")
+
+    # Rotate through all Google API keys
+    google_keys = API_KEYS.get("google", [])
+    if not google_keys:
+        return "[generate_image ERROR] No Google API key found in api.keys."
+
+    last_error = ""
+    for key in google_keys:
+        client = OpenAI(api_key=key, base_url=_NANO_BANANA_BASE_URL)
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            # ── Extract image data from response ───────────────────────────
+            # Gemini image models return inline_data parts (base64) embedded
+            # in the response content when accessed via the OpenAI compat layer.
+            image_bytes: bytes | None = None
+
+            choice = response.choices[0]
+            raw_content = choice.message.content  # may be str or None
+
+            # Try structured parts (google-specific model_extra)
+            msg_obj = choice.message
+            parts = getattr(msg_obj, "parts", None)
+            if not parts and hasattr(msg_obj, "model_extra"):
+                parts = (msg_obj.model_extra or {}).get("parts")
+
+            if parts:
+                for part in parts:
+                    # part may be dict or object
+                    inline = (
+                        part.get("inline_data")
+                        if isinstance(part, dict)
+                        else getattr(part, "inline_data", None)
+                    )
+                    if inline:
+                        b64 = (
+                            inline.get("data")
+                            if isinstance(inline, dict)
+                            else getattr(inline, "data", None)
+                        )
+                        if b64:
+                            image_bytes = base64.b64decode(b64)
+                            break
+
+            # Fallback: some versions embed a data-URI inside the text content
+            if not image_bytes and raw_content:
+                import re as _re
+                m = _re.search(r"data:image/\w+;base64,([A-Za-z0-9+/=]+)", raw_content)
+                if m:
+                    image_bytes = base64.b64decode(m.group(1))
+
+            if not image_bytes:
+                # Last resort: treat raw_content as plain base64
+                if raw_content:
+                    try:
+                        image_bytes = base64.b64decode(raw_content.strip())
+                    except Exception:
+                        pass
+
+            if not image_bytes:
+                last_error = (
+                    f"[generate_image] Model responded but no image data found. "
+                    f"Raw content preview: {str(raw_content)[:200]}"
+                )
+                continue  # try next key
+
+            # Save the image
+            with open(out_path, "wb") as fh:
+                fh.write(image_bytes)
+
+            size_kb = len(image_bytes) // 1024
+            return (
+                f"Image generated successfully!\n"
+                f"  Model   : {model_name} (Nano Banana {quality})\n"
+                f"  Prompt  : {prompt[:80]}{'...' if len(prompt) > 80 else ''}\n"
+                f"  Saved to: {out_path}\n"
+                f"  Size    : {size_kb} KB\n"
+                f"\nYou can open it with: termux-open '{out_path}'"
+            )
+
+        except Exception as e:
+            err_str = str(e)
+            is_transient = any(x in err_str.upper() for x in (
+                "429", "RESOURCE_EXHAUSTED", "RATE LIMIT",
+                "503", "UNAVAILABLE", "OVERLOADED",
+            ))
+            if is_transient:
+                print(f"{RED}[generate_image][google/{model_name}] Rate-limited. Trying next key...{RESET}")
+                time.sleep(2)
+                last_error = f"Rate-limited: {err_str[:120]}"
+            elif "API_KEY_INVALID" in err_str.upper():
+                print(f"{RED}[generate_image] Invalid Google API key, trying next...{RESET}")
+                last_error = "Invalid API key"
+            else:
+                last_error = err_str[:200]
+                print(f"{RED}[generate_image] Error: {last_error}{RESET}")
+
+    return f"[generate_image ERROR] All Google API keys failed. Last error: {last_error}"
+
+
 #  Retrieve (separated budgets for primary vs indexed)
 def is_wake_relevant(text: str) -> bool:
+
 
     sys_prompt = """
 You are a wake-word relevance classifier.

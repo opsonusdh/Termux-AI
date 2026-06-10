@@ -356,6 +356,17 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "set_whatsapp_seen": lambda: set_whatsapp_seen(
                                 jid = g("jid", ""),
                             ),
+        "delegate_subtask":  lambda: delegate_subtask(
+                                task       = g("task", ""),
+                                context    = g("context", ""),
+                                model      = g("model", "gemini-2.5-flash-lite"),
+                                max_tokens = int(g("max_tokens", 2048)),
+                             ),
+        "generate_image":    lambda: generate_image(
+                                prompt   = g("prompt", ""),
+                                quality  = g("quality", "flash"),
+                                filename = g("filename", None),
+                             ),
     }
 
     fn = routes.get(name)
