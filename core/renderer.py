@@ -41,15 +41,24 @@ BOLD_RE        = re.compile(r"(?<!\\)\*\*(.+?)\*\*")
 ITALIC_RE      = re.compile(r"(?<!\\)(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 INLINE_CODE_RE = re.compile(r"(?<!\\)`([^`]+)`")
 STRIKE_RE      = re.compile(r"(?<!\\)~~(.+?)~~")
+IMAGE_RE       = re.compile(r"(?<!\\)!\[([^\]]*)\]\(([^)]+)\)")
 LINK_RE        = re.compile(r"(?<!\\)\[([^\]]+)\]\(([^)]+)\)")
 # Bare https?:// URLs — trailing sentence punctuation excluded from the match.
 INLINE_URL_RE  = re.compile(r"https?://[^\s\x00<>\[\]\"']+(?<![.,;:!?])")
 
 TABLE_SEP_CELL_RE = re.compile(r"^\s*:?-+:?\s*$")
 DIVIDER_RE        = re.compile(r"^\s*([-*_])(\s*\1){2,}\s*$")
+FENCE_RE          = re.compile(r"^\s*(`{3,}|~{3,})\s*(.*?)\s*$")
+SETEXT_H1_RE      = re.compile(r"^\s*=+\s*$")
+SETEXT_H2_RE      = re.compile(r"^\s*-+\s*$")
+LIST_ITEM_RE      = re.compile(r"^(\s*)[-*+•]\s+(.+)$")
+ORDERED_LIST_RE   = re.compile(r"^(\s*)((?:\d+|[A-Za-z]|[IVXLCDMivxlcdm]+)[.)])\s+(.+)$")
+TASK_ITEM_RE      = re.compile(r"^\[([ xX])\]\s+(.+)$")
+ESCAPED_MD_RE     = re.compile(r"\\([\\`*_{}\[\]()#+\-.!|>~])")
 
 # Voice renderer regex
 _STRIKE_RE_VOICE    = re.compile(r"~~(.+?)~~")
+_IMAGE_RE_VOICE     = re.compile(r"!\[([^\]]*)\]\([^\)]*\)")
 _LINK_RE_VOICE      = re.compile(r"\[([^\]]+)\]\([^\)]*\)")
 _BARE_URL_RE        = re.compile(r"https?://\S+")
 _TABLE_ROW_RE       = re.compile(r"^\s*\|.*\|\s*$")
@@ -114,6 +123,15 @@ def truncate_to_width(text: str, width: int) -> str:
         return "".join(out)
     except Exception:
         return text[:width]
+
+
+def truncate_with_ellipsis(text: str, width: int) -> str:
+    """Truncate text to width, reserving room for an ASCII ellipsis."""
+    if display_width(text) <= width:
+        return text
+    if width <= 3:
+        return truncate_to_width(text, width)
+    return truncate_to_width(text, width - 3).rstrip() + "..."
 
 
 def _plain_for_measurement(text: str) -> str:
@@ -253,7 +271,18 @@ def render_inline(text: str) -> str:
         prefix="C",
     )
 
-    # ── 2. Markdown links [display](url) → pretty name + OSC 8 hyperlink ───
+    # ── 2. Markdown images ![alt](url) → compact linked image label ────────
+    text, image_stash = _stash(
+        IMAGE_RE,
+        text,
+        lambda m: _osc8_link(
+            m.group(2),
+            f"{MAG}{UNDER}{m.group(1).strip() or 'image'}{UNDER_OFF}{COLOR_RESET}",
+        ),
+        prefix="I",
+    )
+
+    # ── 3. Markdown links [display](url) → pretty name + OSC 8 hyperlink ───
     text, link_stash = _stash(
         LINK_RE,
         text,
@@ -264,7 +293,7 @@ def render_inline(text: str) -> str:
         prefix="L",
     )
 
-    # ── 3. Bare https?:// URLs not already covered by a link stash ──────────
+    # ── 4. Bare https?:// URLs not already covered by a link stash ──────────
     text, url_stash = _stash(
         INLINE_URL_RE,
         text,
@@ -275,16 +304,18 @@ def render_inline(text: str) -> str:
         prefix="U",
     )
 
-    # ── 4. Remaining inline styles — targeted off-codes, not global RESET ───
+    # ── 5. Remaining inline styles — targeted off-codes, not global RESET ───
     text = STRIKE_RE.sub(
         lambda m: f"{GRAY}{STRIKE_CODE}{m.group(1)}{STRIKE_OFF}{COLOR_RESET}",
         text,
     )
     text = _apply_emphasis(text)
+    text = ESCAPED_MD_RE.sub(r"\1", text)
 
-    # ── 5. Restore all stashes in reverse stash order ───────────────────────
+    # ── 6. Restore all stashes in reverse stash order ───────────────────────
     text = _restore_stash(text, url_stash,  prefix="U")
     text = _restore_stash(text, link_stash, prefix="L")
+    text = _restore_stash(text, image_stash, prefix="I")
     text = _restore_stash(text, code_stash, prefix="C")
 
     return text
@@ -463,16 +494,16 @@ def fit_column_widths(max_widths: Sequence[int], term_width: int, min_col_width:
 
 def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int) -> List[str]:
     """
-    Render a fenced code block with a consistent box.
-    Border width is fixed from one calculation so top and bottom always match.
+    Render a fenced code block with a padded box and width-safe lines.
+    Border width is fixed from one calculation so top, rows, and bottom match.
     """
     clean_lang = (lang_str or "code").strip()
     max_line_width = max((display_width(x) for x in code_lines), default=20)
 
     # Keep the label visible, but don't let it push the box wider than the screen.
-    max_box_width = max(10, term_width - 4)
+    max_inner_width = max(10, term_width - 2)
     label = clean_lang
-    label_room = max(0, max_box_width - 3)  # ┌ + ┐ consume 2, want at least one dash/space
+    label_room = max(0, max_inner_width - 3)  # want at least one dash/space
     if display_width(label) > max(0, label_room - 4):
         label = truncate_to_width(label, max(0, label_room - 4))
 
@@ -481,7 +512,8 @@ def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int
         max_line_width + 2,
         display_width(label) + 4,
     )
-    inner_width = min(inner_width, max_box_width)
+    inner_width = min(inner_width, max_inner_width)
+    content_width = max(1, inner_width - 2)
 
     # Top border: corners + one dash + label + one dash + fill dashes
     left_dash = 1
@@ -492,7 +524,10 @@ def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int
 
     rendered = [top]
     for code_line in code_lines:
-        rendered.append(f"{GRAY}{code_line}{RESET}")
+        fitted = truncate_with_ellipsis(code_line, content_width)
+        rendered.append(
+            f"{GRAY}│ {pad_ansi_string(fitted, content_width)} │{RESET}"
+        )
     rendered.append(bottom)
     return rendered
 
@@ -650,6 +685,38 @@ def _split_heading_prefix(text: str) -> tuple:
             return prefix, body
     return "", text
 
+
+def _render_heading(level: int, body_text: str) -> str:
+    pfx, body = _split_heading_prefix(body_text)
+    if level == 1:
+        return f"{BOLD}{BLUE}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}"
+    if level == 2:
+        return f"{BOLD}{CYAN}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}"
+    if level == 3:
+        return f"{BOLD}{MAG}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}"
+    if level == 4:
+        return f"{BOLD}{GREEN}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}"
+    if level == 5:
+        return f"{BOLD}{YELLOW}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}"
+    return f"{BOLD}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}"
+
+
+def _indent_level(raw_indent: str) -> int:
+    return len(raw_indent.replace("\t", "    ")) // 2
+
+
+def _render_list_line(indent: str, marker: str, body: str, ordered: bool = False) -> str:
+    prefix = "  " * _indent_level(indent)
+    task = TASK_ITEM_RE.match(body)
+    if task:
+        checked = task.group(1).lower() == "x"
+        symbol = "☑" if checked else "☐"
+        color = GREEN if checked else GRAY
+        return f"{prefix}{color}{symbol}{RESET} {render_inline(task.group(2))}"
+    color = CYAN if ordered else GREEN
+    return f"{prefix}{color}{marker}{RESET} {render_inline(body)}"
+
+
 def render_markdown_terminal(text: str) -> str:
     """Transform markdown into ANSI-coloured terminal output."""
     term_width, _ = _term_size()
@@ -667,8 +734,9 @@ def render_markdown_terminal(text: str) -> str:
         line = lines[i]
         stripped = line.strip()
 
-        # Code block open / close
-        if stripped.startswith("```"):
+        # Code block open / close. Supports backtick and tilde fences.
+        fence = FENCE_RE.match(line)
+        if fence:
             if in_code:
                 rendered.extend(_render_code_block(code_lines, code_lang, term_width))
                 code_lines = []
@@ -676,7 +744,7 @@ def render_markdown_terminal(text: str) -> str:
                 code_lang = "code"
             else:
                 in_code = True
-                content = stripped[3:].strip()
+                content = fence.group(2).strip()
                 code_lang = content.split()[0] if content else "code"
             i += 1
             continue
@@ -685,6 +753,19 @@ def render_markdown_terminal(text: str) -> str:
             code_lines.append(line.rstrip())
             i += 1
             continue
+
+        # Setext headings. Must run before divider detection because --- can
+        # be either a level-2 heading underline or a horizontal rule.
+        if stripped and i + 1 < num_lines:
+            next_stripped = lines[i + 1].strip()
+            if SETEXT_H1_RE.match(next_stripped):
+                rendered.append(_render_heading(1, stripped))
+                i += 2
+                continue
+            if SETEXT_H2_RE.match(next_stripped):
+                rendered.append(_render_heading(2, stripped))
+                i += 2
+                continue
 
         # Table block
         if _is_table_block_start(lines, i):
@@ -709,53 +790,49 @@ def render_markdown_terminal(text: str) -> str:
         # Headings — prefix (emoji / numbering) gets bold+colour only;
         # the body text alone is underlined.
         if stripped.startswith("# "):
-            pfx, body = _split_heading_prefix(stripped[2:])
-            rendered.append(f"{BOLD}{BLUE}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
+            rendered.append(_render_heading(1, stripped[2:]))
             i += 1
             continue
         if stripped.startswith("## "):
-            pfx, body = _split_heading_prefix(stripped[3:])
-            rendered.append(f"{BOLD}{CYAN}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
+            rendered.append(_render_heading(2, stripped[3:]))
             i += 1
             continue
         if stripped.startswith("### "):
-            pfx, body = _split_heading_prefix(stripped[4:])
-            rendered.append(f"{BOLD}{MAG}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
+            rendered.append(_render_heading(3, stripped[4:]))
             i += 1
             continue
         if stripped.startswith("#### "):
-            pfx, body = _split_heading_prefix(stripped[5:])
-            rendered.append(f"{BOLD}{GREEN}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
+            rendered.append(_render_heading(4, stripped[5:]))
             i += 1
             continue
         if stripped.startswith("##### "):
-            pfx, body = _split_heading_prefix(stripped[6:])
-            rendered.append(f"{BOLD}{YELLOW}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
+            rendered.append(_render_heading(5, stripped[6:]))
             i += 1
             continue
         if stripped.startswith("###### "):
-            pfx, body = _split_heading_prefix(stripped[7:])
-            rendered.append(f"{BOLD}{pfx}{UNDER}{render_inline(body)}{UNDER_OFF}{RESET}")
+            rendered.append(_render_heading(6, stripped[7:]))
             i += 1
             continue
 
-        # Blockquote
-        if stripped.startswith(">"):
-            rendered.append(f"{DIM}│ {render_inline(stripped[1:].lstrip())}{RESET}")
+        # Blockquote, including nested >> quotes.
+        quote = re.match(r"^(>+)\s?(.*)$", stripped)
+        if quote:
+            prefix = " ".join("│" for _ in quote.group(1)) + " "
+            rendered.append(f"{DIM}{prefix}{render_inline(quote.group(2).lstrip())}{RESET}")
             i += 1
             continue
 
-        # Bullet lists
-        if re.match(r"^\s*[-*•]\s+", line):
-            bullet_line = re.sub(r"^(\s*)[-*•]\s+", rf"\1{GREEN}• {RESET}", line)
-            rendered.append(render_inline(bullet_line))
+        # Bullet and task lists
+        bullet = LIST_ITEM_RE.match(line)
+        if bullet:
+            rendered.append(_render_list_line(bullet.group(1), "•", bullet.group(2)))
             i += 1
             continue
 
         # Numbered lists
-        if re.match(r"^\s*\d+\.\s+", line):
-            numbered = re.sub(r"^(\s*)(\d+\.)\s+", rf"\1{CYAN}\2{RESET} ", line)
-            rendered.append(render_inline(numbered))
+        numbered = ORDERED_LIST_RE.match(line)
+        if numbered:
+            rendered.append(_render_list_line(numbered.group(1), numbered.group(2), numbered.group(3), ordered=True))
             i += 1
             continue
 
@@ -800,12 +877,14 @@ def _strip_inline(text: str) -> str:
     """
     Strip markdown markers into speakable text.
     """
+    text = _IMAGE_RE_VOICE.sub(lambda m: m.group(1) or "image", text)
     text = _LINK_RE_VOICE.sub(r"\1", text)
     text = _BARE_URL_RE.sub(lambda m: _shorten_url(m.group(0)), text)
     text = _STRIKE_RE_VOICE.sub(r"\1", text)
     text = INLINE_CODE_RE.sub(r"\1", text)
     text = BOLD_RE.sub(r"\1", text)
     text = ITALIC_RE.sub(r"\1", text)
+    text = ESCAPED_MD_RE.sub(r"\1", text)
     return text
 
 
@@ -874,7 +953,8 @@ def render_for_voice(text: str) -> str:
     for line in lines:
         stripped = line.strip()
 
-        if stripped.startswith("```"):
+        fence = FENCE_RE.match(line)
+        if fence:
             if in_code:
                 if fence_lang in _TEXT_FENCE_LABELS:
                     clean = [l.strip() for l in code_lines if l.strip()]
@@ -891,7 +971,7 @@ def render_for_voice(text: str) -> str:
                 fence_lang = ""
                 in_code = False
             else:
-                content = stripped[3:].strip()
+                content = fence.group(2).strip()
                 fence_lang = content.lower().split()[0] if content else ""
                 in_code = True
             continue

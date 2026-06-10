@@ -225,15 +225,23 @@ def get_active_persona():
 
 def get_wifi_scan_info():
     try:
-        from tools.wrapper_termux_wifi_scaninfo import get_wifi_scan_info as _fn
-        return _fn()
+        import importlib.util
+        file_path = os.path.join(paths.TOOLS_DIR, "wrapper_termux_wifi_scaninfo.py")
+        spec = importlib.util.spec_from_file_location("tools.wrapper_termux_wifi_scaninfo", file_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.get_wifi_scan_info()
     except Exception as e:
         raise RuntimeError(f"Failed to get Wi-Fi scan info: {e}")
 
 
 def get_battery_status():
     try:
-        from tools.wrapper_termux_battery_status import get_battery_status as _fn
-        return _fn()
+        import importlib.util
+        file_path = os.path.join(paths.TOOLS_DIR, "wrapper_termux_battery_status.py")
+        spec = importlib.util.spec_from_file_location("tools.wrapper_termux_battery_status", file_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.get_battery_status()
     except Exception as e:
         raise RuntimeError(f"Failed to get battery status: {e}")

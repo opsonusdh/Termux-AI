@@ -70,10 +70,10 @@ SUMMARIES_FILE = paths.CHUNK_SUMMARIES_FILE
 os.makedirs(paths.LOGS_DIR, exist_ok=True)
 
 # ── Tunables ───────────────────────────────────────────────────────────────
-SUMMARIZE_THRESHOLD  = 3      # min parent chunks before summarization starts
-RAW_RECENCY_WINDOW   = 2      # newest N parent chunks kept raw in active context
-MAX_CHUNK_CHARS      = 8_000  # total JSON chars before a chunk is split
-TARGET_SUBCHUNK_CHARS = 4_000  # target size per subchunk
+SUMMARIZE_THRESHOLD  = 7      # min parent chunks before summarization starts
+RAW_RECENCY_WINDOW   = 5      # newest N parent chunks kept raw in active context
+MAX_CHUNK_CHARS      = 24_000 # total JSON chars before a chunk is split
+TARGET_SUBCHUNK_CHARS = 12_000 # target size per subchunk
 COMPRESSION_STAGES   = ["short", "micro", "oneline"]
 STAGE_CHAR_LIMITS    = {"short": 800, "micro": 300, "oneline": 120}
 SUMMARIZER_MODEL     = "gemini-2.5-flash-lite"

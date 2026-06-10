@@ -9,6 +9,8 @@ from .wrapper_termux_vibrate import vibrate
 from .wrapper_termux_volume import get_volume_info, set_volume
 from .wrapper_termux_torch import toggle_torch
 from .wrapper_termux_location import get_location
+from .wrapper_termux_brightness import set_brightness
+from .wrapper_termux_sms import get_sms_messages, send_sms
 
 __all__ = [
     'notify',
@@ -24,5 +26,8 @@ __all__ = [
     'get_volume_info',
     'set_volume',
     'toggle_torch',
-    'get_location'
+    'get_location',
+    'set_brightness',
+    'get_sms_messages',
+    'send_sms'
 ]

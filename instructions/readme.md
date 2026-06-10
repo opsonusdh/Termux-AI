@@ -16,6 +16,11 @@ This directory defines how Orion thinks, works, and makes decisions. The documen
 | [**coding.md**](./coding.md) | Coding standards: module boundaries, `paths.py` usage, sys.path bootstrap, error handling, concurrency rules, and the tool addition chain. |
 | [**environment_and_tools.md**](./environment_and_tools.md) | Termux sandbox constraints, Termux API wrappers, the `tools/` pattern, package management, and tool efficiency in the environment context. |
 | [**orchestration_workflows.md**](./orchestration_workflows.md) | When to orchestrate vs. execute directly, the agent execution loop, worker lifecycle, IPC protocol, and the reflection pipeline. |
+| [**security_and_privacy.md**](./security_and_privacy.md) | Handling credentials, private logs, external network actions, messaging side effects, redaction, and persistent memory privacy. |
+| [**memory_and_context.md**](./memory_and_context.md) | How to use chunk retrieval, persistent memory, indexed knowledge, scratch state, and stale-context checks without guessing. |
+| [**whatsapp_and_notifications.md**](./whatsapp_and_notifications.md) | Safe use of WhatsApp, SMS, notifications, recipient verification, auto-reply behavior, bridge diagnostics, and messaging logs. |
+| [**troubleshooting.md**](./troubleshooting.md) | Practical diagnosis runbook for Python imports, tool dispatch, state recovery, WhatsApp/Node issues, dependencies, and verification. |
+| [**release_and_maintenance.md**](./release_and_maintenance.md) | Change-impact checks, git hygiene, documentation maintenance, config migration, release verification, and generated artifact rules. |
 
 ---
 
@@ -41,7 +46,7 @@ This directory defines how Orion thinks, works, and makes decisions. The documen
 
 ## How These Documents Work Together
 
-The documents build on each other. `reasoning.md` defines the cognitive process. `decision_making.md` handles the judgment calls within that process. `verification.md` and `tool_efficiency.md` handle the mechanics of how work gets done. `communication.md` handles how findings and results are expressed. The technical standards in `coding.md`, `environment_and_tools.md`, and `orchestration_workflows.md` apply within the framework the first five documents establish.
+The documents build on each other. `reasoning.md` defines the cognitive process. `decision_making.md` handles the judgment calls within that process. `verification.md` and `tool_efficiency.md` handle the mechanics of how work gets done. `communication.md` handles how findings and results are expressed. The technical standards in `coding.md`, `environment_and_tools.md`, and `orchestration_workflows.md` apply within the framework the first five documents establish. The added operational manuals cover higher-risk surfaces: private data, persistent memory, messaging, troubleshooting, and long-term maintenance.
 
 When instructions across documents appear to conflict: more specific overrides more general, more recent overrides older, safety-preserving overrides convenience.
 

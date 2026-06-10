@@ -271,6 +271,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "web_scrape":      lambda: web_scrape(
                                url      = g("url", ""),
                                selector = g("selector", None),
+                               max_chars = int(g("max_chars", 12000)),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
         "intermediate_print": lambda: intermediate_print(

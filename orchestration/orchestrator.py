@@ -35,13 +35,30 @@ class Orchestrator:
             stderr=subprocess.PIPE,
             text=True,
         )
-        status = self.protocol.receive_status(timeout=30)
-        process.wait()
+        try:
+            stdout, stderr = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            return {"status": "error", "message": "Timeout waiting for worker subprocess"}
 
         if process.returncode != 0:
-            err = process.stderr.read() if process.stderr else ""
-            print(f"{GRAY}[ORCHESTRATOR] Worker error (code {process.returncode}): {err}{RESET}")
-        else:
-            print(f"{GRAY}[ORCHESTRATOR] Worker completed.{RESET}")
-
-        return status
+            print(f"{GRAY}[ORCHESTRATOR] Worker error (code {process.returncode}): {stderr.strip()}{RESET}")
+            return {"status": "error", "message": f"Worker failed with code {process.returncode}: {stderr.strip()}"}
+        
+        print(f"{GRAY}[ORCHESTRATOR] Worker completed.{RESET}")
+        try:
+            json_line = ""
+            for line in reversed(stdout.splitlines()):
+                line_stripped = line.strip()
+                if line_stripped.startswith("{") and line_stripped.endswith("}"):
+                    json_line = line_stripped
+                    break
+            if not json_line:
+                for line in reversed(stdout.splitlines()):
+                    if line.strip():
+                        json_line = line.strip()
+                        break
+            return json.loads(json_line)
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to parse worker stdout: {e}", "stdout": stdout}

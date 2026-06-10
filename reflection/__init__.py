@@ -43,15 +43,26 @@ class ReflectionLoop:
 
     @staticmethod
     def latest_entry() -> dict | None:
+        if not os.path.exists(ReflectionLoop.LOG_PATH):
+            return None
         try:
             with open(ReflectionLoop.LOG_PATH, 'rb') as f:
-                f.seek(-2, os.SEEK_END)
-                while f.read(1) != b"\n":
-                    f.seek(-2, os.SEEK_CUR)
-                last_line = f.readline().decode()
-            return json.loads(last_line)
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if size == 0:
+                    return None
+                block_size = min(1024, size)
+                f.seek(-block_size, os.SEEK_END)
+                block = f.read(block_size)
+                lines = block.split(b"\n")
+                last_line = lines[-1]
+                if not last_line and len(lines) > 1:
+                    last_line = lines[-2]
+                if last_line:
+                    return json.loads(last_line.decode())
         except Exception:
-            return None
+            pass
+        return None
 
     @staticmethod
     def analyze() -> dict | None:

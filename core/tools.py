@@ -12,10 +12,10 @@ import threading
 import subprocess
 from pathlib import Path
 from openai import OpenAI
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from datetime import datetime
 from collections import defaultdict
-from bs4 import BeautifulSoup, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Path bootstrap
@@ -49,490 +49,6 @@ AI_ROOT = _ROOT_DIR
 DIAGNOSIS_TIMEOUT = 10
 
 _speak_thread: threading.Thread | None = None
-
-def _load_api_keys() -> dict[str, list[str]]:
-    """Load API keys from config/api.keys.
-    Supports both JSON dict format and legacy plain-text (defaults to google)."""
-    path = paths.API_KEYS_FILE
-    if not os.path.exists(path):
-        return {}
-    try:
-        raw = open(path, "r", encoding="utf-8").read().strip()
-        data = json.loads(raw)
-        return {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
-    except (json.JSONDecodeError, FileNotFoundError, AttributeError):
-        # Fallback to legacy plain-text (Google only)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return {"google": [line.strip() for line in f if line.strip()]}
-        except:
-            return {}
-
-API_KEYS = _load_api_keys()
-
-BASE_DIR    = _ROOT_DIR
-LOG_FILE    = os.path.join(paths.LOGS_DIR, "log.txt")
-WA_LOG_FILE = os.path.join(paths.LOGS_DIR, "whatsapp_log.jsonl")
-
-if not os.path.exists(LOG_FILE):
-    open(LOG_FILE, "a", encoding="utf-8").close()
-if not os.path.exists(WA_LOG_FILE):
-    open(WA_LOG_FILE, "a", encoding="utf-8").close()
-
-
-def log_write(message: str) -> None:
-    with open(LOG_FILE, "a", encoding="utf-8") as fh:
-        fh.write(message.rstrip("\n") + "\n")
-
-
-def wa_log_write(direction: str, sender_name: str, sender_id: str, message: str) -> None:
-    """Append one WhatsApp conversation entry to the persistent log file."""
-    if not WP_AVAILABLE:
-        return
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "direction": direction,
-        "sender_name": sender_name,
-        "sender_id": sender_id,
-        "message": message,
-    }
-    with open(WA_LOG_FILE, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-#  MEMORY STORE
-
-#  Paths
-
-MEMORY_FILE = paths.MEMORY_FILE        # personal / conversational facts
-INDEX_FILE  = paths.INDEXED_MEMORY_FILE  # bulk file / code chunks
-
-#  Stop-word filter
-
-_STOP_WORDS = {
-    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
-    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
-    "me", "my", "your", "how", "what", "when", "where", "can", "could",
-    "would", "should", "will", "if", "then", "so", "are", "was", "were",
-    "have", "has", "had", "not", "but", "from", "use", "get", "let",
-    "run", "its", "just", "want", "need", "try", "also", "any", "some",
-    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
-}
-
-#  Category tree (semantic grouping)
-
-_CATEGORY_TREE = {
-    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
-    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
-    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
-    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
-    "workflow":    ["git", "python", "download", "script", "build", "install"],
-}
-
-#  Entry patterns
-
-# Structured format: [type][tags][priority] text
-_STRUCT_RE = re.compile(
-    r"^\[(?P<type>\w+)\]\[(?P<tags>[^\]]*)\]\[(?P<priority>\d+)\]\s*(?P<text>.+)$"
-)
-
-# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
-_LEGACY_RE = re.compile(
-    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\s*(.+)$",
-    re.IGNORECASE,
-)
-
-# Tag written by index_memory(); lets retrieve() separate the two stores
-_INDEXED_TAG = "indexed"
-
-
-#  MemoryEntry
-
-class MemoryEntry:
-    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
-
-    def __init__(self, id_, type_, tags_str, priority, text):
-        self.id       = id_
-        self.type     = type_.lower().strip()
-        self.tags     = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
-        self.priority = max(1, min(10, int(priority)))
-        self.text     = text.strip()
-        self.keywords = _tokenize(self.text) | self.tags
-
-    @property
-    def is_indexed(self) -> bool:
-        """True for bulk file/code chunks written by index_memory()."""
-        return _INDEXED_TAG in self.tags
-
-    def __repr__(self):
-        tag_str = ",".join(sorted(self.tags))
-        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
-
-
-#  Internal helpers
-
-def _tokenize(text: str) -> set:
-    words = re.findall(r"[a-z0-9_\-]+", text.lower())
-    return {w for w in words if w not in _STOP_WORDS and len(w) > 2}
-
-
-def _infer_type_tags(text: str) -> tuple:
-    """Guess type and tags for plain un-tagged legacy text."""
-    low = text.lower()
-    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):
-        return "instruction", "shutdown,process"
-    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):
-        return "preference", "shell,commands,help"
-    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):
-        return "project", "ai_root,workspace"
-    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):
-        return "fact", "environment"
-    return "fact", "general"
-
-
-#  Load
-
-def load_memories(file_path: str = MEMORY_FILE, start_id: int = 0) -> list:
-    """
-    Parse a memory file -> list[MemoryEntry].
-    Supports structured, legacy-labeled, and bare-text lines.
-    Lines starting with '#' are comments and are skipped.
-    start_id offsets IDs so primary and indexed entries never collide.
-    """
-    if not os.path.exists(file_path):
-        return []
-
-    entries = []
-    with open(file_path, "r", encoding="utf-8") as fh:
-        for idx, raw in enumerate(fh):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            m = _STRUCT_RE.match(line)
-            if m:
-                entries.append(MemoryEntry(
-                    id_=start_id + idx,
-                    type_=m.group("type"),
-                    tags_str=m.group("tags"),
-                    priority=m.group("priority"),
-                    text=m.group("text"),
-                ))
-                continue
-
-            m2 = _LEGACY_RE.match(line)
-            if m2:
-                text = m2.group(1)
-                type_, tags = _infer_type_tags(text)
-                entries.append(MemoryEntry(
-                    id_=start_id + idx,
-                    type_=type_,
-                    tags_str=tags,
-                    priority=7,
-                    text=text,
-                ))
-                continue
-
-            if len(line) > 8:
-                type_, tags = _infer_type_tags(line)
-                entries.append(MemoryEntry(
-                    id_=start_id + idx,
-                    type_=type_,
-                    tags_str=tags,
-                    priority=5,
-                    text=line,
-                ))
-
-    return entries
-
-
-#  Scoring
-
-def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:
-    keyword_overlap   = len(entry.keywords & prompt_kw)
-    tag_match_bonus   = len(entry.tags & prompt_kw) * 1.5
-    priority_weight   = entry.priority * 0.4
-    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0
-    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
-
-
-def _relevant_categories(prompt_kw: set) -> set:
-    scores = defaultdict(float)
-    for cat, subtags in _CATEGORY_TREE.items():
-        if cat in prompt_kw:
-            scores[cat] += 2.0
-        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
-    top = {cat for cat, s in scores.items() if s > 0}
-    return top if top else set(_CATEGORY_TREE.keys())
-
-
-def make_client(key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"):
-    return OpenAI(
-        api_key=key,
-        base_url=base_url
-    )
-
-def ask_ai_simple(prompt: str, model: str, sys_prompt: str) -> str:
-    # Build rotation stack: (provider_id, model_name, base_url)
-    # The requested model is tried first (on its native provider), then
-    # the fallback providers follow so summarisation never silently dies.
-    def _provider_for(m: str):
-        if m.startswith("gemini") or m.startswith("gemma"):
-            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
-        if "llama" in m or "mixtral" in m or "qwen" in m:
-            return "groq", "https://api.groq.com/openai/v1/"
-        if "nvidia" in m or "nemotron" in m or "deepseek" in m:
-            return "nvidia", "https://integrate.api.nvidia.com/v1"
-        return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
-
-    primary_pid, primary_url = _provider_for(model)
-
-    # Fallback roster — always use the lightest available model per provider
-    fallback_info = [
-        ("google", "gemini-2.5-flash-lite", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        ("groq",   "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/"),
-        ("nvidia", "nvidia/llama-3.1-nemotron-nano-8b-v1", "https://integrate.api.nvidia.com/v1"),
-    ]
-
-    rotation = []
-    # Primary: requested model on its native provider
-    for k in API_KEYS.get(primary_pid, []):
-        rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
-    # Fallbacks: other providers with their own default models
-    for pid, fb_model, url in fallback_info:
-        if pid == primary_pid:
-            continue
-        for k in API_KEYS.get(pid, []):
-            rotation.append({"key": k, "model": fb_model, "base_url": url, "pid": pid})
-
-    if not rotation:
-        return "[ERROR: No API keys configured in api.keys]"
-
-    ind = 0
-    attempts = 0
-    max_total_attempts = len(rotation) * 2
-
-    while attempts < max_total_attempts:
-        cfg = rotation[ind]
-        client = make_client(cfg["key"], cfg["base_url"])
-        try:
-            response = client.chat.completions.create(
-                model=cfg["model"],
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1024,
-            )
-            msg = response.choices[0].message
-            if msg.content:
-                return msg.content.strip()
-            return "[EMPTY RESPONSE]"
-
-        except Exception as e:
-            msg_str = str(e).upper()
-            is_transient = any(x in msg_str for x in ["503", "UNAVAILABLE", "OVERLOADED", "429", "RESOURCE_EXHAUSTED", "RATE LIMIT"])
-
-            if is_transient:
-                print(f"{RED}[{cfg['pid']}] Key/Provider rate-limited or overloaded. Trying next...{RESET}")
-                time.sleep(2)
-            elif "API_KEY_INVALID" in msg_str:
-                print(f"{RED}[{cfg['pid']}] Invalid API key detected.{RESET}")
-            else:
-                print(f"{RED}[{cfg['pid']}] API Error: {msg_str[:100]}...{RESET}")
-
-            ind = (ind + 1) % len(rotation)
-            attempts += 1
-
-    return "[ERROR: All providers and keys failed after multiple attempts]"
-
-#  Retrieve (separated budgets for primary vs indexed)
-def is_wake_relevant(text: str) -> bool:
-
-    sys_prompt = """
-You are a wake-word relevance classifier.
-
-The assistant name is Orion.
-
-Determine whether the speaker is directly addressing the assistant.
-
-Reply ONLY with:
-YES
-or
-NO
-"""
-    result = ask_ai_simple(
-        prompt=text,
-        _model="gemini-2.5-flash-lite",
-        _sys_prompt=sys_prompt,
-    )
-
-    return result.strip().upper().startswith("YES")
-
-
-def retrieve(
-    prompt: str,
-    top_k: int = 5,
-    threshold: float = 1.5,
-    indexed_top_k: int = 2,
-    indexed_threshold: float = 2.5,
-) -> dict:
-    """
-    Best-first retrieval with separate budgets for the two stores.
-
-    Primary store (memories.txt)
-        Standard threshold (1.5). Up to top_k results.
-        Priority-10 instructions always surface regardless of score.
-
-    Indexed store (indexed_memory.txt)
-        Higher threshold (2.5) -- only surface clearly relevant chunks.
-        Capped at indexed_top_k (2) so bulk code never crowds out personal context.
-
-    Returns {"primary": list[MemoryEntry], "indexed": list[MemoryEntry]}.
-    """
-    primary_entries = load_memories(MEMORY_FILE)
-    indexed_entries = load_memories(INDEX_FILE, start_id=len(primary_entries))
-
-    prompt_kw = _tokenize(prompt)
-
-    # Primary store
-    primary_results: list = []
-    seen_ids: set         = set()
-
-    if not primary_entries:
-        pass
-    elif not prompt_kw:
-        instructions = [e for e in primary_entries if e.type == "instruction"]
-        instructions.sort(key=lambda e: -e.priority)
-        primary_results = instructions[:top_k]
-        seen_ids = {e.id for e in primary_results}
-    else:
-        relevant_cats = _relevant_categories(prompt_kw)
-
-        mandatory   = [e for e in primary_entries if e.priority == 10 and e.type == "instruction"]
-        seen_ids    = {e.id for e in mandatory}
-        primary_results.extend(mandatory)
-
-        heap = []
-        for entry in primary_entries:
-            score = _score_entry(entry, prompt_kw, relevant_cats)
-            if score >= threshold:
-                heapq.heappush(heap, (-score, entry.id, entry))
-
-        while heap and len(primary_results) < top_k:
-            _, _, entry = heapq.heappop(heap)
-            if entry.id not in seen_ids:
-                seen_ids.add(entry.id)
-                primary_results.append(entry)
-
-    # Indexed store
-    indexed_results: list = []
-
-    if indexed_entries and prompt_kw and indexed_top_k > 0:
-        relevant_cats = _relevant_categories(prompt_kw)
-        heap = []
-        for entry in indexed_entries:
-            score = _score_entry(entry, prompt_kw, relevant_cats)
-            if score >= indexed_threshold:
-                heapq.heappush(heap, (-score, entry.id, entry))
-
-        while heap and len(indexed_results) < indexed_top_k:
-            _, _, entry = heapq.heappop(heap)
-            indexed_results.append(entry)
-
-    return {"primary": primary_results, "indexed": indexed_results}
-
-
-def build_memory_block(prompt: str) -> str:
-    """
-    Retrieve relevant memories and format them as a two-section system-prompt block.
-
-      ## MEMORY          -- personal facts, preferences, instructions
-      ## RELEVANT CODE   -- indexed file/doc chunks (only when clearly relevant)
-
-    Returns empty string if nothing is relevant.
-    """
-    result  = retrieve(prompt)
-    primary = result["primary"]
-    indexed = result["indexed"]
-
-    if not primary and not indexed:
-        return ""
-
-    lines = []
-
-    if primary:
-        lines.append("## MEMORY")
-        for entry in primary:
-            tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
-            lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
-        lines.append("")
-
-    if indexed:
-        lines.append("## RELEVANT CODE/DOCS")
-        for entry in indexed:
-            source_tags = sorted(entry.tags - {_INDEXED_TAG})
-            src = source_tags[0] if source_tags else "file"
-            lines.append(f"- [{src}] {entry.text}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def retrieve_flat(prompt: str, top_k: int = 5) -> list:
-    """
-    Single flat list for the retrieve_memory tool.
-    Primary entries first; indexed fill remaining slots (capped at 3).
-    """
-    result = retrieve(
-        prompt,
-        top_k=max(top_k - 1, 1),
-        indexed_top_k=min(3, top_k),
-    )
-    seen_ids: set = set()
-    flat = []
-    for entry in result["primary"] + result["indexed"]:
-        if entry.id not in seen_ids:
-            seen_ids.add(entry.id)
-            flat.append(entry)
-    return flat[:top_k]
-
-
-#  Chunk helper (used by index_memory and index_files)
-
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
-    """Split text into overlapping word-count chunks for indexing."""
-    words  = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i : i + chunk_size])
-        if chunk:
-            chunks.append(chunk)
-    return chunks
-
-
-def index_memory(
-    text: str,
-    source_path: str = "unknown",
-    chunk_size: int = 500,
-    overlap: int = 50,
-) -> list:
-    """
-    Chunk text and append entries to indexed_memory.txt.
-    All entries carry the 'indexed' tag so retrieve() applies the higher
-    threshold and separate budget, keeping code out of personal memory.
-    """
-    chunks = chunk_text(text, chunk_size, overlap)
-    written = []
-    try:
-        with open(INDEX_FILE, "a", encoding="utf-8") as fh:
-            for chunk in chunks:
-                line = f"[project][indexed,{source_path}][3] {chunk}"
-                fh.write(line + "\n")
-                written.append(line)
-        return written
-    except OSError as exc:
-        return [f"[ERROR indexing memory: {exc}]"]
-
 
 #  TOOL DESCRIPTIONS
 
@@ -768,10 +284,10 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "web_scrape",
             "description": (
-                "Fetch a webpage and convert meaningful HTML into structured markdown. "
-                "Preserves headings, paragraphs, links, and image/media URLs. "
-                "Optionally target a specific element with a CSS selector. "
-                "Use cases: google search, retrieve a site's text and a lot."
+                "Fetch a URL and convert readable content into structured markdown. "
+                "Supports HTML pages, plain text, JSON, tables, ordered/unordered lists, "
+                "links, images, and media URLs. Optionally target one or more elements "
+                "with a CSS selector."
             ),
             "parameters": {
                 "type": "object",
@@ -782,7 +298,14 @@ TOOLS_DESCRIPTION = [
                     },
                     "selector": {
                         "type": "string",
-                        "description": "Optional CSS selector to filter content (e.g., 'main', 'article').",
+                        "description": "Optional CSS selector to filter content (e.g., 'main', 'article', '.content').",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return after extraction. Default 12000, max 50000.",
+                        "default": 12000,
+                        "minimum": 1000,
+                        "maximum": 50000,
                     },
                 },
                 "required": ["url"],
@@ -1213,6 +736,492 @@ TOOLS_DESCRIPTION = [
     },
 ]
 
+def _load_api_keys() -> dict[str, list[str]]:
+    """Load API keys from config/api.keys.
+    Supports both JSON dict format and legacy plain-text (defaults to google)."""
+    path = paths.API_KEYS_FILE
+    if not os.path.exists(path):
+        return {}
+    try:
+        raw = open(path, "r", encoding="utf-8").read().strip()
+        data = json.loads(raw)
+        return {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
+    except (json.JSONDecodeError, FileNotFoundError, AttributeError):
+        # Fallback to legacy plain-text (Google only)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return {"google": [line.strip() for line in f if line.strip()]}
+        except:
+            return {}
+
+API_KEYS = _load_api_keys()
+
+BASE_DIR    = _ROOT_DIR
+LOG_FILE    = os.path.join(paths.LOGS_DIR, "log.txt")
+WA_LOG_FILE = os.path.join(paths.LOGS_DIR, "whatsapp_log.jsonl")
+
+if not os.path.exists(LOG_FILE):
+    open(LOG_FILE, "a", encoding="utf-8").close()
+if not os.path.exists(WA_LOG_FILE):
+    open(WA_LOG_FILE, "a", encoding="utf-8").close()
+
+
+def log_write(message: str) -> None:
+    with open(LOG_FILE, "a", encoding="utf-8") as fh:
+        fh.write(message.rstrip("\n") + "\n")
+
+
+def wa_log_write(direction: str, sender_name: str, sender_id: str, message: str) -> None:
+    """Append one WhatsApp conversation entry to the persistent log file."""
+    if not WP_AVAILABLE:
+        return
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "direction": direction,
+        "sender_name": sender_name,
+        "sender_id": sender_id,
+        "message": message,
+    }
+    with open(WA_LOG_FILE, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+#  MEMORY STORE
+
+#  Paths
+
+MEMORY_FILE = paths.MEMORY_FILE        # personal / conversational facts
+INDEX_FILE  = paths.INDEXED_MEMORY_FILE  # bulk file / code chunks
+
+#  Stop-word filter
+
+_STOP_WORDS = {
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
+    "of", "and", "or", "for", "with", "that", "this", "i", "you", "we",
+    "me", "my", "your", "how", "what", "when", "where", "can", "could",
+    "would", "should", "will", "if", "then", "so", "are", "was", "were",
+    "have", "has", "had", "not", "but", "from", "use", "get", "let",
+    "run", "its", "just", "want", "need", "try", "also", "any", "some",
+    "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
+}
+
+#  Category tree (semantic grouping)
+
+_CATEGORY_TREE = {
+    "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
+    "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
+    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "fact":        ["environment", "device", "installed", "paths", "api", "key"],
+    "workflow":    ["git", "python", "download", "script", "build", "install"],
+}
+
+#  Entry patterns
+
+# Structured format: [type][tags][priority] text
+_STRUCT_RE = re.compile(
+    r"^\[(?P<type>\w+)\]\[(?P<tags>[^\]]*)\]\[(?P<priority>\d+)\]\s*(?P<text>.+)$"
+)
+
+# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
+_LEGACY_RE = re.compile(
+    r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\s*(.+)$",
+    re.IGNORECASE,
+)
+
+# Tag written by index_memory(); lets retrieve() separate the two stores
+_INDEXED_TAG = "indexed"
+
+
+#  MemoryEntry
+
+class MemoryEntry:
+    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
+
+    def __init__(self, id_, type_, tags_str, priority, text):
+        self.id       = id_
+        self.type     = type_.lower().strip()
+        self.tags     = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
+        self.priority = max(1, min(10, int(priority)))
+        self.text     = text.strip()
+        self.keywords = _tokenize(self.text) | self.tags
+
+    @property
+    def is_indexed(self) -> bool:
+        """True for bulk file/code chunks written by index_memory()."""
+        return _INDEXED_TAG in self.tags
+
+    def __repr__(self):
+        tag_str = ",".join(sorted(self.tags))
+        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+
+
+#  Internal helpers
+
+def _tokenize(text: str) -> set:
+    words = re.findall(r"[a-z0-9_\-]+", text.lower())
+    return {w for w in words if w not in _STOP_WORDS and len(w) > 2}
+
+
+def _infer_type_tags(text: str) -> tuple:
+    """Guess type and tags for plain un-tagged legacy text."""
+    low = text.lower()
+    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):
+        return "instruction", "shutdown,process"
+    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):
+        return "preference", "shell,commands,help"
+    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):
+        return "project", "ai_root,workspace"
+    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):
+        return "fact", "environment"
+    return "fact", "general"
+
+
+#  Load
+
+def load_memories(file_path: str = MEMORY_FILE, start_id: int = 0) -> list:
+    """
+    Parse a memory file -> list[MemoryEntry].
+    Supports structured, legacy-labeled, and bare-text lines.
+    Lines starting with '#' are comments and are skipped.
+    start_id offsets IDs so primary and indexed entries never collide.
+    """
+    if not os.path.exists(file_path):
+        return []
+
+    entries = []
+    with open(file_path, "r", encoding="utf-8") as fh:
+        for idx, raw in enumerate(fh):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            m = _STRUCT_RE.match(line)
+            if m:
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=m.group("type"),
+                    tags_str=m.group("tags"),
+                    priority=m.group("priority"),
+                    text=m.group("text"),
+                ))
+                continue
+
+            m2 = _LEGACY_RE.match(line)
+            if m2:
+                text = m2.group(1)
+                type_, tags = _infer_type_tags(text)
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=7,
+                    text=text,
+                ))
+                continue
+
+            if len(line) > 8:
+                type_, tags = _infer_type_tags(line)
+                entries.append(MemoryEntry(
+                    id_=start_id + idx,
+                    type_=type_,
+                    tags_str=tags,
+                    priority=5,
+                    text=line,
+                ))
+
+    return entries
+
+
+#  Scoring
+
+def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:
+    keyword_overlap   = len(entry.keywords & prompt_kw)
+    tag_match_bonus   = len(entry.tags & prompt_kw) * 1.5
+    priority_weight   = entry.priority * 0.4
+    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0
+    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+
+
+def _relevant_categories(prompt_kw: set) -> set:
+    scores = defaultdict(float)
+    for cat, subtags in _CATEGORY_TREE.items():
+        if cat in prompt_kw:
+            scores[cat] += 2.0
+        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
+    top = {cat for cat, s in scores.items() if s > 0}
+    return top if top else set(_CATEGORY_TREE.keys())
+
+
+def make_client(key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"):
+    return OpenAI(
+        api_key=key,
+        base_url=base_url
+    )
+
+def ask_ai_simple(prompt: str, model: str, sys_prompt: str) -> str:
+    # Build rotation stack: (provider_id, model_name, base_url)
+    # The requested model is tried first (on its native provider), then
+    # the fallback providers follow so summarisation never silently dies.
+    def _provider_for(m: str):
+        if m.startswith("gemini") or m.startswith("gemma"):
+            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+        if "llama" in m or "mixtral" in m or "qwen" in m:
+            return "groq", "https://api.groq.com/openai/v1/"
+        if "nvidia" in m or "nemotron" in m or "deepseek" in m:
+            return "nvidia", "https://integrate.api.nvidia.com/v1"
+        return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    primary_pid, primary_url = _provider_for(model)
+
+    # Fallback roster — always use the lightest available model per provider
+    fallback_info = [
+        ("google", "gemini-2.5-flash-lite", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+        ("groq",   "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/"),
+        ("nvidia", "nvidia/llama-3.1-nemotron-nano-8b-v1", "https://integrate.api.nvidia.com/v1"),
+    ]
+
+    rotation = []
+    # Primary: requested model on its native provider
+    for k in API_KEYS.get(primary_pid, []):
+        rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
+    # Fallbacks: other providers with their own default models
+    for pid, fb_model, url in fallback_info:
+        if pid == primary_pid:
+            continue
+        for k in API_KEYS.get(pid, []):
+            rotation.append({"key": k, "model": fb_model, "base_url": url, "pid": pid})
+
+    if not rotation:
+        return "[ERROR: No API keys configured in api.keys]"
+
+    ind = 0
+    attempts = 0
+    max_total_attempts = len(rotation) * 2
+
+    while attempts < max_total_attempts:
+        cfg = rotation[ind]
+        client = make_client(cfg["key"], cfg["base_url"])
+        try:
+            response = client.chat.completions.create(
+                model=cfg["model"],
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=1024,
+            )
+            msg = response.choices[0].message
+            if msg.content:
+                return msg.content.strip()
+            return "[EMPTY RESPONSE]"
+
+        except Exception as e:
+            msg_str = str(e).upper()
+            is_transient = any(x in msg_str for x in ["503", "UNAVAILABLE", "OVERLOADED", "429", "RESOURCE_EXHAUSTED", "RATE LIMIT"])
+
+            if is_transient:
+                print(f"{RED}[{cfg['pid']}] Key/Provider rate-limited or overloaded. Trying next...{RESET}")
+                time.sleep(2)
+            elif "API_KEY_INVALID" in msg_str:
+                print(f"{RED}[{cfg['pid']}] Invalid API key detected.{RESET}")
+            else:
+                print(f"{RED}[{cfg['pid']}] API Error: {msg_str[:100]}...{RESET}")
+
+            ind = (ind + 1) % len(rotation)
+            attempts += 1
+
+    return "[ERROR: All providers and keys failed after multiple attempts]"
+
+#  Retrieve (separated budgets for primary vs indexed)
+def is_wake_relevant(text: str) -> bool:
+
+    sys_prompt = """
+You are a wake-word relevance classifier.
+
+The assistant name is Orion.
+
+Determine whether the speaker is directly addressing the assistant.
+
+Reply ONLY with:
+YES
+or
+NO
+"""
+    result = ask_ai_simple(
+        prompt=text,
+        model="gemini-2.5-flash-lite",
+        sys_prompt=sys_prompt,
+    )
+
+    return result.strip().upper().startswith("YES")
+
+
+def retrieve(
+    prompt: str,
+    top_k: int = 5,
+    threshold: float = 1.5,
+    indexed_top_k: int = 2,
+    indexed_threshold: float = 2.5,
+) -> dict:
+    """
+    Best-first retrieval with separate budgets for the two stores.
+
+    Primary store (memories.txt)
+        Standard threshold (1.5). Up to top_k results.
+        Priority-10 instructions always surface regardless of score.
+
+    Indexed store (indexed_memory.txt)
+        Higher threshold (2.5) -- only surface clearly relevant chunks.
+        Capped at indexed_top_k (2) so bulk code never crowds out personal context.
+
+    Returns {"primary": list[MemoryEntry], "indexed": list[MemoryEntry]}.
+    """
+    primary_entries = load_memories(MEMORY_FILE)
+    indexed_entries = load_memories(INDEX_FILE, start_id=len(primary_entries))
+
+    prompt_kw = _tokenize(prompt)
+
+    # Primary store
+    primary_results: list = []
+    seen_ids: set         = set()
+
+    if not primary_entries:
+        pass
+    elif not prompt_kw:
+        instructions = [e for e in primary_entries if e.type == "instruction"]
+        instructions.sort(key=lambda e: -e.priority)
+        primary_results = instructions[:top_k]
+        seen_ids = {e.id for e in primary_results}
+    else:
+        relevant_cats = _relevant_categories(prompt_kw)
+
+        mandatory   = [e for e in primary_entries if e.priority == 10 and e.type == "instruction"]
+        seen_ids    = {e.id for e in mandatory}
+        primary_results.extend(mandatory)
+
+        heap = []
+        for entry in primary_entries:
+            score = _score_entry(entry, prompt_kw, relevant_cats)
+            if score >= threshold:
+                heapq.heappush(heap, (-score, entry.id, entry))
+
+        while heap and len(primary_results) < top_k:
+            _, _, entry = heapq.heappop(heap)
+            if entry.id not in seen_ids:
+                seen_ids.add(entry.id)
+                primary_results.append(entry)
+
+    # Indexed store
+    indexed_results: list = []
+
+    if indexed_entries and prompt_kw and indexed_top_k > 0:
+        relevant_cats = _relevant_categories(prompt_kw)
+        heap = []
+        for entry in indexed_entries:
+            score = _score_entry(entry, prompt_kw, relevant_cats)
+            if score >= indexed_threshold:
+                heapq.heappush(heap, (-score, entry.id, entry))
+
+        while heap and len(indexed_results) < indexed_top_k:
+            _, _, entry = heapq.heappop(heap)
+            indexed_results.append(entry)
+
+    return {"primary": primary_results, "indexed": indexed_results}
+
+
+def build_memory_block(prompt: str) -> str:
+    """
+    Retrieve relevant memories and format them as a two-section system-prompt block.
+
+      ## MEMORY          -- personal facts, preferences, instructions
+      ## RELEVANT CODE   -- indexed file/doc chunks (only when clearly relevant)
+
+    Returns empty string if nothing is relevant.
+    """
+    result  = retrieve(prompt)
+    primary = result["primary"]
+    indexed = result["indexed"]
+
+    if not primary and not indexed:
+        return ""
+
+    lines = []
+
+    if primary:
+        lines.append("## MEMORY")
+        for entry in primary:
+            tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
+            lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
+        lines.append("")
+
+    if indexed:
+        lines.append("## RELEVANT CODE/DOCS")
+        for entry in indexed:
+            source_tags = sorted(entry.tags - {_INDEXED_TAG})
+            src = source_tags[0] if source_tags else "file"
+            lines.append(f"- [{src}] {entry.text}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def retrieve_flat(prompt: str, top_k: int = 5) -> list:
+    """
+    Single flat list for the retrieve_memory tool.
+    Primary entries first; indexed fill remaining slots (capped at 3).
+    """
+    result = retrieve(
+        prompt,
+        top_k=max(top_k - 1, 1),
+        indexed_top_k=min(3, top_k),
+    )
+    seen_ids: set = set()
+    flat = []
+    for entry in result["primary"] + result["indexed"]:
+        if entry.id not in seen_ids:
+            seen_ids.add(entry.id)
+            flat.append(entry)
+    return flat[:top_k]
+
+
+#  Chunk helper (used by index_memory and index_files)
+
+def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
+    """Split text into overlapping word-count chunks for indexing."""
+    words  = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = " ".join(words[i : i + chunk_size])
+        if chunk:
+            chunks.append(chunk)
+    return chunks
+
+
+def index_memory(
+    text: str,
+    source_path: str = "unknown",
+    chunk_size: int = 500,
+    overlap: int = 50,
+) -> list:
+    """
+    Chunk text and append entries to indexed_memory.txt.
+    All entries carry the 'indexed' tag so retrieve() applies the higher
+    threshold and separate budget, keeping code out of personal memory.
+    """
+    chunks = chunk_text(text, chunk_size, overlap)
+    written = []
+    try:
+        with open(INDEX_FILE, "a", encoding="utf-8") as fh:
+            for chunk in chunks:
+                line = f"[project][indexed,{source_path}][3] {chunk}"
+                fh.write(line + "\n")
+                written.append(line)
+        return written
+    except OSError as exc:
+        return [f"[ERROR indexing memory: {exc}]"]
+
+
+
+
 
 #  TOOL FUNCTIONS
 
@@ -1421,8 +1430,8 @@ def read_file(
         numbered = [f"{lo+i+1:6d}  {ln}" for i, ln in enumerate(selected)]
         header   = f"[FILE] {path}  lines {lo+1}–{hi} of {total}\n"
         out = header + "".join(numbered)
-        printable_out = out if len("\n".join(out.splitlines()[:PRINT_LINE_THRESHOLD])) < PRINT_CHAR_THRESHOLD else out[:PRINT_CHAR_THRESHOLD] + "\n    .\n    .\n    ."
-        print(f"{GRAY}[OUT]\n{printable_out}{RESET}")
+        printable_out = f"Read {len(out.splitlines())} line(s)"
+        print(f"{GRAY}[OK] {printable_out}{RESET}")
         return out
 
     except OSError as exc:
@@ -1560,7 +1569,7 @@ def write_file(
                 f"({replaced} line(s) removed, replacement written) in {path}."
             )
         
-        print(f"{GRAY}[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment.{RESET}")
+        print(f"{RED}[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment.{RESET}")
         return f"[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment."
 
     except OSError as exc:
@@ -1571,8 +1580,7 @@ def write_file(
 
 def index_files(path: str, extension_filter: str = "") -> str:
     """Read files, chunk them, and store in indexed_memory.txt (not memories.txt)."""
-    printable_index = ""
-    log_write(f"[index_files] path:{path}, filter:{extension_filter}")
+    log_write(f"[INDEXING] path:{path}, filter:{extension_filter}")
 
     path = os.path.expanduser(path)
     if not os.path.exists(path):
@@ -1644,14 +1652,12 @@ def index_files(path: str, extension_filter: str = "") -> str:
                 indexed_files_count += 1
                 indexed_chunks_count += len(chunks)
 
-                if len(printable_index) < PRINT_CHAR_THRESHOLD:
-                    printable_index += f"[INDEXED] {rel_path} ({len(chunks)}"
 
         except Exception as e:
             print(f"Failed to index {fpath}: {e}")
             
-    printable_index = printable_index if len(printable_index) <= PRINT_CHAR_THRESHOLD else printable_index[:PRINT_CHAR_THRESHOLD]+"\n    .\n    .\n    ."
-    print(f"{GRAY}{printable_index}{RESET}")
+    
+    print(f"{GRAY}[OK] Indexed {indexed_files_count} file(s){RESET}")
     return (
         f"Successfully indexed "
         f"{indexed_chunks_count} chunks "
@@ -1660,67 +1666,162 @@ def index_files(path: str, extension_filter: str = "") -> str:
     )
 
 
-def web_scrape(url: str, selector: str = None) -> str:
-    """Fetch a webpage and convert the readable parts into markdown-like text."""
+def web_scrape(url: str, selector: str = None, max_chars: int = 12000) -> str:
+    """Fetch a URL and convert readable content into markdown."""
     try:
+        url = (url or "").strip()
+        selector = (selector or "").strip() or None
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars = 12000
+        max_chars = max(1000, min(max_chars, 50000))
+
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return "[ERROR] web_scrape requires a valid http(s) URL."
+
         print(f"{GRAY}[SCRAPING] {url}{RESET}")
-        log_write(f"[web_scrape] URL:{url} selector:{selector}")
+        log_write(f"[web_scrape] URL:{url} selector:{selector} max_chars:{max_chars}")
 
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/91.0 Safari/537.36"
-            )
+                "Chrome/124.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5",
+            "Accept-Language": "en-US,en;q=0.9",
         }
 
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
         response.raise_for_status()
 
+        final_url = response.url or url
         content_type = response.headers.get("Content-Type", "").lower()
-        if "text/html" not in content_type:
-            msg = f"[ERROR] Unsupported content type: {content_type}"
+        response.encoding = response.encoding or getattr(response, "apparent_encoding", None) or "utf-8"
+
+        def truncate_output(text: str) -> str:
+            text = text.strip()
+            if len(text) <= max_chars:
+                return text
+            return text[:max_chars].rstrip() + f"\n\n... (content truncated at {max_chars} characters)"
+
+        def plain_response(label: str, body: str, fence: str = "text") -> str:
+            return truncate_output(
+                f"Source: <{final_url}>\n"
+                f"Content-Type: {content_type or label}\n\n"
+                f"```{fence}\n{body.strip()}\n```"
+            )
+
+        if "application/json" in content_type or content_type.endswith("+json"):
+            try:
+                data = response.json()
+            except Exception:
+                data = json.loads(response.text)
+            return plain_response("application/json", json.dumps(data, indent=2, ensure_ascii=False), "json")
+
+        is_html = any(t in content_type for t in ("text/html", "application/xhtml+xml"))
+        if not is_html:
+            if content_type.startswith("text/") or "xml" in content_type:
+                return plain_response(content_type or "text/plain", response.text, "text")
+            msg = f"[ERROR] Unsupported content type: {content_type or 'unknown'}"
             log_write(msg)
             return msg
 
         soup = BeautifulSoup(response.text, "html.parser")
 
+        for comment in soup.find_all(string=lambda node: isinstance(node, Comment)):
+            comment.extract()
+
         for tag in soup.select(
-            "script, style, noscript, nav, footer, aside, "
-            ".sidebar, .menu, .ads, .popup, .cookie, .banner"
+            "script, style, noscript, template, svg, canvas, nav, footer, aside, "
+            "[hidden], [aria-hidden='true'], [style*='display:none'], [style*='display: none'], "
+            ".sidebar, .menu, .ads, .ad, .advert, .advertisement, .popup, .modal, "
+            ".cookie, .banner, .newsletter, .subscribe, .social-share"
         ):
             tag.decompose()
 
-        root = soup.select_one(selector) if selector else soup
-        if selector and root is None:
-            msg = f"[ERROR] Selector '{selector}' not found."
-            log_write(msg)
-            return msg
+        base_tag = soup.find("base", href=True)
+        base_url = urljoin(final_url, base_tag["href"]) if base_tag else final_url
 
-        lines    = []
-        seen_urls: set = set()
+        if selector:
+            try:
+                roots = soup.select(selector)
+            except Exception as exc:
+                msg = f"[ERROR] Invalid selector '{selector}': {exc}"
+                log_write(msg)
+                return msg
+            if not roots:
+                msg = f"[ERROR] Selector '{selector}' not found."
+                log_write(msg)
+                return msg
+        else:
+            roots = [
+                soup.select_one("article")
+                or soup.select_one("main")
+                or soup.body
+                or soup
+            ]
+
+        lines: list[str] = []
+        seen_urls: set[str] = set()
+
+        def normalize_text(text: str) -> str:
+            text = html.unescape(text or "")
+            return re.sub(r"\s+", " ", text).strip()
+
+        def escape_table_cell(text: str) -> str:
+            return normalize_text(text).replace("|", r"\|")
 
         def resolve(raw: str) -> str:
-            return urljoin(url, raw.strip())
+            raw = (raw or "").strip()
+            if not raw:
+                return ""
+            full = urljoin(base_url, raw)
+            scheme = urlparse(full).scheme.lower()
+            if scheme in {"http", "https", "mailto", "tel"}:
+                return full
+            return ""
 
-        def add_line(text: str):
-            text = html.unescape(text).strip()
-            if text:
-                lines.append(text)
+        def add_line(text: str = "") -> None:
+            if text is None:
+                return
+            for part in str(text).splitlines() or [""]:
+                part = part.rstrip()
+                if not part:
+                    add_blank()
+                    continue
+                if lines and lines[-1] == part:
+                    continue
+                lines.append(part)
+
+        def add_blank() -> None:
+            if lines and lines[-1] != "":
+                lines.append("")
 
         def label_for(tag: Tag) -> str:
             for attr in ("alt", "title", "aria-label", "data-label", "data-title"):
                 value = tag.get(attr)
                 if value:
-                    return str(value).strip()
+                    return normalize_text(str(value))
+            return ""
+
+        def first_srcset_url(value: str) -> str:
+            for candidate in (value or "").split(","):
+                url_part = candidate.strip().split(" ")[0]
+                if url_part:
+                    return url_part
             return ""
 
         def link_markdown(tag: Tag) -> str:
-            text = tag.get_text(" ", strip=True)
+            text = normalize_text(tag.get_text(" ", strip=True))
             href = tag.get("href")
             if not href:
                 return text
             full = resolve(href)
+            if not full:
+                return text
             if full in seen_urls:
                 return text or f"<{full}>"
             seen_urls.add(full)
@@ -1728,21 +1829,34 @@ def web_scrape(url: str, selector: str = None) -> str:
 
         def image_markdown(tag: Tag) -> str:
             alt = label_for(tag)
-            src = tag.get("src") or tag.get("data-src") or tag.get("data-original")
+            src = (
+                tag.get("src")
+                or tag.get("data-src")
+                or tag.get("data-original")
+                or first_srcset_url(tag.get("srcset", ""))
+            )
             if not src:
                 return alt
-            return f"![{alt or 'image'}]({resolve(src)})"
+            full = resolve(src)
+            if not full:
+                return alt
+            return f"![{alt or 'image'}]({full})"
 
         def media_markdown(tag: Tag) -> str:
             label = label_for(tag)
-            src   = tag.get("src") or tag.get("poster") or tag.get("data-src")
+            src = tag.get("src") or tag.get("poster") or tag.get("data-src")
+            if not src:
+                source = tag.find("source", src=True)
+                src = source.get("src") if source else None
             if not src:
                 return label
             full = resolve(src)
+            if not full:
+                return label
             return f"[{label}]({full})" if label else f"<{full}>"
 
         def render_inline(node) -> str:
-            parts = []
+            parts: list[str] = []
             for child in node.children:
                 if isinstance(child, NavigableString):
                     parts.append(html.unescape(str(child)))
@@ -1756,17 +1870,104 @@ def web_scrape(url: str, selector: str = None) -> str:
                     parts.append(image_markdown(child))
                 elif name in {"video", "audio", "source", "iframe", "embed"}:
                     parts.append(media_markdown(child))
+                elif name in {"strong", "b"}:
+                    inner = render_inline(child)
+                    parts.append(f"**{inner}**" if inner else "")
+                elif name in {"em", "i"}:
+                    inner = render_inline(child)
+                    parts.append(f"*{inner}*" if inner else "")
+                elif name == "code":
+                    inner = normalize_text(child.get_text(" ", strip=True))
+                    parts.append(f"`{inner}`" if inner else "")
                 elif name == "br":
                     parts.append("\n")
                 else:
                     parts.append(render_inline(child))
-            return " ".join("".join(parts).split()).strip()
+            return normalize_text("".join(parts))
+
+        def table_markdown(table: Tag) -> list[str]:
+            rows: list[list[str]] = []
+            header_seen = False
+            for tr in table.find_all("tr"):
+                cells = tr.find_all(["th", "td"], recursive=False)
+                if not cells:
+                    continue
+                row = [escape_table_cell(render_inline(cell)) for cell in cells]
+                if any(cell.name.lower() == "th" for cell in cells):
+                    header_seen = True
+                rows.append(row)
+
+            if not rows:
+                return []
+
+            col_count = max(len(row) for row in rows)
+            rows = [row + [""] * (col_count - len(row)) for row in rows]
+            header = rows[0]
+            body = rows[1:]
+            separator = ["---"] * col_count
+
+            out = [
+                "| " + " | ".join(header) + " |",
+                "| " + " | ".join(separator) + " |",
+            ]
+            out.extend("| " + " | ".join(row) + " |" for row in body)
+            if not header_seen and len(rows) == 1:
+                out.append("")
+            return out
+
+        def code_lang(pre: Tag) -> str:
+            code = pre.find("code")
+            classes = []
+            if code:
+                raw = code.get("class") or []
+                classes = raw if isinstance(raw, list) else [raw]
+            for cls in classes:
+                cls = str(cls)
+                if cls.startswith("language-"):
+                    return cls.split("language-", 1)[1]
+            return ""
+
+        def render_list(list_tag: Tag, ordered: bool, depth: int = 0) -> None:
+            try:
+                index = int(list_tag.get("start", 1))
+            except (TypeError, ValueError):
+                index = 1
+
+            for li in list_tag.find_all("li", recursive=False):
+                marker = f"{li.get('value') or index}." if ordered else "-"
+                parts: list[str] = []
+                nested_lists: list[Tag] = []
+
+                for part in li.contents:
+                    if isinstance(part, NavigableString):
+                        parts.append(str(part))
+                    elif isinstance(part, Tag):
+                        name = part.name.lower()
+                        if name in {"ul", "ol"}:
+                            nested_lists.append(part)
+                        elif name == "br":
+                            parts.append(" ")
+                        else:
+                            parts.append(render_inline(part))
+
+                item = normalize_text(" ".join(parts))
+                if item:
+                    add_line(f"{'  ' * depth}{marker} {item}")
+
+                for nested in nested_lists:
+                    render_list(nested, nested.name.lower() == "ol", depth + 1)
+
+                if ordered:
+                    index += 1
+
+        block_tags = {
+            "article", "section", "main", "div", "header", "figure", "figcaption",
+            "h1", "h2", "h3", "h4", "h5", "h6", "p", "blockquote", "pre",
+            "ul", "ol", "li", "table", "dl", "dt", "dd",
+        }
 
         def walk(node):
             for child in node.children:
-
-                # Ignore raw text nodes here.
-                # Semantic tags handle their own text extraction.
                 if isinstance(child, NavigableString):
                     continue
 
@@ -1775,36 +1976,51 @@ def web_scrape(url: str, selector: str = None) -> str:
 
                 name = child.name.lower()
 
-                # Headings
                 if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
                     heading = render_inline(child)
                     if heading:
                         add_line("#" * int(name[1]) + " " + heading)
-                        lines.append("")
+                        add_blank()
 
-                # List items
-                elif name == "li":
-                    item = render_inline(child)
-                    if item:
-                        add_line(f"- {item}")
+                elif name in {"ul", "ol"}:
+                    render_list(child, ordered=name == "ol")
+                    add_blank()
 
-                # Paragraph-like semantic content
                 elif name in {"p", "blockquote"}:
                     inner = render_inline(child)
                     if inner:
-                        add_line(inner)
-                        lines.append("")
+                        if name == "blockquote":
+                            for quote_line in inner.splitlines() or [inner]:
+                                add_line(f"> {quote_line}")
+                        else:
+                            add_line(inner)
+                        add_blank()
 
-                # Code blocks
                 elif name == "pre":
-                    code_text = child.get_text("\n", strip=True)
+                    code_text = child.get_text("\n", strip=False).strip("\n")
                     if code_text:
+                        add_line(f"```{code_lang(child)}")
+                        for code_line in code_text.splitlines():
+                            lines.append(code_line.rstrip())
                         add_line("```")
-                        add_line(code_text)
-                        add_line("```")
-                        lines.append("")
+                        add_blank()
 
-                # Structural/container elements
+                elif name == "table":
+                    table_lines = table_markdown(child)
+                    if table_lines:
+                        for table_line in table_lines:
+                            add_line(table_line)
+                        add_blank()
+
+                elif name == "dl":
+                    for item in child.find_all(["dt", "dd"], recursive=False):
+                        text = render_inline(item)
+                        if text:
+                            prefix = "**" if item.name.lower() == "dt" else "- "
+                            suffix = "**" if item.name.lower() == "dt" else ""
+                            add_line(f"{prefix}{text}{suffix}")
+                    add_blank()
+
                 elif name in {
                     "html",
                     "body",
@@ -1812,16 +2028,12 @@ def web_scrape(url: str, selector: str = None) -> str:
                     "section",
                     "main",
                     "div",
-                    "ul",
-                    "ol",
                     "header",
-                    "footer",
-                    "aside",
-                    "nav",
+                    "figure",
+                    "figcaption",
                 }:
                     walk(child)
 
-                # Images/media outside inline contexts
                 elif name == "img":
                     img = image_markdown(child)
                     if img:
@@ -1832,14 +2044,44 @@ def web_scrape(url: str, selector: str = None) -> str:
                     if media:
                         add_line(media)
 
-                # Fallback recursion
                 else:
-                    walk(child)
+                    if child.find(list(block_tags)):
+                        walk(child)
+                    else:
+                        text = render_inline(child)
+                        if text:
+                            add_line(text)
+                            add_blank()
 
-        walk(root)
+        def meta_content(*keys: str) -> str:
+            for key in keys:
+                tag = soup.find("meta", attrs={"name": key}) or soup.find("meta", attrs={"property": key})
+                if tag and tag.get("content"):
+                    return normalize_text(tag["content"])
+            return ""
+
+        title = normalize_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
+        description = meta_content("description", "og:description", "twitter:description")
+        canonical_tag = soup.find("link", rel=lambda value: value and "canonical" in value)
+        canonical = resolve(canonical_tag["href"]) if canonical_tag and canonical_tag.get("href") else ""
+
+        if title:
+            add_line(f"# {title}")
+        add_line(f"Source: <{final_url}>")
+        if canonical and canonical != final_url:
+            add_line(f"Canonical: <{canonical}>")
+        if selector:
+            add_line(f"Selector: `{selector}` ({len(roots)} match{'es' if len(roots) != 1 else ''})")
+        if description:
+            add_line(f"> {description}")
+        add_blank()
+
+        for root in roots:
+            walk(root)
+            add_blank()
 
         # Collapse consecutive blank lines
-        cleaned    = []
+        cleaned = []
         prev_blank = False
         for line in lines:
             line = line.rstrip()
@@ -1851,13 +2093,27 @@ def web_scrape(url: str, selector: str = None) -> str:
                 cleaned.append(line)
                 prev_blank = False
 
-        text = "\n".join(cleaned).strip()
-        if len(text) > 12000:
-            text = text[:12000] + "\n\n... (content truncated)"
+        text = truncate_output("\n".join(cleaned))
+        if not text:
+            text = f"[EMPTY] No readable content found at {final_url}."
 
         log_write("[DONE]")
         return text
 
+    except requests.Timeout:
+        msg = "[ERROR] Scraping failed: request timed out."
+        print(f"{RED}[SCRAPE FAILED] request timed out{RESET}")
+        log_write(msg)
+        return msg
+    except requests.TooManyRedirects:
+        msg = "[ERROR] Scraping failed: too many redirects."
+        print(f"{RED}[SCRAPE FAILED] too many redirects{RESET}")
+        log_write(msg)
+        return msg
+    except requests.RequestException as e:
+        print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
+        log_write(f"[ERROR] {e}")
+        return f"[ERROR] Scraping failed: {e}"
     except Exception as e:
         print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
         log_write(f"[ERROR] {e}")

@@ -190,7 +190,7 @@ def chat_loop():
                  json.dump(config, f, indent=4)
             continue
 
-        if user_input.lower().startswith("agent"):
+        if user_input.lower().strip().startswith("agent") or user_input.lower().strip().startswith("/agent"):
             import llm_client
             is_auto = "auto" in user_input.lower()
             while True:

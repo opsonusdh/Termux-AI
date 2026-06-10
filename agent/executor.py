@@ -29,6 +29,7 @@ def execute_plan(plan: dict) -> dict:
     print(f"{GRAY}[EXECUTOR] Recording plan: {plan}{RESET}")
     result  = {"result": f"Executed: {plan}"}
     valid   = validator.validate_execution(result)
-    success = valid.get("validation") == "Success"
+    result.update(valid)
+    success = result.get("validation") == "Success"
     ReflectionLoop.record(plan, result, success)
     return result
