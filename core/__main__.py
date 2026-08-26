@@ -1,3 +1,4 @@
+import os
 import sys
 import subprocess
 from pathlib import Path
@@ -13,6 +14,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(1, str(_ROOT))
 
 def ensure_termux_property() -> None:
+    if sys.platform == "win32" or os.name == "nt":
+        return
     termux_dir = Path.home() / ".termux"
     props_file = termux_dir / "termux.properties"
     target_line = "terminal-onclick-url-open=true"
@@ -38,23 +41,31 @@ _WP_DIR = _ROOT / "Termux-WP"
 wp_process = None
 
 if _WP_DIR.exists():
-    wp_process = subprocess.Popen(
-        ["node", "bot"],
-        cwd=str(_WP_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-    )
+    node_cmd = ["node.exe", "bot"] if sys.platform == "win32" else ["node", "bot"]
+    try:
+        wp_process = subprocess.Popen(
+            node_cmd,
+            cwd=str(_WP_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
 
-    for line in wp_process.stdout:
-        print(line, end="")
+        for line in wp_process.stdout:
+            print(line, end="")
 
-        if "System Connected! Your phone is now sending and receiving." in line:
-            break
+            if "System Connected! Your phone is now sending and receiving." in line:
+                break
+    except Exception as e:
+        print(f"[WARN] Could not start WhatsApp bot process: {e}")
+        wp_process = None
 
 from interface import chat_loop
 chat_loop()
 
 if wp_process:
-    wp_process.terminate()
+    try:
+        wp_process.terminate()
+    except Exception:
+        pass

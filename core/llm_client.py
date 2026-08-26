@@ -3,7 +3,7 @@ import sys
 import time
 import json
 
-#  Path bootstrap 
+# Path bootstrap
 _CORE   = os.path.dirname(os.path.abspath(__file__))
 _ROOT   = os.path.dirname(_CORE)
 if _CORE not in sys.path:
@@ -18,12 +18,15 @@ from renderer import RED, YELLOW, RESET
 from tools import *
 import context_manager as _cm
 
-with open(paths.PROMPT_FILE) as file:
+with open(paths.PROMPT_FILE, encoding="utf-8") as file:
     SYSTEM_PROMPT = file.read()
 
 PROVIDERS: dict[str, dict] = {
     "google": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
     },
     "nvidia": {
         "base_url": "https://integrate.api.nvidia.com/v1",
@@ -35,34 +38,66 @@ PROVIDERS: dict[str, dict] = {
 
 
 MODEL_SLOTS: list[dict] = [
-    {"provider_id": "google",  "name": "gemini-3.5-flash",                     "max_tokens": None},
-    {"provider_id":"google",  "name": "gemini-3-flash-preview",                "max_tokens": None},
-    {"provider_id": "groq",  "name": "openai/gpt-oss-120b",                  "max_tokens": 4096},
-    {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-v4-flash",        "max_tokens": 4096},
-    {"provider_id": "nvidia",  "name": "deepseek-ai/deepseek-r1",              "max_tokens": 4096},
-    {"provider_id": "google",  "name": "gemma-4-31b-it",                       "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-2.5-flash",                     "max_tokens": None},
-    {"provider_id": "google",  "name": "gemini-3.1-flash-lite",                "max_tokens": None},
-    {"provider_id": "groq",    "name": "qwen/qwen3-32b",                       "max_tokens": None},
-    {"provider_id": "groq",    "name": "deepseek-r1-distill-llama-70b",        "max_tokens": None},
-    {"provider_id": "nvidia",  "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "max_tokens": 4096},
-    {"provider_id": "google",  "name": "gemini-2.5-flash-lite",                "max_tokens": None},
+    {"provider_id": "google",     "name": "gemini-3.5-flash",                     "max_tokens": None},
+    {"provider_id": "google",     "name": "gemini-3-flash-preview",                "max_tokens": None},
+    {"provider_id": "openrouter", "name": "openrouter/auto",                      "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "deepseek/deepseek-r1",              "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "anthropic/claude-3.5-sonnet",       "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "google/gemini-2.0-flash-001",       "max_tokens": None},
+    {"provider_id": "openrouter", "name": "meta-llama/llama-3.3-70b-instruct", "max_tokens": 4096},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                  "max_tokens": 4096},
+    {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-v4-flash",        "max_tokens": 4096},
+    {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-r1",              "max_tokens": 4096},
+    {"provider_id": "google",     "name": "gemma-4-31b-it",                       "max_tokens": None},
+    {"provider_id": "google",     "name": "gemini-2.5-flash",                     "max_tokens": None},
+    {"provider_id": "google",     "name": "gemini-3.1-flash-lite",                "max_tokens": None},
+    {"provider_id": "groq",       "name": "qwen/qwen3-32b",                       "max_tokens": None},
+    {"provider_id": "groq",       "name": "deepseek-r1-distill-llama-70b",        "max_tokens": None},
+    {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "max_tokens": 4096},
+    {"provider_id": "google",     "name": "gemini-2.5-flash-lite",                "max_tokens": None},
 ]
 
 
 def _load_api_keys() -> dict[str, list[str]]:
     path = paths.API_KEYS_FILE
-    raw  = open(path, "r", encoding="utf-8").read().strip()
-    try:
-        data = json.loads(raw)
-        return {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
-    except json.JSONDecodeError:
-        keys = [line.strip() for line in raw.splitlines() if line.strip()]
-        print(f"{YELLOW}[WARN] api.keys is legacy plain-text. {RESET}")
-        return {"google": keys}
+    res: dict[str, list[str]] = {}
+
+    if os.path.exists(path):
+        try:
+            raw = open(path, "r", encoding="utf-8").read().strip()
+            data = json.loads(raw)
+            res = {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
+        except Exception:
+            try:
+                raw = open(path, "r", encoding="utf-8").read().strip()
+                keys = [line.strip() for line in raw.splitlines() if line.strip()]
+                print(f"{YELLOW}[WARN] api.keys is legacy plain-text. {RESET}")
+                res = {"google": keys}
+            except Exception:
+                res = {}
+
+    # Fallback to Environment Variables
+    env_map = {
+        "openrouter": ["OPENROUTER_API_KEY"],
+        "google":     ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "groq":       ["GROQ_API_KEY"],
+        "nvidia":     ["NVIDIA_API_KEY"],
+    }
+    for provider, env_vars in env_map.items():
+        existing = res.get(provider, [])
+        for ev in env_vars:
+            val = os.environ.get(ev)
+            if val and val not in existing:
+                existing.append(val)
+        res[provider] = existing
+
+    return res
 
 
 API_KEYS: dict[str, list[str]] = _load_api_keys()
+
+# Tracks whether we are currently executing an autonomous agent task
+_in_agent_mode = False
 
 
 def _warn_missing_keys() -> None:
@@ -74,7 +109,7 @@ def _warn_missing_keys() -> None:
             keys = API_KEYS.get(pid, [])
             if not keys:
                 print(
-                    f"{YELLOW}[WARN] Provider '{pid}' has no API keys in api.keys. "
+                    f"{YELLOW}[WARN] Provider '{pid}' has no API keys in api.keys or environment. "
                     f"All its slots will be skipped.{RESET}"
                 )
 
@@ -174,9 +209,6 @@ def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict
             result.append(m)
             continue
 
-        # All providers require content to be a string, never a raw dict/list.
-        # This guards against diagnosis dicts or other structured data being
-        # injected directly as message content (e.g. from _diag_future.result()).
         content = m.get("content")
         if isinstance(content, (dict, list)):
             m = {**m, "content": json.dumps(content, ensure_ascii=False)}
@@ -208,9 +240,16 @@ def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict
 
 
 def _make_client(provider_id: str, api_key: str | None) -> OpenAI:
+    headers = {}
+    if provider_id == "openrouter":
+        headers = {
+            "HTTP-Referer": "https://github.com/opsonusdh/Termux-AI",
+            "X-Title": "Termux-AI",
+        }
     return OpenAI(
-        api_key  = api_key or "no-key",
-        base_url = PROVIDERS[provider_id]["base_url"],
+        api_key         = api_key or "no-key",
+        base_url        = PROVIDERS[provider_id]["base_url"],
+        default_headers = headers if headers else None,
     )
 
 
@@ -237,41 +276,41 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     g = args.get
     routes = {
         "run_code":        lambda: run_code(
-                               bash    = g("bash", ""),
-                               timeout = int(g("timeout", 0)),
+                                bash    = g("bash", ""),
+                                timeout = int(g("timeout", 0)),
                            ),
         "save_memory":     lambda: save_memory(
-                               text     = g("text", ""),
-                               type_    = g("type_", "fact"),
-                               tags     = g("tags", ""),
-                               priority = int(g("priority", 7)),
+                                text     = g("text", ""),
+                                type_    = g("type_", "fact"),
+                                tags     = g("tags", ""),
+                                priority = int(g("priority", 7)),
                            ),
         "retrieve_memory": lambda: retrieve_memory(
-                               query = g("query", ""),
-                               top_k = int(g("top_k", 5)),
+                                query = g("query", ""),
+                                top_k = int(g("top_k", 5)),
                            ),
         "read_file":       lambda: read_file(
-                               path          = g("path", ""),
-                               segment_start = g("segment_start"),
-                               segment_end   = g("segment_end"),
-                               unit          = g("unit", "lines"),
+                                path          = g("path", ""),
+                                segment_start = g("segment_start"),
+                                segment_end   = g("segment_end"),
+                                unit          = g("unit", "lines"),
                            ),
         "write_file":      lambda: write_file(
-                               path          = g("path", ""),
-                               content       = g("content", ""),
-                               mode          = g("mode", "overwrite"),
-                               segment_start = g("segment_start"),
-                               segment_end   = g("segment_end"),
-                               unit          = g("unit", "lines"),
+                                path          = g("path", ""),
+                                content       = g("content", ""),
+                                mode          = g("mode", "overwrite"),
+                                segment_start = g("segment_start"),
+                                segment_end   = g("segment_end"),
+                                unit          = g("unit", "lines"),
                            ),
         "index_files":     lambda: index_files(
-                               path             = g("path", ""),
-                               extension_filter = g("extension_filter", ""),
+                                path             = g("path", ""),
+                                extension_filter = g("extension_filter", ""),
                            ),
         "web_scrape":      lambda: web_scrape(
-                               url      = g("url", ""),
-                               selector = g("selector", None),
-                               max_chars = int(g("max_chars", 12000)),
+                                url      = g("url", ""),
+                                selector = g("selector", None),
+                                max_chars = int(g("max_chars", 12000)),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
         "intermediate_print": lambda: intermediate_print(
@@ -282,11 +321,11 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 to_phone     = g("to_phone", ""),
                                 message_text = g("message_text", ""),
                             ),
-          "get_whatsapp_status": lambda: get_whatsapp_status(),
-          "get_whatsapp_chats": lambda: get_whatsapp_chats(
-                                  filter_type  = g("filter_type", "all")
-                              ),
-          "get_pending_whatsapp_messages": lambda: get_pending_whatsapp_messages(
+        "get_whatsapp_status": lambda: get_whatsapp_status(),
+        "get_whatsapp_chats": lambda: get_whatsapp_chats(
+                                filter_type  = g("filter_type", "all")
+                            ),
+        "get_pending_whatsapp_messages": lambda: get_pending_whatsapp_messages(
                                 clear        = bool(g("clear", True)),
                             ),
         "fetch_whatsapp_chat_history": lambda: fetch_whatsapp_chat_history(
@@ -397,9 +436,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
     memory_block   = build_memory_block(prompt)
     system_content = (memory_block + "\n\n" + SYSTEM_PROMPT) if memory_block else SYSTEM_PROMPT
 
-    # NOTE: No state injection here. Agent context is only active during
-    # run_agent_step() calls triggered by /agent. Normal chat is unaffected.
-
     base_messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
         base_messages.extend(history)
@@ -429,10 +465,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
         max_tok    = slot_cfg["max_tokens"]
 
         if not API_KEYS.get(pid):
-            print(
-                f"{RED}[SKIP] '{model_name}' — provider '{pid}' has no API keys "
-                f"in api.keys.{RESET}"
-            )
             slot += 1
             continue
 
@@ -442,7 +474,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
             print(f"{RED}[{pid}] All keys exhausted — skipping '{model_name}'.{RESET}")
             slot += 1
             continue
-
         
         if slot != last_slot:
             source    = messages if messages else list(base_messages)
@@ -548,9 +579,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     })
                     continue
 
-                # Capture tool context into the open chunk BEFORE returning.
-                # messages[base_len:] contains every intermediate assistant
-                # tool-call turn and tool-result turn accumulated this call.
                 _cm.set_tool_context(messages[base_len:])
                 return _stitch_assistant_turns(messages[base_len:], partial) or "[EMPTY RESPONSE]"
 
@@ -595,114 +623,110 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     slot += 1
                     continue
 
-            elif "API_KEY_INVALID" in s:
-                print(f"{RED}[{pid}] Invalid API key — skipping '{model_name}'.{RESET}")
+            elif any(x in s or x in s.lower() for x in ("api_key_invalid", "403", "permission_denied", "denied access")):
+                if api_key:
+                    _mark_bad(pid, api_key)
+                print(f"{RED}[{pid}] API key invalid, permission denied, or 403 — skipping '{model_name}'.{RESET}")
                 slot += 1
-
             else:
                 _dbg(f"  Unhandled exception: {s[:300]}")
                 raise
 
+
 def run_agent_step(voice: bool = False) -> str:
-    """Execute a single step of the agent: Supervisor -> Worker -> Critic loop.
+    """Execute a single step of the agent: Supervisor -> Worker -> Critic loop."""
+    global _in_agent_mode
+    _in_agent_mode = True
+    try:
+        state = state_manager.load_state()
+        if not state or state.get("status") != "active":
+            return "No active project found."
 
-    Recovery priority:
-      1. active_task_id (interrupted mid-execution)
-      2. cursor (last known position)
-      3. first pending task (fallback for fresh start or corrupt cursor)
+        subtasks = state.get("subtasks", [])
+        goal = state.get("goal", "Unknown")
 
-    One retry maximum: the retry executes immediately in the same call.
-    worker_output and critic_output are persisted after every LLM call.
-    No subprocess. No shell execution.
-    """
-    state = state_manager.load_state()
-    if not state or state.get("status") != "active":
-        return "No active project found."
+        # --- Supervisor: resolve which task to run (priority chain) ---
+        task = None
 
-    subtasks = state.get("subtasks", [])
-    goal = state.get("goal", "Unknown")
+        # 1. active_task_id takes priority — we were interrupted mid-execution
+        active_id = state.get("active_task_id")
+        if active_id is not None:
+            task = next((t for t in subtasks if t["id"] == active_id and t["status"] in ("pending", "active")), None)
 
-    # --- Supervisor: resolve which task to run (priority chain) ---
-    task = None
+        # 2. cursor position
+        if task is None:
+            cursor = state.get("cursor")
+            if cursor is not None:
+                task = next((t for t in subtasks if t["id"] == cursor and t["status"] in ("pending", "active")), None)
 
-    # 1. active_task_id takes priority — we were interrupted mid-execution
-    active_id = state.get("active_task_id")
-    if active_id is not None:
-        task = next((t for t in subtasks if t["id"] == active_id and t["status"] in ("pending", "active")), None)
+        # 3. first pending task (recovery fallback)
+        if task is None:
+            task = next((t for t in subtasks if t["status"] in ("pending", "active")), None)
 
-    # 2. cursor position
-    if task is None:
-        cursor = state.get("cursor")
-        if cursor is not None:
-            task = next((t for t in subtasks if t["id"] == cursor and t["status"] in ("pending", "active")), None)
+        if task is None:
+            return "No pending or active subtasks found."
 
-    # 3. first pending task (recovery fallback)
-    if task is None:
-        task = next((t for t in subtasks if t["status"] in ("pending", "active")), None)
+        task_id = task["id"]
+        desc    = task["description"]
+        retry_count = task.get("retry_count", 0)
 
-    if task is None:
-        return "No pending or active subtasks found."
+        def _worker_call() -> str:
+            prompt = (
+                f"AGENT WORKER MODE\nProject Goal: {goal}\n"
+                f"Execute Subtask {task_id}: {desc}\n\n"
+                "Complete the task using available tools. Be precise and thorough."
+            )
+            return ask_ai(prompt, voice=voice)
 
-    task_id = task["id"]
-    desc    = task["description"]
-    retry_count = task.get("retry_count", 0)
+        def _critic_call(worker_reply: str) -> str:
+            prompt = (
+                f"AGENT CRITIC MODE\nTask: {desc}\nWorker Output:\n{worker_reply}\n\n"
+                "Verify if the task was completed correctly. "
+                "Reply with exactly 'VERIFIED' or 'FAILED: <reason>'."
+            )
+            return ask_ai(prompt, voice=voice)
 
-    def _worker_call() -> str:
-        prompt = (
-            f"AGENT WORKER MODE\nProject Goal: {goal}\n"
-            f"Execute Subtask {task_id}: {desc}\n\n"
-            "Complete the task using available tools. Be precise and thorough."
-        )
-        return ask_ai(prompt, voice=voice)
+        # --- Worker Phase (attempt 1) ---
+        state_manager.update_subtask(task_id, status="active",
+                                     notes=f"Execution attempt {retry_count + 1} started.")
+        worker_reply = _worker_call()
+        state_manager.update_subtask(task_id, worker_output=worker_reply)
 
-    def _critic_call(worker_reply: str) -> str:
-        prompt = (
-            f"AGENT CRITIC MODE\nTask: {desc}\nWorker Output:\n{worker_reply}\n\n"
-            "Verify if the task was completed correctly. "
-            "Reply with exactly 'VERIFIED' or 'FAILED: <reason>'."
-        )
-        return ask_ai(prompt, voice=voice)
+        # --- Critic Phase (attempt 1) ---
+        critic_reply = _critic_call(worker_reply)
+        state_manager.update_subtask(task_id, critic_output=critic_reply,
+                                     verification=critic_reply)
 
-    # --- Worker Phase (attempt 1) ---
-    state_manager.update_subtask(task_id, status="active",
-                                 notes=f"Execution attempt {retry_count + 1} started.")
-    worker_reply = _worker_call()
-    state_manager.update_subtask(task_id, worker_output=worker_reply)
+        if "VERIFIED" in critic_reply.upper():
+            state_manager.update_subtask(task_id, status="completed",
+                                         notes="Verified by LLM critic.")
+            return f"Subtask {task_id} completed and verified."
 
-    # --- Critic Phase (attempt 1) ---
-    critic_reply = _critic_call(worker_reply)
-    state_manager.update_subtask(task_id, critic_output=critic_reply,
-                                 verification=critic_reply)
+        # Critic says FAILED. One retry allowed.
+        if retry_count >= 1:
+            state_manager.update_subtask(task_id, status="failed",
+                                         notes=f"Final failure after retry. {critic_reply}")
+            return f"Subtask {task_id} failed after retry."
 
-    if "VERIFIED" in critic_reply.upper():
-        state_manager.update_subtask(task_id, status="completed",
-                                     notes="Verified by LLM critic.")
-        return f"Subtask {task_id} completed and verified."
+        # --- Single retry ---
+        print(f"{YELLOW}[Agent] Critic rejected task {task_id}. Running retry...{RESET}")
+        state_manager.update_subtask(task_id, retry_count=1, status="active",
+                                     notes=f"Retry 1 triggered. Previous: {critic_reply}")
 
-    # Critic says FAILED. One retry allowed.
-    if retry_count >= 1:
-        # Already used the one retry — mark final failure.
-        state_manager.update_subtask(task_id, status="failed",
-                                     notes=f"Final failure after retry. {critic_reply}")
-        return f"Subtask {task_id} failed after retry."
+        retry_worker_reply = _worker_call()
+        state_manager.update_subtask(task_id, worker_output=retry_worker_reply)
 
-    # --- Single retry: actually re-execute, don't just mark pending ---
-    print(f"{YELLOW}[Agent] Critic rejected task {task_id}. Running retry...{RESET}")
-    state_manager.update_subtask(task_id, retry_count=1, status="active",
-                                 notes=f"Retry 1 triggered. Previous: {critic_reply}")
+        retry_critic_reply = _critic_call(retry_worker_reply)
+        state_manager.update_subtask(task_id, critic_output=retry_critic_reply,
+                                     verification=retry_critic_reply)
 
-    retry_worker_reply = _worker_call()
-    state_manager.update_subtask(task_id, worker_output=retry_worker_reply)
-
-    retry_critic_reply = _critic_call(retry_worker_reply)
-    state_manager.update_subtask(task_id, critic_output=retry_critic_reply,
-                                 verification=retry_critic_reply)
-
-    if "VERIFIED" in retry_critic_reply.upper():
-        state_manager.update_subtask(task_id, status="completed",
-                                     notes="Verified by LLM critic on retry.")
-        return f"Subtask {task_id} completed on retry."
-    else:
-        state_manager.update_subtask(task_id, status="failed",
-                                     notes=f"Final failure after retry. {retry_critic_reply}")
-        return f"Subtask {task_id} failed after retry."
+        if "VERIFIED" in retry_critic_reply.upper():
+            state_manager.update_subtask(task_id, status="completed",
+                                         notes="Verified by LLM critic on retry.")
+            return f"Subtask {task_id} completed on retry."
+        else:
+            state_manager.update_subtask(task_id, status="failed",
+                                         notes=f"Final failure after retry. {retry_critic_reply}")
+            return f"Subtask {task_id} failed after retry."
+    finally:
+        _in_agent_mode = False

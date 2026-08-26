@@ -10,6 +10,7 @@ import heapq
 import requests
 import threading
 import subprocess
+import base64
 from pathlib import Path
 from openai import OpenAI
 from urllib.parse import urljoin, urlparse
@@ -50,7 +51,7 @@ DIAGNOSIS_TIMEOUT = 10
 
 _speak_thread: threading.Thread | None = None
 
-#  TOOL DESCRIPTIONS
+# ── TOOL DESCRIPTIONS ──────────────────────────────────────────────────────────
 
 TOOLS_DESCRIPTION = [
     {
@@ -58,7 +59,7 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "run_code",
             "description": (
-                "Execute shell commands inside the Termux environment. "
+                "Execute shell commands inside the system environment (Termux, Linux, or Windows). "
                 "Supports an optional execution timeout in seconds."
             ),
             "parameters": {
@@ -322,9 +323,7 @@ TOOLS_DESCRIPTION = [
                 f"Continuously listens for the wake word '{WAKE_WORDS}'. "
                 "When the wake word is detected, a lightweight AI relevance "
                 "check determines whether the speaker is actually addressing "
-                "the assistant. If relevant, sleep mode exits and returns "
-                "the detected speech as the next user prompt. "
-                "NOTE: after enabling sleep mode you cant talk to the user, so you can use intermediate_print before sleep."
+                "the assistant."
             ),
             "parameters": {
                 "type": "object",
@@ -338,9 +337,7 @@ TOOLS_DESCRIPTION = [
             "name": "intermediate_print",
             "description": (
                 "Print a status message or reasoning update to the terminal mid-task. "
-                "Use this to communicate what you are currently doing before a result is ready. "
-                "Best for: tool call announcements, progress updates, multi-step reasoning checkpoints. "
-                "Do NOT use for final answers. Just return those as your response."
+                "Use this to communicate what you are currently doing before a result is ready."
             ),
             "parameters": {
                 "type": "object",
@@ -364,7 +361,7 @@ TOOLS_DESCRIPTION = [
                 "properties": {
                     "to_phone": {
                         "type": "string",
-                        "description": "The destination phone number (with country code, e.g., '919876543210') or contact ID.",
+                        "description": "The destination phone number or contact ID.",
                     },
                     "message_text": {
                         "type": "string",
@@ -390,7 +387,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "get_whatsapp_chats",
-            "description": "List all WhatsApp chats and groups with their names, JIDs, unread counts, and metadata. Use this to discover JIDs before setting filters, ignoring contacts/groups, or sending messages to someone whose number you don't know.",
+            "description": "List all WhatsApp chats and groups with their names, JIDs, unread counts, and metadata.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -408,7 +405,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "silence_whatsapp_contact",
-            "description": "Silence auto-replies to a specific contact or group for a given number of hours. Use when someone asks Orion to stop replying, or when you want to manually pause replies. Pass hours=0 to lift an existing silence immediately.",
+            "description": "Silence auto-replies to a specific contact or group for a given number of hours.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -423,12 +420,12 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "react_to_whatsapp_message",
-            "description": "React to a specific WhatsApp message with an emoji (e.g. 👍 ❤️ 😂). Use the messageId from a received message.",
+            "description": "React to a specific WhatsApp message with an emoji (e.g. 👍 ❤️ 😂).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "message_id": {"type": "string", "description": "The serialized message ID to react to."},
-                    "emoji":      {"type": "string", "description": "The emoji to react with, e.g. '👍' or '❤️'."},
+                    "emoji":      {"type": "string", "description": "The emoji to react with."},
                 },
                 "required": ["message_id", "emoji"],
             },
@@ -438,11 +435,11 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "get_whatsapp_contact_info",
-            "description": "Fetch profile information for a WhatsApp contact: display name, phone number, about/status text, and profile picture URL.",
+            "description": "Fetch profile information for a WhatsApp contact.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "jid": {"type": "string", "description": "WhatsApp JID of the contact (e.g. '919876543210@c.us')."},
+                    "jid": {"type": "string", "description": "WhatsApp JID of the contact."},
                 },
                 "required": ["jid"],
             },
@@ -452,7 +449,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "get_whatsapp_group_participants",
-            "description": "List all participants in a WhatsApp group along with their roles (admin, member). Requires a group JID ending in @g.us.",
+            "description": "List all participants in a WhatsApp group along with their roles.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -466,7 +463,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "download_whatsapp_media",
-            "description": "Download the media file from a WhatsApp message (image, video, audio, document, sticker). Returns the base64 data and mimetype. Only call this when the user explicitly asks to see/save a file — do not call automatically on every media message.",
+            "description": "Download the media file from a WhatsApp message.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -480,13 +477,13 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "schedule_whatsapp_message",
-            "description": "Schedule a WhatsApp message to be sent automatically at a specific future time. Useful for reminders, follow-ups, or timed announcements.",
+            "description": "Schedule a WhatsApp message to be sent automatically at a specific future time.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "to":      {"type": "string", "description": "Recipient JID or phone number."},
                     "message": {"type": "string", "description": "The message text to send."},
-                    "send_at": {"type": "string", "description": "ISO 8601 datetime string for when to send, e.g. '2026-06-06T09:00:00'."},
+                    "send_at": {"type": "string", "description": "ISO 8601 datetime string for when to send."},
                 },
                 "required": ["to", "message", "send_at"],
             },
@@ -527,7 +524,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "set_whatsapp_seen",
-            "description": "Mark a WhatsApp chat as read, clearing the unread message count on the phone.",
+            "description": "Mark a WhatsApp chat as read.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -564,7 +561,7 @@ TOOLS_DESCRIPTION = [
                 "properties": {
                     "to_phone": {
                         "type": "string",
-                        "description": "The phone number (e.g., '91XXXXXXXXXX') or contact ID to fetch chat history for.",
+                        "description": "The phone number or contact ID to fetch chat history for.",
                     },
                     "limit": {
                         "type": "integer",
@@ -590,12 +587,12 @@ TOOLS_DESCRIPTION = [
                     },
                     "instruction": {
                         "type": "string",
-                        "description": "The instructions for generating auto-replies, or empty to use the default instruction.",
+                        "description": "The instructions for generating auto-replies.",
                     },
                     "exclude_all_groups_except": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional list of group names or JIDs to include; all other groups will be excluded from auto-replies.",
+                        "description": "Optional list of group names or JIDs to include.",
                     },
                 },
                 "required": ["enabled"],
@@ -606,7 +603,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "get_whatsapp_report",
-            "description": "Get a full report of all WhatsApp messages received and sent during busy mode (or since last cleared). Shows who messaged, what they said, and what auto-replies were sent.",
+            "description": "Get a full report of all WhatsApp messages received and sent during busy mode.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -623,20 +620,20 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "set_whatsapp_user_profile",
-            "description": "Set personal context about the user that Orion will always include in its WhatsApp auto-reply system prompt. Use this to tell Orion the user's name, occupation, location, or any context that helps replies feel more personal and accurate.",
+            "description": "Set personal context about the user that Orion will include in WhatsApp auto-replies.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "profile": {
                         "type": "string",
-                        "description": "A plain text description of the user. E.g. The user's name, where he/she lives etc, why he/she is busy stc.",
+                        "description": "A plain text description of the user.",
                     },
                 },
                 "required": ["profile"],
             },
         },
     },
-        {
+    {
         "type": "function",
         "function": {
             "name": "initialize_project",
@@ -687,21 +684,14 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "retrieve_chunk",
             "description": (
-                "Retrieve the full raw conversation chunk or subchunk by its stable ID. "
-                "Use when you need detailed history from an earlier turn. "
-                "Call list_chunks first to find available IDs. "
-                "Parent IDs are integers (e.g. 3). Subchunk IDs are strings (e.g. '3.1'). "
-                "If a parent was split, this returns the split index with subchunk references."
+                "Retrieve the full raw conversation chunk or subchunk by its stable ID."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "chunk_id": {
                         "type": "string",
-                        "description": (
-                            "The stable chunk ID to retrieve. "
-                            "Use '3' for parent chunk 3, or '3.1' for its first subchunk."
-                        )
+                        "description": "The stable chunk ID to retrieve (e.g. '3' or '3.1')."
                     }
                 },
                 "required": ["chunk_id"]
@@ -712,10 +702,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "list_chunks",
-            "description": (
-                "List all stored conversation chunks with their IDs and one-line summaries. "
-                "Use this to find which chunk ID to pass to retrieve_chunk."
-            ),
+            "description": "List all stored conversation chunks with their IDs and one-line summaries.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -727,7 +714,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "run_diagnosis",
-            "description": "Run a system diagnosis to check battery, weather, storage, memory, network, and datetime information. Returns a structured dictionary of current system status.",
+            "description": "Run a system diagnosis to check battery, weather, storage, memory, network, and datetime info.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -739,48 +726,28 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "delegate_subtask",
             "description": (
-                "Delegate a well-defined, self-contained subtask to a smaller, faster sub-AI model "
-                "(with a shorter context window) and receive its structured report back. "
-                "Use this when you need to: offload focused research, drafting, analysis, "
-                "summarisation, or classification work that does NOT require tools or multi-step "
-                "reasoning, freeing your own long context for higher-level orchestration. "
-                "The sub-AI has NO access to tools — its output is purely text. "
-                "Always pass ALL relevant context the sub-AI will need inside 'context', "
-                "because it cannot call retrieve_memory, read_file, or run_code itself. "
-                "The returned report is the sub-AI's final answer to you."
+                "Delegate a subtask to a sub-AI model and receive its structured report back."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": (
-                            "A clear, imperative instruction for what the sub-AI should produce. "
-                            "Example: 'Summarise the following log into 5 bullet points.' "
-                            "or 'Draft a polite reply to this message in the user's tone.'"
-                        ),
+                        "description": "A clear, imperative instruction for what the sub-AI should produce.",
                     },
                     "context": {
                         "type": "string",
-                        "description": (
-                            "All background information, raw data, snippets, or prior conversation "
-                            "the sub-AI needs to complete the task. Be thorough — the sub-AI cannot "
-                            "look anything up on its own."
-                        ),
+                        "description": "All background information, raw data, or snippets needed.",
                         "default": "",
                     },
                     "model": {
                         "type": "string",
-                        "description": (
-                            "Optional. The sub-AI model to use. Defaults to 'gemini-2.5-flash-lite'. "
-                            "Other light options: 'nvidia/llama-3.1-nemotron-nano-8b-v1', "
-                            "'gemini-2.5-flash', 'gemma-4-31b-it'."
-                        ),
+                        "description": "Optional sub-AI model name.",
                         "default": "gemini-2.5-flash-lite",
                     },
                     "max_tokens": {
                         "type": "integer",
-                        "description": "Maximum tokens the sub-AI may generate. Default 2048, max 8192.",
+                        "description": "Maximum tokens the sub-AI may generate.",
                         "default": 2048,
                         "minimum": 256,
                         "maximum": 8192,
@@ -794,44 +761,23 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": (
-                "Generate an image from a text prompt using Nano Banana "
-                "(Google Gemini's native image generation models). "
-                "The image is saved to the workspace directory and the file path is returned. "
-                "Use 'flash' quality for fast generation or 'pro' for higher fidelity, "
-                "complex text rendering, and professional assets. "
-                "Always describe the desired image in vivid detail for best results."
-            ),
+            "description": "Generate an image from a text prompt using Google Gemini native image generation.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "prompt": {
                         "type": "string",
-                        "description": (
-                            "A vivid, detailed text description of the image to generate. "
-                            "Include style, mood, lighting, colors, and composition details "
-                            "for best results. E.g. 'A photorealistic sunset over mountain peaks, "
-                            "golden hour lighting, dramatic clouds, 4K quality'."
-                        ),
+                        "description": "Vivid text description of the desired image.",
                     },
                     "quality": {
                         "type": "string",
                         "enum": ["flash", "pro"],
-                        "description": (
-                            "'flash' uses gemini-3.1-flash-image-preview — fast, great for "
-                            "iteration and bulk generation. "
-                            "'pro' uses gemini-3-pro-image-preview — highest fidelity, "
-                            "complex text rendering, professional assets. Default: 'flash'."
-                        ),
+                        "description": "Quality tier. Default 'flash'.",
                         "default": "flash",
                     },
                     "filename": {
                         "type": "string",
-                        "description": (
-                            "Optional base filename for the saved image (no extension). "
-                            "Defaults to a timestamped name like 'image_20260610_143022'. "
-                            "File will always be saved as PNG in the workspace directory."
-                        ),
+                        "description": "Base filename without extension.",
                     },
                 },
                 "required": ["prompt"],
@@ -840,63 +786,36 @@ TOOLS_DESCRIPTION = [
     },
 ]
 
-def _load_api_keys() -> dict[str, list[str]]:
-    """Load API keys from config/api.keys.
-    Supports both JSON dict format and legacy plain-text (defaults to google)."""
-    path = paths.API_KEYS_FILE
-    if not os.path.exists(path):
-        return {}
+# ── LOGGING HELPERS ────────────────────────────────────────────────────────────
+
+def log_write(msg: str) -> None:
     try:
-        raw = open(path, "r", encoding="utf-8").read().strip()
-        data = json.loads(raw)
-        return {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
-    except (json.JSONDecodeError, FileNotFoundError, AttributeError):
-        # Fallback to legacy plain-text (Google only)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return {"google": [line.strip() for line in f if line.strip()]}
-        except:
-            return {}
-
-API_KEYS = _load_api_keys()
-
-BASE_DIR    = _ROOT_DIR
-LOG_FILE    = os.path.join(paths.LOGS_DIR, "log.txt")
-WA_LOG_FILE = os.path.join(paths.LOGS_DIR, "whatsapp_log.jsonl")
-
-if not os.path.exists(LOG_FILE):
-    open(LOG_FILE, "a", encoding="utf-8").close()
-if not os.path.exists(WA_LOG_FILE):
-    open(WA_LOG_FILE, "a", encoding="utf-8").close()
+        os.makedirs(paths.LOGS_DIR, exist_ok=True)
+        with open(paths.HISTORY_FILE, "a", encoding="utf-8") as f:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
-def log_write(message: str) -> None:
-    with open(LOG_FILE, "a", encoding="utf-8") as fh:
-        fh.write(message.rstrip("\n") + "\n")
+def wa_log_write(direction: str, sender_id: str, sender_name: str, message: str) -> None:
+    try:
+        os.makedirs(paths.LOGS_DIR, exist_ok=True)
+        wa_file = os.path.join(paths.LOGS_DIR, "whatsapp_log.jsonl")
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "direction": direction,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "message": message,
+        }
+        with open(wa_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
-def wa_log_write(direction: str, sender_name: str, sender_id: str, message: str) -> None:
-    """Append one WhatsApp conversation entry to the persistent log file."""
-    if not WP_AVAILABLE:
-        return
-    entry = {
-        "timestamp": datetime.now().isoformat(),
-        "direction": direction,
-        "sender_name": sender_name,
-        "sender_id": sender_id,
-        "message": message,
-    }
-    with open(WA_LOG_FILE, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-#  MEMORY STORE
-
-#  Paths
-
-MEMORY_FILE = paths.MEMORY_FILE        # personal / conversational facts
-INDEX_FILE  = paths.INDEXED_MEMORY_FILE  # bulk file / code chunks
-
-#  Stop-word filter
+# ── MEMORY / DELEGATION SUBSYSTEM ─────────────────────────────────────────────
 
 _STOP_WORDS = {
     "a", "an", "the", "is", "it", "in", "on", "at", "to", "do", "be",
@@ -908,257 +827,291 @@ _STOP_WORDS = {
     "all", "no", "more", "about", "by", "up", "as", "into", "out", "now",
 }
 
-#  Category tree (semantic grouping)
-
 _CATEGORY_TREE = {
     "preference": ["shell", "ui", "style", "commands", "help", "flag", "output"],
     "instruction": ["shutdown", "process", "kill", "safety", "behavior", "close"],
-    "project":     ["termux", "tui", "ai_root", "workspace", "repo", "code"],
+    "project":     ["termux", "windows", "tui", "ai_root", "workspace", "repo", "code"],
     "fact":        ["environment", "device", "installed", "paths", "api", "key"],
     "workflow":    ["git", "python", "download", "script", "build", "install"],
 }
 
-#  Entry patterns
-
-# Structured format: [type][tags][priority] text
 _STRUCT_RE = re.compile(
     r"^\[(?P<type>\w+)\]\[(?P<tags>[^\]]*)\]\[(?P<priority>\d+)\]\s*(?P<text>.+)$"
 )
 
-# Legacy labeled format: "Learned: ...", "Instruction: ...", etc.
 _LEGACY_RE = re.compile(
     r"^(?:Learned|Note|Instruction|Tip|Fact|Preference):\s*(.+)$",
     re.IGNORECASE,
 )
 
-# Tag written by index_memory(); lets retrieve() separate the two stores
 _INDEXED_TAG = "indexed"
 
 
-#  MemoryEntry
-
-class MemoryEntry:
-    __slots__ = ("id", "type", "tags", "priority", "text", "keywords")
-
-    def __init__(self, id_, type_, tags_str, priority, text):
-        self.id       = id_
-        self.type     = type_.lower().strip()
-        self.tags     = {t.strip().lower() for t in tags_str.split(",") if t.strip()}
-        self.priority = max(1, min(10, int(priority)))
-        self.text     = text.strip()
-        self.keywords = _tokenize(self.text) | self.tags
-
-    @property
-    def is_indexed(self) -> bool:
-        """True for bulk file/code chunks written by index_memory()."""
-        return _INDEXED_TAG in self.tags
-
-    def __repr__(self):
-        tag_str = ",".join(sorted(self.tags))
-        return f"<Mem [{self.type}][{tag_str}][{self.priority}] {self.text[:60]}>"
+def build_memory_block(prompt: str) -> str:
+    memories = retrieve_memory(query=prompt, top_k=5)
+    if not memories or "No relevant memory" in memories:
+        return ""
+    return f"## Long-Term Memory & Project Context\n{memories}"
 
 
-#  Internal helpers
-
-def _tokenize(text: str) -> set:
-    words = re.findall(r"[a-z0-9_\-]+", text.lower())
-    return {w for w in words if w not in _STOP_WORDS and len(w) > 2}
-
-
-def _infer_type_tags(text: str) -> tuple:
-    """Guess type and tags for plain un-tagged legacy text."""
-    low = text.lower()
-    if any(k in low for k in ("kill", "close", "shutdown", "goodbye", "exit", "process")):
-        return "instruction", "shutdown,process"
-    if any(k in low for k in ("prefer", "-h", "--help", "instead", "flag", "better")):
-        return "preference", "shell,commands,help"
-    if any(k in low for k in ("repo", "directory", "workspace", "folder", "project", "lives in")):
-        return "project", "ai_root,workspace"
-    if any(k in low for k in ("install", "package", "path", "bin", "env", "api")):
-        return "fact", "environment"
-    return "fact", "general"
+def save_memory(text: str, type_: str = "fact", tags: str = "", priority: int = 7) -> str:
+    entry = f"[{type_}][{tags}][{priority}] {text.strip()}\n"
+    mem_file = paths.MEMORY_FILE
+    os.makedirs(os.path.dirname(mem_file), exist_ok=True)
+    with open(mem_file, "a", encoding="utf-8") as f:
+        f.write(entry)
+    return f"Saved memory: {entry.strip()}"
 
 
-#  Load
+def retrieve_memory(query: str, top_k: int = 5) -> str:
+    mem_file = paths.MEMORY_FILE
+    if not os.path.exists(mem_file):
+        return "No relevant memory found."
 
-def load_memories(file_path: str = MEMORY_FILE, start_id: int = 0) -> list:
-    """
-    Parse a memory file -> list[MemoryEntry].
-    Supports structured, legacy-labeled, and bare-text lines.
-    Lines starting with '#' are comments and are skipped.
-    start_id offsets IDs so primary and indexed entries never collide.
-    """
-    if not os.path.exists(file_path):
-        return []
+    with open(mem_file, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
 
-    entries = []
-    with open(file_path, "r", encoding="utf-8") as fh:
-        for idx, raw in enumerate(fh):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
+    if not lines:
+        return "No relevant memory found."
 
-            m = _STRUCT_RE.match(line)
-            if m:
-                entries.append(MemoryEntry(
-                    id_=start_id + idx,
-                    type_=m.group("type"),
-                    tags_str=m.group("tags"),
-                    priority=m.group("priority"),
-                    text=m.group("text"),
-                ))
-                continue
+    q_words = set(re.findall(r"\w+", query.lower())) - _STOP_WORDS
+    results = []
 
-            m2 = _LEGACY_RE.match(line)
-            if m2:
-                text = m2.group(1)
-                type_, tags = _infer_type_tags(text)
-                entries.append(MemoryEntry(
-                    id_=start_id + idx,
-                    type_=type_,
-                    tags_str=tags,
-                    priority=7,
-                    text=text,
-                ))
-                continue
+    for line in lines:
+        m = _STRUCT_RE.match(line)
+        if m:
+            text = m.group("text")
+            priority = int(m.group("priority"))
+        else:
+            text = line
+            priority = 5
 
-            if len(line) > 8:
-                type_, tags = _infer_type_tags(line)
-                entries.append(MemoryEntry(
-                    id_=start_id + idx,
-                    type_=type_,
-                    tags_str=tags,
-                    priority=5,
-                    text=line,
-                ))
+        t_words = set(re.findall(r"\w+", text.lower())) - _STOP_WORDS
+        overlap = len(q_words & t_words)
+        if overlap > 0:
+            score = overlap * 10 + priority
+            results.append((score, text))
 
-    return entries
+    if not results:
+        # Return top priority items if no query match
+        top_lines = lines[:top_k]
+        return "\n".join(f"- {l}" for l in top_lines)
+
+    results.sort(key=lambda x: x[0], reverse=True)
+    top_res = results[:top_k]
+    return "\n".join(f"- {text}" for score, text in top_res)
 
 
-#  Scoring
+def read_file(path: str, segment_start: int | None = None, segment_end: int | None = None, unit: str = "lines") -> str:
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
 
-def _score_entry(entry: MemoryEntry, prompt_kw: set, relevant_cats: set) -> float:
-    keyword_overlap   = len(entry.keywords & prompt_kw)
-    tag_match_bonus   = len(entry.tags & prompt_kw) * 1.5
-    priority_weight   = entry.priority * 0.4
-    parent_node_boost = 2.0 if entry.type in relevant_cats else 0.0
-    return keyword_overlap + tag_match_bonus + priority_weight + parent_node_boost
+    if not os.path.exists(p):
+        return f"[ERROR] File not found: {path}"
+
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            if segment_start is None and segment_end is None:
+                return f.read()
+
+            if unit == "lines":
+                lines = f.readlines()
+                start = (segment_start - 1) if segment_start and segment_start > 0 else 0
+                end = segment_end if segment_end and segment_end <= len(lines) else len(lines)
+                return "".join(lines[start:end])
+            else: # bytes
+                f.seek(segment_start or 0)
+                length = (segment_end - segment_start + 1) if (segment_start and segment_end) else None
+                return f.read(length) if length else f.read()
+
+    except Exception as e:
+        return f"[ERROR] Failed to read file: {e}"
 
 
-def _relevant_categories(prompt_kw: set) -> set:
-    scores = defaultdict(float)
-    for cat, subtags in _CATEGORY_TREE.items():
-        if cat in prompt_kw:
-            scores[cat] += 2.0
-        scores[cat] += len(set(subtags) & prompt_kw) * 1.5
-    top = {cat for cat, s in scores.items() if s > 0}
-    return top if top else set(_CATEGORY_TREE.keys())
+def write_file(path: str, content: str, mode: str = "overwrite", segment_start: int | None = None, segment_end: int | None = None, unit: str = "lines") -> str:
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
 
+    os.makedirs(os.path.dirname(p), exist_ok=True)
 
-def make_client(key, base_url="https://generativelanguage.googleapis.com/v1beta/openai/"):
-    return OpenAI(
-        api_key=key,
-        base_url=base_url
-    )
+    try:
+        if mode == "overwrite":
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"Successfully wrote {len(content)} characters to {path}."
 
-def ask_ai_simple(prompt: str, model: str, sys_prompt: str) -> str:
-    # Build rotation stack: (provider_id, model_name, base_url)
-    # The requested model is tried first (on its native provider), then
-    # the fallback providers follow so summarisation never silently dies.
-    def _provider_for(m: str):
-        if m.startswith("gemini") or m.startswith("gemma"):
-            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
-        if "llama" in m or "mixtral" in m or "qwen" in m:
-            return "groq", "https://api.groq.com/openai/v1/"
-        if "nvidia" in m or "nemotron" in m or "deepseek" in m:
-            return "nvidia", "https://integrate.api.nvidia.com/v1"
-        return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+        elif mode == "append":
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(content)
+            return f"Successfully appended to {path}."
 
-    primary_pid, primary_url = _provider_for(model)
+        elif mode == "prepend":
+            existing = ""
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    existing = f.read()
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content + existing)
+            return f"Successfully prepended to {path}."
 
-    # Fallback roster — always use the lightest available model per provider
-    fallback_info = [
-        ("google", "gemini-2.5-flash-lite", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        ("groq",   "llama-3.3-70b-versatile", "https://api.groq.com/openai/v1/"),
-        ("nvidia", "nvidia/llama-3.1-nemotron-nano-8b-v1", "https://integrate.api.nvidia.com/v1"),
-    ]
-
-    rotation = []
-    # Primary: requested model on its native provider
-    for k in API_KEYS.get(primary_pid, []):
-        rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
-    # Fallbacks: other providers with their own default models
-    for pid, fb_model, url in fallback_info:
-        if pid == primary_pid:
-            continue
-        for k in API_KEYS.get(pid, []):
-            rotation.append({"key": k, "model": fb_model, "base_url": url, "pid": pid})
-
-    if not rotation:
-        return "[ERROR: No API keys configured in api.keys]"
-
-    ind = 0
-    attempts = 0
-    max_total_attempts = len(rotation) * 2
-
-    while attempts < max_total_attempts:
-        cfg = rotation[ind]
-        client = make_client(cfg["key"], cfg["base_url"])
-        try:
-            response = client.chat.completions.create(
-                model=cfg["model"],
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=1024,
-            )
-            msg = response.choices[0].message
-            if msg.content:
-                return msg.content.strip()
-            return "[EMPTY RESPONSE]"
-
-        except Exception as e:
-            msg_str = str(e).upper()
-            is_transient = any(x in msg_str for x in ["503", "UNAVAILABLE", "OVERLOADED", "429", "RESOURCE_EXHAUSTED", "RATE LIMIT"])
-
-            if is_transient:
-                print(f"{RED}[{cfg['pid']}] Key/Provider rate-limited or overloaded. Trying next...{RESET}")
-                time.sleep(2)
-            elif "API_KEY_INVALID" in msg_str:
-                print(f"{RED}[{cfg['pid']}] Invalid API key detected.{RESET}")
+        elif mode == "segment":
+            if not os.path.exists(p):
+                lines = []
             else:
-                print(f"{RED}[{cfg['pid']}] API Error: {msg_str[:100]}...{RESET}")
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
 
-            ind = (ind + 1) % len(rotation)
-            attempts += 1
+            start = (segment_start - 1) if segment_start and segment_start > 0 else 0
+            end = segment_end if segment_end else len(lines)
 
-    return "[ERROR: All providers and keys failed after multiple attempts]"
+            new_lines = content.splitlines(keepends=True)
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
 
-# ──────────────────────────────────────────────────────────────────
-#  DELEGATE SUBTASK  — main AI offloads work to a smaller sub-AI
-# ──────────────────────────────────────────────────────────────────
+            lines[start:end] = new_lines
+            with open(p, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            return f"Successfully updated lines {start+1}..{end} in {path}."
 
-# Sub-AI models available for delegation (prefer light, fast models)
-_DELEGATE_MODELS: list[dict] = [
-    {"provider_id": "google",  "name": "gemini-2.5-flash-lite",                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
-    {"provider_id": "nvidia",  "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "base_url": "https://integrate.api.nvidia.com/v1"},
-    {"provider_id": "google",  "name": "gemini-2.5-flash",                     "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
-    {"provider_id": "groq",    "name": "qwen/qwen3-32b",                       "base_url": "https://api.groq.com/openai/v1/"},
-    {"provider_id": "google",  "name": "gemma-4-31b-it",                       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
-]
+        else:
+            return f"[ERROR] Invalid write mode: {mode}"
+
+    except Exception as e:
+        return f"[ERROR] Failed to write file: {e}"
+
+
+def index_files(path: str, extension_filter: str = "") -> str:
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
+
+    if not os.path.exists(p):
+        return f"[ERROR] Path not found: {path}"
+
+    exts = [e.strip().lower() for e in extension_filter.split(",") if e.strip()] if extension_filter else []
+
+    indexed_count = 0
+    idx_file = paths.INDEXED_MEMORY_FILE
+
+    files_to_index = []
+    if os.path.isfile(p):
+        files_to_index.append(p)
+    else:
+        for root, _, files in os.walk(p):
+            for file in files:
+                if exts:
+                    if any(file.lower().endswith(e) for e in exts):
+                        files_to_index.append(os.path.join(root, file))
+                else:
+                    files_to_index.append(os.path.join(root, file))
+
+    with open(idx_file, "a", encoding="utf-8") as out:
+        for filepath in files_to_index[:100]: # Cap at 100 files
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                    rel_p = os.path.relpath(filepath, paths.ROOT)
+                    out.write(f"--- FILE: {rel_p} ---\n{content}\n\n")
+                    indexed_count += 1
+            except Exception:
+                pass
+
+    return f"Successfully indexed {indexed_count} file(s) into indexed_memory.txt."
+
+
+def web_scrape(url: str, selector: str | None = None, max_chars: int = 12000) -> str:
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        resp = requests.get(url, headers=headers, timeout=12)
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        for s in soup(["script", "style", "nav", "footer", "header"]):
+            s.decompose()
+
+        if selector:
+            target = soup.select(selector)
+            text = "\n".join(el.get_text(separator="\n", strip=True) for el in target)
+        else:
+            text = soup.get_text(separator="\n", strip=True)
+
+        return text[:max_chars] if len(text) > max_chars else text
+    except Exception as e:
+        return f"[ERROR] Web scrape failed: {e}"
+
+
+# ── SUB-AI DELEGATION ──────────────────────────────────────────────────────────
 
 _DELEGATE_SYS_PROMPT = """\
 You are a focused sub-assistant. Your sole job is to complete the specific task
 given to you as accurately and concisely as possible.
 
 Rules:
-- You have NO tools available. Do not attempt to call any functions.
-- Use ONLY the context provided in the user message.
+- Use available tools to gather information or perform actions if required for the task.
+- Use ONLY the context provided or gathered via tools.
 - Structure your output clearly so the supervising AI can parse it easily.
-- If the task is impossible given the provided context, say so explicitly and explain why.
+- If the task is impossible even with tool access, say so explicitly and explain why.
 - Do not pad your response with pleasantries or meta-commentary.
 """
+
+_DELEGATE_MODELS = [
+    {"provider_id": "google",     "name": "gemini-2.5-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
+    {"provider_id": "openrouter", "name": "google/gemini-2.0-flash-001", "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "base_url": "https://integrate.api.nvidia.com/v1"},
+    {"provider_id": "groq",       "name": "qwen/qwen3-32b", "base_url": "https://api.groq.com/openai/v1/"},
+]
+
+
+def _dispatch_sub_tool(name: str, args_raw: str) -> str:
+    """Helper to execute tools on behalf of a delegated sub-AI."""
+    try:
+        args = json.loads(args_raw)
+    except Exception:
+        args = {}
+
+    local_funcs = {
+        "run_code": run_code,
+        "read_file": read_file,
+        "write_file": write_file,
+        "save_memory": save_memory,
+        "retrieve_memory": retrieve_memory,
+        "index_files": index_files,
+        "web_scrape": web_scrape,
+        "generate_image": generate_image,
+        "send_whatsapp_message": send_whatsapp_message,
+        "get_whatsapp_status": get_whatsapp_status,
+        "get_whatsapp_chats": get_whatsapp_chats,
+        "get_pending_whatsapp_messages": get_pending_whatsapp_messages,
+        "fetch_whatsapp_chat_history": fetch_whatsapp_chat_history,
+        "set_whatsapp_busy_mode": set_whatsapp_busy_mode,
+        "get_whatsapp_report": get_whatsapp_report,
+        "set_whatsapp_user_profile": set_whatsapp_user_profile,
+        "archive_whatsapp_chat": archive_whatsapp_chat,
+        "search_whatsapp_chat": search_whatsapp_chat,
+        "get_whatsapp_group_participants": get_whatsapp_group_participants,
+        "get_whatsapp_contact_info": get_whatsapp_contact_info,
+        "react_to_whatsapp_message": react_to_whatsapp_message,
+        "download_whatsapp_media": download_whatsapp_media,
+        "silence_whatsapp_contact": silence_whatsapp_contact,
+        "schedule_whatsapp_message": schedule_whatsapp_message,
+        "run_diagnosis": run_diagnosis,
+        "sleep_mode": sleep_mode,
+        "intermediate_print": intermediate_print,
+    }
+
+    if name in local_funcs:
+        try:
+            res = local_funcs[name](**args)
+            if not isinstance(res, str):
+                res = json.dumps(res, indent=2)
+            return res
+        except Exception as e:
+            return f"[TOOL ERROR] Execution failed: {str(e)}"
+
+    return f"[TOOL ERROR] Tool '{name}' is not supported in the sub-AI delegation environment."
 
 
 def delegate_subtask(
@@ -1166,33 +1119,20 @@ def delegate_subtask(
     context: str = "",
     model: str = "gemini-2.5-flash-lite",
     max_tokens: int = 2048,
+    system_prompt: str | None = None,
 ) -> str:
-    """
-    Delegate a focused, tool-free subtask to a smaller sub-AI model and return
-    its report as a string.  The supervising (larger) AI receives the output
-    exactly as the sub-AI produced it.
-
-    Parameters
-    ----------
-    task       : The imperative instruction for the sub-AI.
-    context    : All data / background the sub-AI needs (no tool access).
-    model      : Preferred sub-AI model name (falls back through _DELEGATE_MODELS).
-    max_tokens : Upper bound on sub-AI output length.
-    """
     log_write(f"[delegate_subtask] model:{model} max_tokens:{max_tokens} task:{task[:80]}")
     print(f"{GRAY}[DELEGATE] → {model} | {task[:72]}{'...' if len(task) > 72 else ''}{RESET}")
+
     max_tokens = max(256, min(8192, int(max_tokens)))
 
-    # Build the user message for the sub-AI
     user_message = f"## Task\n{task.strip()}"
     if context and context.strip():
         user_message += f"\n\n## Context\n{context.strip()}"
 
-    # ── Build provider rotation ─────────────────────────────────────────────
-    # 1. Try the requested model on its inferred provider first.
-    # 2. Fall through _DELEGATE_MODELS in order as fallbacks.
-
     def _infer_provider(m: str) -> tuple[str, str]:
+        if m.startswith("openrouter") or "/" in m:
+            return "openrouter", "https://openrouter.ai/api/v1"
         if m.startswith("gemini") or m.startswith("gemma"):
             return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
         if "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
@@ -1203,20 +1143,16 @@ def delegate_subtask(
 
     primary_pid, primary_url = _infer_provider(model)
 
+    from llm_client import API_KEYS
     rotation: list[dict] = []
-    # Primary: all keys for the requested model
     for k in API_KEYS.get(primary_pid, []):
-        rotation.append({"key": k, "model": model,
-                         "base_url": primary_url, "pid": primary_pid})
-    # Fallbacks from _DELEGATE_MODELS (skip primary model to avoid duplicate)
+        rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
     for slot in _DELEGATE_MODELS:
         pid = slot["provider_id"]
         fb_model = slot["name"]
-        if fb_model == model:
-            continue
+        if fb_model == model: continue
         for k in API_KEYS.get(pid, []):
-            rotation.append({"key": k, "model": fb_model,
-                             "base_url": slot["base_url"], "pid": pid})
+            rotation.append({"key": k, "model": fb_model, "base_url": slot["base_url"], "pid": pid})
 
     if not rotation:
         return "[ERROR] No API keys configured for any sub-AI provider."
@@ -1225,16 +1161,20 @@ def delegate_subtask(
     attempts = 0
     max_attempts = len(rotation) * 2
 
+    sys_p = system_prompt if system_prompt is not None else _DELEGATE_SYS_PROMPT
     while attempts < max_attempts:
         cfg = rotation[ind]
-        client = OpenAI(api_key=cfg["key"], base_url=cfg["base_url"])
+        headers = {"HTTP-Referer": "https://github.com/opsonusdh/Termux-AI", "X-Title": "Termux-AI"} if cfg["pid"] == "openrouter" else None
+        client = OpenAI(api_key=cfg["key"], base_url=cfg["base_url"], default_headers=headers)
+        messages = [
+            {"role": "system", "content": sys_p},
+            {"role": "user",   "content": user_message},
+        ]
+        
         try:
             resp = client.chat.completions.create(
                 model=cfg["model"],
-                messages=[
-                    {"role": "system", "content": _DELEGATE_SYS_PROMPT},
-                    {"role": "user",   "content": user_message},
-                ],
+                messages=messages,
                 max_tokens=max_tokens,
             )
             content = resp.choices[0].message.content
@@ -1249,32 +1189,30 @@ def delegate_subtask(
 
         except Exception as e:
             err = str(e).upper()
-            is_transient = any(x in err for x in (
-                "429", "RESOURCE_EXHAUSTED", "RATE LIMIT",
-                "503", "UNAVAILABLE", "OVERLOADED",
-            ))
+            is_transient = any(x in err for x in ("429", "RESOURCE_EXHAUSTED", "RATE LIMIT", "503", "UNAVAILABLE", "OVERLOADED"))
             if is_transient:
-                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] "
-                      f"Rate-limited/overloaded. Trying next...{RESET}")
+                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] Rate-limited/overloaded. Trying next...{RESET}")
                 time.sleep(2)
-            elif "API_KEY_INVALID" in err:
-                print(f"{RED}[ERROR][{cfg['pid']}] Invalid API key.{RESET}")
             else:
-                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] "
-                      f"Error: {str(e)[:120]}{RESET}")
+                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] Error: {str(e)[:120]}{RESET}")
             ind = (ind + 1) % len(rotation)
             attempts += 1
 
     return "[ERROR] All sub-AI providers and keys failed after multiple attempts."
 
 
-# ──────────────────────────────────────────────────────────────────
-#  GENERATE IMAGE  — Nano Banana (Gemini image generation)
-# ──────────────────────────────────────────────────────────────────
+# ── GENERATE IMAGE ─────────────────────────────────────────────────────────────
 
-import base64
+_NANO_BANANA_MODELS = [
+    "gemini-3.1-flash-image-preview",
+    "gemini-3-pro-image-preview",
+    "imagen-4.0-generate-preview-05-20",
+    "imagen-4.0-ultra-generate-exp-05-20",
+    "imagen-3.0-generate-002",
+    "imagen-3.0-generate-001",
+]
 
-_NANO_BANANA_MODELS = {
+_NANO_BANANA_QUALITY_ALIAS = {
     "flash": "gemini-3.1-flash-image-preview",
     "pro":   "gemini-3-pro-image-preview",
 }
@@ -1287,1242 +1225,99 @@ def generate_image(
     quality: str = "flash",
     filename: str | None = None,
 ) -> str:
-    """
-    Generate an image from a text prompt using Nano Banana
-    (Google Gemini native image generation).
-
-    Parameters
-    ----------
-    prompt   : Vivid text description of the desired image.
-    quality  : 'flash' (fast) or 'pro' (high fidelity). Default 'flash'.
-    filename : Base filename without extension. Defaults to timestamp.
-
-    Returns a human-readable string with the saved file path on success,
-    or an error message on failure.
-    """
     log_write(f"[generate_image] quality:{quality} filename:{filename} prompt:{prompt[:80]}")
     print(f"{GRAY}[IMAGE GEN] Nano Banana {quality} | {prompt[:68]}{'...' if len(prompt) > 68 else ''}{RESET}")
-    model_name = _NANO_BANANA_MODELS.get(quality, _NANO_BANANA_MODELS["flash"])
 
-    # Determine output path
+    preferred = _NANO_BANANA_QUALITY_ALIAS.get(quality)
+    model_order = _NANO_BANANA_MODELS.copy()
+    if preferred and preferred in model_order:
+        model_order.remove(preferred)
+        model_order.insert(0, preferred)
+
     images_dir = os.path.join(paths.WORKSPACE_DIR, "images")
     os.makedirs(images_dir, exist_ok=True)
 
     if not filename or not filename.strip():
         filename = "image_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Sanitise: strip extension if user passed one
     filename = os.path.splitext(filename.strip())[0]
     out_path = os.path.join(images_dir, filename + ".png")
 
-    # Rotate through all Google API keys
+    from llm_client import API_KEYS
     google_keys = API_KEYS.get("google", [])
     if not google_keys:
         return "[generate_image ERROR] No Google API key found in api.keys."
 
     last_error = ""
-    for key in google_keys:
-        client = OpenAI(api_key=key, base_url=_NANO_BANANA_BASE_URL)
-        try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-            )
-
-            # ── Extract image data from response ───────────────────────────
-            # Gemini image models return inline_data parts (base64) embedded
-            # in the response content when accessed via the OpenAI compat layer.
-            image_bytes: bytes | None = None
-
-            choice = response.choices[0]
-            raw_content = choice.message.content  # may be str or None
-
-            # Try structured parts (google-specific model_extra)
-            msg_obj = choice.message
-            parts = getattr(msg_obj, "parts", None)
-            if not parts and hasattr(msg_obj, "model_extra"):
-                parts = (msg_obj.model_extra or {}).get("parts")
-
-            if parts:
-                for part in parts:
-                    # part may be dict or object
-                    inline = (
-                        part.get("inline_data")
-                        if isinstance(part, dict)
-                        else getattr(part, "inline_data", None)
-                    )
-                    if inline:
-                        b64 = (
-                            inline.get("data")
-                            if isinstance(inline, dict)
-                            else getattr(inline, "data", None)
-                        )
-                        if b64:
-                            image_bytes = base64.b64decode(b64)
-                            break
-
-            # Fallback: some versions embed a data-URI inside the text content
-            if not image_bytes and raw_content:
-                import re as _re
-                m = _re.search(r"data:image/\w+;base64,([A-Za-z0-9+/=]+)", raw_content)
-                if m:
-                    image_bytes = base64.b64decode(m.group(1))
-
-            if not image_bytes:
-                # Last resort: treat raw_content as plain base64
-                if raw_content:
-                    try:
-                        image_bytes = base64.b64decode(raw_content.strip())
-                    except Exception:
-                        pass
-
-            if not image_bytes:
-                last_error = (
-                    f"[generate_image] Model responded but no image data found. "
-                    f"Raw content preview: {str(raw_content)[:200]}"
+    for model_name in model_order:
+        for key in google_keys:
+            client = OpenAI(api_key=key, base_url=_NANO_BANANA_BASE_URL)
+            try:
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": prompt}],
                 )
-                continue  # try next key
 
-            # Save the image
-            with open(out_path, "wb") as fh:
-                fh.write(image_bytes)
+                content = response.choices[0].message.content or ""
+                b64_match = re.search(r"data:image/\w+;base64,([A-Za-z0-9+/=]+)", content)
+                if b64_match:
+                    img_bytes = base64.b64decode(b64_match.group(1))
+                    with open(out_path, "wb") as f:
+                        f.write(img_bytes)
+                    return f"Successfully generated image and saved to {out_path}"
 
-            size_kb = len(image_bytes) // 1024
-            return (
-                f"Image generated successfully!\n"
-                f"  Model   : {model_name} (Nano Banana {quality})\n"
-                f"  Prompt  : {prompt[:80]}{'...' if len(prompt) > 80 else ''}\n"
-                f"  Saved to: {out_path}\n"
-                f"  Size    : {size_kb} KB\n"
-                f"\nYou can open it with: termux-open '{out_path}'"
-            )
+            except Exception as e:
+                last_error = str(e)
 
-        except Exception as e:
-            err_str = str(e)
-            is_transient = any(x in err_str.upper() for x in (
-                "429", "RESOURCE_EXHAUSTED", "RATE LIMIT",
-                "503", "UNAVAILABLE", "OVERLOADED",
-            ))
-            if is_transient:
-                print(f"{RED}[generate_image][google/{model_name}] Rate-limited. Trying next key...{RESET}")
-                time.sleep(2)
-                last_error = f"Rate-limited: {err_str[:120]}"
-            elif "API_KEY_INVALID" in err_str.upper():
-                print(f"{RED}[generate_image] Invalid Google API key, trying next...{RESET}")
-                last_error = "Invalid API key"
-            else:
-                last_error = err_str[:200]
-                print(f"{RED}[generate_image] Error: {last_error}{RESET}")
-
-    return f"[generate_image ERROR] All Google API keys failed. Last error: {last_error}"
+    return f"[generate_image ERROR] Failed to generate image: {last_error}"
 
 
-#  Retrieve (separated budgets for primary vs indexed)
-def is_wake_relevant(text: str) -> bool:
-
-
-    sys_prompt = """
-You are a wake-word relevance classifier.
-
-The assistant name is Orion.
-
-Determine whether the speaker is directly addressing the assistant.
-
-Reply ONLY with:
-YES
-or
-NO
-"""
-    result = ask_ai_simple(
-        prompt=text,
-        model="gemini-2.5-flash-lite",
-        sys_prompt=sys_prompt,
-    )
-
-    return result.strip().upper().startswith("YES")
-
-
-def retrieve(
-    prompt: str,
-    top_k: int = 5,
-    threshold: float = 1.5,
-    indexed_top_k: int = 2,
-    indexed_threshold: float = 2.5,
-) -> dict:
-    """
-    Best-first retrieval with separate budgets for the two stores.
-
-    Primary store (memories.txt)
-        Standard threshold (1.5). Up to top_k results.
-        Priority-10 instructions always surface regardless of score.
-
-    Indexed store (indexed_memory.txt)
-        Higher threshold (2.5) -- only surface clearly relevant chunks.
-        Capped at indexed_top_k (2) so bulk code never crowds out personal context.
-
-    Returns {"primary": list[MemoryEntry], "indexed": list[MemoryEntry]}.
-    """
-    primary_entries = load_memories(MEMORY_FILE)
-    indexed_entries = load_memories(INDEX_FILE, start_id=len(primary_entries))
-
-    prompt_kw = _tokenize(prompt)
-
-    # Primary store
-    primary_results: list = []
-    seen_ids: set         = set()
-
-    if not primary_entries:
-        pass
-    elif not prompt_kw:
-        instructions = [e for e in primary_entries if e.type == "instruction"]
-        instructions.sort(key=lambda e: -e.priority)
-        primary_results = instructions[:top_k]
-        seen_ids = {e.id for e in primary_results}
-    else:
-        relevant_cats = _relevant_categories(prompt_kw)
-
-        mandatory   = [e for e in primary_entries if e.priority == 10 and e.type == "instruction"]
-        seen_ids    = {e.id for e in mandatory}
-        primary_results.extend(mandatory)
-
-        heap = []
-        for entry in primary_entries:
-            score = _score_entry(entry, prompt_kw, relevant_cats)
-            if score >= threshold:
-                heapq.heappush(heap, (-score, entry.id, entry))
-
-        while heap and len(primary_results) < top_k:
-            _, _, entry = heapq.heappop(heap)
-            if entry.id not in seen_ids:
-                seen_ids.add(entry.id)
-                primary_results.append(entry)
-
-    # Indexed store
-    indexed_results: list = []
-
-    if indexed_entries and prompt_kw and indexed_top_k > 0:
-        relevant_cats = _relevant_categories(prompt_kw)
-        heap = []
-        for entry in indexed_entries:
-            score = _score_entry(entry, prompt_kw, relevant_cats)
-            if score >= indexed_threshold:
-                heapq.heappush(heap, (-score, entry.id, entry))
-
-        while heap and len(indexed_results) < indexed_top_k:
-            _, _, entry = heapq.heappop(heap)
-            indexed_results.append(entry)
-
-    return {"primary": primary_results, "indexed": indexed_results}
-
-
-def build_memory_block(prompt: str) -> str:
-    """
-    Retrieve relevant memories and format them as a two-section system-prompt block.
-
-      ## MEMORY          -- personal facts, preferences, instructions
-      ## RELEVANT CODE   -- indexed file/doc chunks (only when clearly relevant)
-
-    Returns empty string if nothing is relevant.
-    """
-    result  = retrieve(prompt)
-    primary = result["primary"]
-    indexed = result["indexed"]
-
-    if not primary and not indexed:
-        return ""
-
-    lines = []
-
-    if primary:
-        lines.append("## MEMORY")
-        for entry in primary:
-            tag_str = ",".join(sorted(entry.tags)) if entry.tags else entry.type
-            lines.append(f"- [{entry.type}][{tag_str}] {entry.text}")
-        lines.append("")
-
-    if indexed:
-        lines.append("## RELEVANT CODE/DOCS")
-        for entry in indexed:
-            source_tags = sorted(entry.tags - {_INDEXED_TAG})
-            src = source_tags[0] if source_tags else "file"
-            lines.append(f"- [{src}] {entry.text}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def retrieve_flat(prompt: str, top_k: int = 5) -> list:
-    """
-    Single flat list for the retrieve_memory tool.
-    Primary entries first; indexed fill remaining slots (capped at 3).
-    """
-    result = retrieve(
-        prompt,
-        top_k=max(top_k - 1, 1),
-        indexed_top_k=min(3, top_k),
-    )
-    seen_ids: set = set()
-    flat = []
-    for entry in result["primary"] + result["indexed"]:
-        if entry.id not in seen_ids:
-            seen_ids.add(entry.id)
-            flat.append(entry)
-    return flat[:top_k]
-
-
-#  Chunk helper (used by index_memory and index_files)
-
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list:
-    """Split text into overlapping word-count chunks for indexing."""
-    words  = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - overlap):
-        chunk = " ".join(words[i : i + chunk_size])
-        if chunk:
-            chunks.append(chunk)
-    return chunks
-
-
-def index_memory(
-    text: str,
-    source_path: str = "unknown",
-    chunk_size: int = 500,
-    overlap: int = 50,
-) -> list:
-    """
-    Chunk text and append entries to indexed_memory.txt.
-    All entries carry the 'indexed' tag so retrieve() applies the higher
-    threshold and separate budget, keeping code out of personal memory.
-    """
-    chunks = chunk_text(text, chunk_size, overlap)
-    written = []
-    try:
-        with open(INDEX_FILE, "a", encoding="utf-8") as fh:
-            for chunk in chunks:
-                line = f"[project][indexed,{source_path}][3] {chunk}"
-                fh.write(line + "\n")
-                written.append(line)
-        return written
-    except OSError as exc:
-        return [f"[ERROR indexing memory: {exc}]"]
-
-
-
-
-
-#  TOOL FUNCTIONS
+# ── TOOL FUNCTIONS ─────────────────────────────────────────────────────────────
 
 def run_code(bash: str, timeout: int = 0) -> str:
-    """Execute shell commands in Termux after permission validation."""
-    log_write(f"[run_code] {bash}")
+    """Execute shell commands in system environment after permission validation."""
+    log_write(f"[run_code] timeout:{timeout} cmd:{bash}")
+    print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")
 
-    allowed, reason = validate_command(bash)
-    if not allowed:
-        out = f"[BLOCKED] {reason}"
-        log_write(f"[OUT] {out}")
-        return out
+    needs_perm, reason = validate_command(bash)
+    if needs_perm:
+        return f"[PERMISSION DENIED] Action blocked by security policy. Reason: {reason}"
 
-    printable = bash if len("\n".join(bash.splitlines()[:PRINT_LINE_THRESHOLD])) < PRINT_CHAR_THRESHOLD else bash[:PRINT_CHAR_THRESHOLD] + "\n    .\n    .\n    ."
+    start_t = time.time()
     try:
-        print(f"{GRAY}[EXECUTING] {printable}{RESET}")
+        if sys.platform == "win32":
+            p = subprocess.Popen(
+                ["cmd.exe", "/c", bash],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        else:
+            p = subprocess.Popen(
+                ["bash", "-c", bash],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
 
-        result = subprocess.run(
-            bash,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=None if timeout == 0 else timeout,
-        )
+        if timeout > 0:
+            stdout, stderr = p.communicate(timeout=timeout)
+        else:
+            stdout, stderr = p.communicate()
 
-        out = result.stdout.strip()
-        err = result.stderr.strip()
-
-        printable_out = out if len("\n".join(out.splitlines()[:PRINT_LINE_THRESHOLD])) < PRINT_CHAR_THRESHOLD else out[:PRINT_CHAR_THRESHOLD] + "\n    .\n    .\n    ."
-
-        if err and out:
-            print(f"{GRAY}[OUT]\n{printable_out}\n{RED}[ERR]\n{err}{RESET}")
-            log_write(f"[OUT]\n{out}")
-            log_write(f"[ERR]\n{err}")
-            return out + "\n[ERR]\n" + err
-
-        if err:
-            print(f"{RED}[ERR]\n{err}{RESET}")
-            log_write(f"[ERR]\n{err}")
-            return "[ERR]\n" + err
-
-        print(f"{GRAY}[OUT]\n{printable_out}{RESET}")
-        log_write(f"[OUT]\n{out}")
-        return out
+        dur = time.time() - start_t
+        log_write(f"[run_code] returncode:{p.returncode} dur:{dur:.2f}s")
+        output = stdout + (f"\n[STDERR]\n{stderr}" if stderr else "")
+        if p.returncode != 0:
+            output += f"\n[EXIT CODE {p.returncode}]"
+        return output.strip() or "[NO OUTPUT]"
 
     except subprocess.TimeoutExpired:
-        msg = f"[TIMEOUT] Command exceeded {timeout} seconds"
-        print(f"{RED}{msg}{RESET}")
-        log_write(msg)
-        return msg
-
+        p.kill()
+        p.communicate()
+        return f"[TIMEOUT] Command timed out after {timeout} seconds."
     except Exception as e:
-        msg = f"[EXCEPTION] {e}"
-        print(f"{RED}[EXCEPTION]\n{e}{RESET}")
-        log_write(msg)
-        return msg
-
-
-def save_memory(text: str, type_: str, tags: str, priority: int) -> str:
-    """
-    Validate and persist a structured memory entry to memories.txt.
-
-    Guards (reject with explanation, never silently drop):
-      text > 1000 chars      -> redirect to index_files
-      looks like code        -> redirect to index_files
-      looks like a log line  -> rejected
-
-    Priority 1-10: 10 = critical behavioral rule, 7-9 = strong preference,
-    5-6 = useful fact.
-    """
-    log_write(f"[save_memory] type:{type_}, tags:{tags}, priority:{priority}, text:{text[:80]}")
-
-    text = text.strip()
-    if not text:
-        return "[MEMORY_FILTERED: Empty text.]"
-
-    if len(text) > 1000:
-        return "[MEMORY_FILTERED: Text too long -- use index_files for bulk content.]"
-    if "def " in text or "class " in text or "import " in text:
-        return "[MEMORY_FILTERED: Looks like code -- use index_files instead.]"
-    if "log.txt" in text or ("error" in text.lower() and "traceback" in text.lower()):
-        return "[MEMORY_FILTERED: Looks like a log entry -- not stored in primary memory.]"
-
-    type_    = (type_ or "fact").strip().lower()
-    tags     = (tags or "").strip().lower()
-    priority = max(1, min(10, int(priority)))
-
-    line = f"[{type_}][{tags}][{priority}] {text}"
-
-    try:
-        with open(MEMORY_FILE, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-        print(f"{GRAY}[MEMORY SAVED] {line}{RESET}")
-        log_write("[OK]")
-        return f"Memory saved: {line}"
-    except OSError as exc:
-        err = f"[ERROR saving memory: {exc}]"
-        print(f"{RED}{err}{RESET}")
-        log_write(f"[ERR] {exc}")
-        return err
-
-
-def retrieve_memory(query: str, top_k: int = 5) -> str:
-    """
-    Search both memories.txt and indexed_memory.txt; return labelled results.
-    Each line is prefixed [memory][type] or [indexed][type] so the model
-    knows the provenance of every item.
-    """
-    log_write(f"[retrieve_memory] query:{query}, top_k:{top_k}")
-
-    keywords = sorted(_tokenize(query))
-    print(f"{GRAY}[MEMORY] retrieving for: {', '.join(keywords) or '(none)'}{RESET}")
-
-    hits = retrieve_flat(query, top_k=top_k)
-
-    if not hits:
-        log_write("[EMPTY]")
-        return "No relevant memories found."
-
-    lines = []
-    for entry in hits:
-        source = "indexed" if entry.is_indexed else "memory"
-        lines.append(f"[{source}][{entry.type}] {entry.text}")
-
-    out = "\n".join(lines)
-    log_write(f"[OUT]\n{out}")
-    return out
-
-
-def read_file(
-    path: str,
-    segment_start: int = None,
-    segment_end: int = None,
-    unit: str = "lines",
-) -> str:
-    """
-    Read a file using pure Python — no shell required.
-
-    Full read
-        read_file("/path/to/file")
-
-    Segmented read — lines (1-indexed, inclusive on both ends)
-        read_file("/path/to/file", segment_start=10, segment_end=25)
-        Returns lines 10-25 prefixed with their line numbers.
-
-    Segmented read — bytes
-        read_file("/path/to/file", segment_start=0, segment_end=512, unit="bytes")
-        Returns the decoded byte slice.
-
-    Parameters
-    ----------
-    path           : target file (~ expanded)
-    segment_start  : first line (1-indexed) or first byte offset; None = start of file
-    segment_end    : last line (inclusive) or last byte offset; None = end of file
-    unit           : "lines" (default) or "bytes"
-    """
-    path = os.path.expanduser(path)
-
-    if not os.path.exists(path):
-        return f"[ERROR] File not found: {path}"
-    if not os.path.isfile(path):
-        return f"[ERROR] Path is not a file: {path}"
-
-    log_write(f"[read_file] path:{path} start:{segment_start} end:{segment_end} unit:{unit}")
-    print(f"{GRAY}[READING] {path}{RESET}")
-
-    try:
-        # Byte segment
-        if unit == "bytes":
-            with open(path, "rb") as fh:
-                if segment_start is not None:
-                    fh.seek(segment_start)
-                chunk = fh.read(
-                    None if segment_end is None else (segment_end - (segment_start or 0))
-                )
-            text = chunk.decode("utf-8", errors="replace")
-            size = os.path.getsize(path)
-            header = f"[FILE] {path}  bytes {segment_start or 0}–{segment_end or size}\n"
-            return header + text
-
-        # Full or line-segment read
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            all_lines = fh.readlines()
-
-        total = len(all_lines)
-
-        if segment_start is None and segment_end is None:
-            # Full file — return with line numbers
-            numbered = [f"{i+1:6d}  {ln}" for i, ln in enumerate(all_lines)]
-            header   = f"[FILE] {path}  ({total} lines)\n"
-            return header + "".join(numbered)
-
-        # Clamp to valid range
-        lo = max(1, segment_start or 1) - 1          # convert to 0-indexed
-        hi = min(total, segment_end or total)         # inclusive end, 1-indexed
-
-        if lo >= total:
-            print(f"{RED}[ERROR] segment_start ({segment_start}) is beyond the file ({total} lines).{RESET}")
-            return f"[ERROR] segment_start ({segment_start}) is beyond the file ({total} lines)."
-        if lo >= hi:
-            print(f"{RED}[ERROR] segment_start ({segment_start}) must be less than segment_end ({segment_end}).{RESET}")
-            return f"[ERROR] segment_start ({segment_start}) must be less than segment_end ({segment_end})."
-
-        selected = all_lines[lo:hi]
-        numbered = [f"{lo+i+1:6d}  {ln}" for i, ln in enumerate(selected)]
-        header   = f"[FILE] {path}  lines {lo+1}–{hi} of {total}\n"
-        out = header + "".join(numbered)
-        printable_out = f"Read {len(out.splitlines())} line(s)"
-        print(f"{GRAY}[OK] {printable_out}{RESET}")
-        return out
-
-    except OSError as exc:
-        log_write(f"[ERR] {exc}")
-        print(f"{RED}[ERR] {exc}{RESET}")
-        return f"[ERROR] {exc}"
-
-
-def write_file(
-    path: str,
-    content: str,
-    mode: str = "overwrite",
-    segment_start: int = None,
-    segment_end: int = None,
-    unit: str = "lines",
-) -> str:
-    """
-    Write content to a file using pure Python — no shell required.
-    Parent directories are created automatically.
-
-    Modes
-    -----
-    overwrite  : replace the entire file with content  (default)
-    append     : add content after the last byte of the file
-    prepend    : insert content before the first byte of the file
-    segment    : replace lines segment_start..segment_end (1-indexed, inclusive)
-                 — or a byte range when unit='bytes' — with content.
-                 Lines outside the segment are untouched.
-                 If the replacement content contains newlines, each line
-                 is inserted as its own line.
-
-    Parameters
-    ----------
-    path           : target file (~ expanded; created if absent)
-    content        : text to write
-    mode           : "overwrite" | "append" | "prepend" | "segment"
-    segment_start  : first line (1-indexed) or first byte; required for mode='segment'
-    segment_end    : last line (inclusive) or last byte; required for mode='segment'
-    unit           : "lines" (default) or "bytes"
-    """
-    path = os.path.expanduser(path)
-    parent = os.path.dirname(path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-
-    log_write(f"[write_file] path:{path} mode:{mode} start:{segment_start} end:{segment_end} unit:{unit}")
-    print(f"{GRAY}[WRITING] {path}  (mode={mode}){RESET}")
-
-    try:
-        # overwrite
-        if mode == "overwrite":
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            lines_written = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-            print(f"{GRAY}[OK] Wrote {lines_written} line(s) to {path}.{RESET}")
-            return f"[OK] Wrote {lines_written} line(s) to {path}."
-
-        # append
-        if mode == "append":
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(content)
-            print(f"{GRAY}[OK] Appended {len(content)} byte(s) to {path}.{RESET}.")
-            return f"[OK] Appended {len(content)} byte(s) to {path}."
-
-        # prepend
-        if mode == "prepend":
-            existing = ""
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    existing = fh.read()
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(content + existing)
-            
-            print(f"{GRAY}[OK] Prepended {len(content)} byte(s) to {path}.{RESET}")
-            return f"[OK] Prepended {len(content)} byte(s) to {path}."
-
-        # segment
-        if mode == "segment":
-            if segment_start is None or segment_end is None:
-                print(f"{GRAY}[ERROR] mode='segment' requires both segment_start and segment_end.{RESET}")
-                return "[ERROR] mode='segment' requires both segment_start and segment_end."
-            if segment_start < 1:
-                print(f"{GRAY}[ERROR] segment_start must be >= 1.{RESET}")
-                return "[ERROR] segment_start must be >= 1."
-            if segment_end < segment_start:
-                print(f"{GRAY}[ERROR] segment_end must be >= segment_start.")
-                return "[ERROR] segment_end must be >= segment_start."
-
-            # byte segment
-            if unit == "bytes":
-                existing = b""
-                if os.path.exists(path):
-                    with open(path, "rb") as fh:
-                        existing = fh.read()
-                replacement = content.encode("utf-8")
-                new_bytes   = existing[:segment_start] + replacement + existing[segment_end:]
-                with open(path, "wb") as fh:
-                    fh.write(new_bytes)
-                
-                print(f"{GRAY}[OK] Replaced bytes {segment_start}-{segment_end} in {path} with {len(replacement)} byte(s).{RESET}")
-                return (
-                    f"[OK] Replaced bytes {segment_start}-{segment_end} in {path} "
-                    f"with {len(replacement)} byte(s)."
-                )
-
-            # line segment
-            existing_lines = []
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    existing_lines = fh.readlines()
-
-            total = len(existing_lines)
-            lo    = segment_start - 1                   # 0-indexed
-            hi    = min(segment_end, total)             # exclusive slice end
-
-            if lo > total:
-                print(f"{RED}[ERROR] segment_start ({segment_start}) is beyond the file length ({total} lines).{RESET}")
-                return (
-                    f"[ERROR] segment_start ({segment_start}) is beyond "
-                    f"the file length ({total} lines)."
-                )
-
-            # Ensure content ends with newline so surrounding lines stay intact
-            if content and not content.endswith("\n"):
-                content += "\n"
-
-            new_lines = existing_lines[:lo] + [content] + existing_lines[hi:]
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.writelines(new_lines)
-
-            replaced = hi - lo
-            print(f"{GRAY}[OK] Replaced line(s) {segment_start}-{min(segment_end, total)} ({replaced} line(s) removed, replacement written) in {path}.{RESET}")
-            return (
-                f"[OK] Replaced line(s) {segment_start}-{min(segment_end, total)} "
-                f"({replaced} line(s) removed, replacement written) in {path}."
-            )
-        
-        print(f"{RED}[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment.{RESET}")
-        return f"[ERROR] Unknown mode '{mode}'. Use: overwrite, append, prepend, segment."
-
-    except OSError as exc:
-        log_write(f"[ERR] {exc}")
-        print(f"{RED}[ERR] {exc}{RESET}")
-        return f"[ERROR] {exc}"
-
-
-def index_files(path: str, extension_filter: str = "") -> str:
-    """Read files, chunk them, and store in indexed_memory.txt (not memories.txt)."""
-    log_write(f"[INDEXING] path:{path}, filter:{extension_filter}")
-
-    path = os.path.expanduser(path)
-    if not os.path.exists(path):
-        return f"[ERROR] Path does not exist: {path}"
-
-    # Default extensions when no filter is provided
-    DEFAULT_EXTENSIONS = {
-        ".txt", ".md", ".py", ".sh", ".json",
-        ".yaml", ".yml", ".xml", ".html",
-        ".css", ".js", ".java", ".c",
-        ".cpp", ".h", ".hpp"
-    }
-
-    if extension_filter.strip():
-        extensions = {
-            ext.strip().lower()
-            if ext.strip().startswith(".")
-            else "." + ext.strip().lower()
-            for ext in extension_filter.split(",")
-            if ext.strip()
-        }
-    else:
-        extensions = DEFAULT_EXTENSIONS
-
-    indexed_files_count = 0
-    indexed_chunks_count = 0
-
-    files_to_process = []
-
-    if os.path.isfile(path):
-        files_to_process.append(path)
-
-    else:
-        for root, dirs, files in os.walk(path):
-
-            # Directory exclusions
-            dirs[:] = [
-                d for d in dirs
-                if d not in {"node_modules", ".git", "__pycache__"}
-            ]
-
-            for file in files:
-                full_path = os.path.join(root, file)
-
-                if Path(full_path).suffix.lower() in extensions:
-                    files_to_process.append(full_path)
-
-    for fpath in files_to_process:
-        try:
-            with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                text = fh.read()
-
-            if not text.strip():
-                continue
-
-            rel_path = os.path.relpath(
-                fpath,
-                os.path.dirname(path) if os.path.isdir(path) else os.path.dirname(fpath)
-            )
-
-            chunks = chunk_text(text)
-
-            if not chunks:
-                continue
-
-            result = index_memory(text, source_path=rel_path)
-
-            if result and not result[0].startswith("[ERROR"):
-                indexed_files_count += 1
-                indexed_chunks_count += len(chunks)
-
-
-        except Exception as e:
-            print(f"Failed to index {fpath}: {e}")
-            
-    
-    print(f"{GRAY}[OK] Indexed {indexed_files_count} file(s){RESET}")
-    return (
-        f"Successfully indexed "
-        f"{indexed_chunks_count} chunks "
-        f"from {indexed_files_count} file(s) "
-        f"into indexed_memory.txt."
-    )
-
-
-def web_scrape(url: str, selector: str = None, max_chars: int = 12000) -> str:
-    """Fetch a URL and convert readable content into markdown."""
-    try:
-        url = (url or "").strip()
-        selector = (selector or "").strip() or None
-        try:
-            max_chars = int(max_chars)
-        except (TypeError, ValueError):
-            max_chars = 12000
-        max_chars = max(1000, min(max_chars, 50000))
-
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return "[ERROR] web_scrape requires a valid http(s) URL."
-
-        print(f"{GRAY}[SCRAPING] {url}{RESET}")
-        log_write(f"[web_scrape] URL:{url} selector:{selector} max_chars:{max_chars}")
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,text/plain;q=0.7,*/*;q=0.5",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
-        response.raise_for_status()
-
-        final_url = response.url or url
-        content_type = response.headers.get("Content-Type", "").lower()
-        response.encoding = response.encoding or getattr(response, "apparent_encoding", None) or "utf-8"
-
-        def truncate_output(text: str) -> str:
-            text = text.strip()
-            if len(text) <= max_chars:
-                return text
-            return text[:max_chars].rstrip() + f"\n\n... (content truncated at {max_chars} characters)"
-
-        def plain_response(label: str, body: str, fence: str = "text") -> str:
-            return truncate_output(
-                f"Source: <{final_url}>\n"
-                f"Content-Type: {content_type or label}\n\n"
-                f"```{fence}\n{body.strip()}\n```"
-            )
-
-        if "application/json" in content_type or content_type.endswith("+json"):
-            try:
-                data = response.json()
-            except Exception:
-                data = json.loads(response.text)
-            return plain_response("application/json", json.dumps(data, indent=2, ensure_ascii=False), "json")
-
-        is_html = any(t in content_type for t in ("text/html", "application/xhtml+xml"))
-        if not is_html:
-            if content_type.startswith("text/") or "xml" in content_type:
-                return plain_response(content_type or "text/plain", response.text, "text")
-            msg = f"[ERROR] Unsupported content type: {content_type or 'unknown'}"
-            log_write(msg)
-            return msg
-
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        for comment in soup.find_all(string=lambda node: isinstance(node, Comment)):
-            comment.extract()
-
-        for tag in soup.select(
-            "script, style, noscript, template, svg, canvas, nav, footer, aside, "
-            "[hidden], [aria-hidden='true'], [style*='display:none'], [style*='display: none'], "
-            ".sidebar, .menu, .ads, .ad, .advert, .advertisement, .popup, .modal, "
-            ".cookie, .banner, .newsletter, .subscribe, .social-share"
-        ):
-            tag.decompose()
-
-        base_tag = soup.find("base", href=True)
-        base_url = urljoin(final_url, base_tag["href"]) if base_tag else final_url
-
-        if selector:
-            try:
-                roots = soup.select(selector)
-            except Exception as exc:
-                msg = f"[ERROR] Invalid selector '{selector}': {exc}"
-                log_write(msg)
-                return msg
-            if not roots:
-                msg = f"[ERROR] Selector '{selector}' not found."
-                log_write(msg)
-                return msg
-        else:
-            roots = [
-                soup.select_one("article")
-                or soup.select_one("main")
-                or soup.body
-                or soup
-            ]
-
-        lines: list[str] = []
-        seen_urls: set[str] = set()
-
-        def normalize_text(text: str) -> str:
-            text = html.unescape(text or "")
-            return re.sub(r"\s+", " ", text).strip()
-
-        def escape_table_cell(text: str) -> str:
-            return normalize_text(text).replace("|", r"\|")
-
-        def resolve(raw: str) -> str:
-            raw = (raw or "").strip()
-            if not raw:
-                return ""
-            full = urljoin(base_url, raw)
-            scheme = urlparse(full).scheme.lower()
-            if scheme in {"http", "https", "mailto", "tel"}:
-                return full
-            return ""
-
-        def add_line(text: str = "") -> None:
-            if text is None:
-                return
-            for part in str(text).splitlines() or [""]:
-                part = part.rstrip()
-                if not part:
-                    add_blank()
-                    continue
-                if lines and lines[-1] == part:
-                    continue
-                lines.append(part)
-
-        def add_blank() -> None:
-            if lines and lines[-1] != "":
-                lines.append("")
-
-        def label_for(tag: Tag) -> str:
-            for attr in ("alt", "title", "aria-label", "data-label", "data-title"):
-                value = tag.get(attr)
-                if value:
-                    return normalize_text(str(value))
-            return ""
-
-        def first_srcset_url(value: str) -> str:
-            for candidate in (value or "").split(","):
-                url_part = candidate.strip().split(" ")[0]
-                if url_part:
-                    return url_part
-            return ""
-
-        def link_markdown(tag: Tag) -> str:
-            text = normalize_text(tag.get_text(" ", strip=True))
-            href = tag.get("href")
-            if not href:
-                return text
-            full = resolve(href)
-            if not full:
-                return text
-            if full in seen_urls:
-                return text or f"<{full}>"
-            seen_urls.add(full)
-            return f"[{text}]({full})" if text else f"<{full}>"
-
-        def image_markdown(tag: Tag) -> str:
-            alt = label_for(tag)
-            src = (
-                tag.get("src")
-                or tag.get("data-src")
-                or tag.get("data-original")
-                or first_srcset_url(tag.get("srcset", ""))
-            )
-            if not src:
-                return alt
-            full = resolve(src)
-            if not full:
-                return alt
-            return f"![{alt or 'image'}]({full})"
-
-        def media_markdown(tag: Tag) -> str:
-            label = label_for(tag)
-            src = tag.get("src") or tag.get("poster") or tag.get("data-src")
-            if not src:
-                source = tag.find("source", src=True)
-                src = source.get("src") if source else None
-            if not src:
-                return label
-            full = resolve(src)
-            if not full:
-                return label
-            return f"[{label}]({full})" if label else f"<{full}>"
-
-        def render_inline(node) -> str:
-            parts: list[str] = []
-            for child in node.children:
-                if isinstance(child, NavigableString):
-                    parts.append(html.unescape(str(child)))
-                    continue
-                if not isinstance(child, Tag):
-                    continue
-                name = child.name.lower()
-                if name == "a":
-                    parts.append(link_markdown(child))
-                elif name == "img":
-                    parts.append(image_markdown(child))
-                elif name in {"video", "audio", "source", "iframe", "embed"}:
-                    parts.append(media_markdown(child))
-                elif name in {"strong", "b"}:
-                    inner = render_inline(child)
-                    parts.append(f"**{inner}**" if inner else "")
-                elif name in {"em", "i"}:
-                    inner = render_inline(child)
-                    parts.append(f"*{inner}*" if inner else "")
-                elif name == "code":
-                    inner = normalize_text(child.get_text(" ", strip=True))
-                    parts.append(f"`{inner}`" if inner else "")
-                elif name == "br":
-                    parts.append("\n")
-                else:
-                    parts.append(render_inline(child))
-            return normalize_text("".join(parts))
-
-        def table_markdown(table: Tag) -> list[str]:
-            rows: list[list[str]] = []
-            header_seen = False
-            for tr in table.find_all("tr"):
-                cells = tr.find_all(["th", "td"], recursive=False)
-                if not cells:
-                    continue
-                row = [escape_table_cell(render_inline(cell)) for cell in cells]
-                if any(cell.name.lower() == "th" for cell in cells):
-                    header_seen = True
-                rows.append(row)
-
-            if not rows:
-                return []
-
-            col_count = max(len(row) for row in rows)
-            rows = [row + [""] * (col_count - len(row)) for row in rows]
-            header = rows[0]
-            body = rows[1:]
-            separator = ["---"] * col_count
-
-            out = [
-                "| " + " | ".join(header) + " |",
-                "| " + " | ".join(separator) + " |",
-            ]
-            out.extend("| " + " | ".join(row) + " |" for row in body)
-            if not header_seen and len(rows) == 1:
-                out.append("")
-            return out
-
-        def code_lang(pre: Tag) -> str:
-            code = pre.find("code")
-            classes = []
-            if code:
-                raw = code.get("class") or []
-                classes = raw if isinstance(raw, list) else [raw]
-            for cls in classes:
-                cls = str(cls)
-                if cls.startswith("language-"):
-                    return cls.split("language-", 1)[1]
-            return ""
-
-        def render_list(list_tag: Tag, ordered: bool, depth: int = 0) -> None:
-            try:
-                index = int(list_tag.get("start", 1))
-            except (TypeError, ValueError):
-                index = 1
-
-            for li in list_tag.find_all("li", recursive=False):
-                marker = f"{li.get('value') or index}." if ordered else "-"
-                parts: list[str] = []
-                nested_lists: list[Tag] = []
-
-                for part in li.contents:
-                    if isinstance(part, NavigableString):
-                        parts.append(str(part))
-                    elif isinstance(part, Tag):
-                        name = part.name.lower()
-                        if name in {"ul", "ol"}:
-                            nested_lists.append(part)
-                        elif name == "br":
-                            parts.append(" ")
-                        else:
-                            parts.append(render_inline(part))
-
-                item = normalize_text(" ".join(parts))
-                if item:
-                    add_line(f"{'  ' * depth}{marker} {item}")
-
-                for nested in nested_lists:
-                    render_list(nested, nested.name.lower() == "ol", depth + 1)
-
-                if ordered:
-                    index += 1
-
-        block_tags = {
-            "article", "section", "main", "div", "header", "figure", "figcaption",
-            "h1", "h2", "h3", "h4", "h5", "h6", "p", "blockquote", "pre",
-            "ul", "ol", "li", "table", "dl", "dt", "dd",
-        }
-
-        def walk(node):
-            for child in node.children:
-                if isinstance(child, NavigableString):
-                    continue
-
-                if not isinstance(child, Tag):
-                    continue
-
-                name = child.name.lower()
-
-                if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-                    heading = render_inline(child)
-                    if heading:
-                        add_line("#" * int(name[1]) + " " + heading)
-                        add_blank()
-
-                elif name in {"ul", "ol"}:
-                    render_list(child, ordered=name == "ol")
-                    add_blank()
-
-                elif name in {"p", "blockquote"}:
-                    inner = render_inline(child)
-                    if inner:
-                        if name == "blockquote":
-                            for quote_line in inner.splitlines() or [inner]:
-                                add_line(f"> {quote_line}")
-                        else:
-                            add_line(inner)
-                        add_blank()
-
-                elif name == "pre":
-                    code_text = child.get_text("\n", strip=False).strip("\n")
-                    if code_text:
-                        add_line(f"```{code_lang(child)}")
-                        for code_line in code_text.splitlines():
-                            lines.append(code_line.rstrip())
-                        add_line("```")
-                        add_blank()
-
-                elif name == "table":
-                    table_lines = table_markdown(child)
-                    if table_lines:
-                        for table_line in table_lines:
-                            add_line(table_line)
-                        add_blank()
-
-                elif name == "dl":
-                    for item in child.find_all(["dt", "dd"], recursive=False):
-                        text = render_inline(item)
-                        if text:
-                            prefix = "**" if item.name.lower() == "dt" else "- "
-                            suffix = "**" if item.name.lower() == "dt" else ""
-                            add_line(f"{prefix}{text}{suffix}")
-                    add_blank()
-
-                elif name in {
-                    "html",
-                    "body",
-                    "article",
-                    "section",
-                    "main",
-                    "div",
-                    "header",
-                    "figure",
-                    "figcaption",
-                }:
-                    walk(child)
-
-                elif name == "img":
-                    img = image_markdown(child)
-                    if img:
-                        add_line(img)
-
-                elif name in {"video", "audio", "iframe", "embed"}:
-                    media = media_markdown(child)
-                    if media:
-                        add_line(media)
-
-                else:
-                    if child.find(list(block_tags)):
-                        walk(child)
-                    else:
-                        text = render_inline(child)
-                        if text:
-                            add_line(text)
-                            add_blank()
-
-        def meta_content(*keys: str) -> str:
-            for key in keys:
-                tag = soup.find("meta", attrs={"name": key}) or soup.find("meta", attrs={"property": key})
-                if tag and tag.get("content"):
-                    return normalize_text(tag["content"])
-            return ""
-
-        title = normalize_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
-        description = meta_content("description", "og:description", "twitter:description")
-        canonical_tag = soup.find("link", rel=lambda value: value and "canonical" in value)
-        canonical = resolve(canonical_tag["href"]) if canonical_tag and canonical_tag.get("href") else ""
-
-        if title:
-            add_line(f"# {title}")
-        add_line(f"Source: <{final_url}>")
-        if canonical and canonical != final_url:
-            add_line(f"Canonical: <{canonical}>")
-        if selector:
-            add_line(f"Selector: `{selector}` ({len(roots)} match{'es' if len(roots) != 1 else ''})")
-        if description:
-            add_line(f"> {description}")
-        add_blank()
-
-        for root in roots:
-            walk(root)
-            add_blank()
-
-        # Collapse consecutive blank lines
-        cleaned = []
-        prev_blank = False
-        for line in lines:
-            line = line.rstrip()
-            if not line:
-                if not prev_blank:
-                    cleaned.append("")
-                prev_blank = True
-            else:
-                cleaned.append(line)
-                prev_blank = False
-
-        text = truncate_output("\n".join(cleaned))
-        if not text:
-            text = f"[EMPTY] No readable content found at {final_url}."
-
-        log_write("[DONE]")
-        return text
-
-    except requests.Timeout:
-        msg = "[ERROR] Scraping failed: request timed out."
-        print(f"{RED}[SCRAPE FAILED] request timed out{RESET}")
-        log_write(msg)
-        return msg
-    except requests.TooManyRedirects:
-        msg = "[ERROR] Scraping failed: too many redirects."
-        print(f"{RED}[SCRAPE FAILED] too many redirects{RESET}")
-        log_write(msg)
-        return msg
-    except requests.RequestException as e:
-        print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
-        log_write(f"[ERROR] {e}")
-        return f"[ERROR] Scraping failed: {e}"
-    except Exception as e:
-        print(f"{RED}[SCRAPE FAILED] {e}{RESET}")
-        log_write(f"[ERROR] {e}")
-        return f"[ERROR] Scraping failed: {e}"
-
-
-_speak_thread: threading.Thread | None = None
-
-def speak(text: str, debug: bool = False, block: bool = False) -> None:
-    global _speak_thread
-
-    if _speak_thread and _speak_thread.is_alive():
-        _speak_thread.join()
-
-    _speak_thread = threading.Thread(
-        target=_speak_blocking,
-        args=(text, debug),
-        daemon=True,
-    )
-    _speak_thread.start()
-
-    if block:
-        _speak_thread.join()
+        return f"[ERROR] Failed to execute command: {e}"
 
 
 def _speak_blocking(text: str, debug: bool = False) -> str:
@@ -2531,10 +1326,9 @@ def _speak_blocking(text: str, debug: bool = False) -> str:
 
     safe_text = shlex.quote(render_for_voice(text))
     cmd = (
-        f"edge-tts "
-        f'--voice "en-US-AndrewNeural" '
-        f"--text {safe_text} "
-        f"--write-media - | mpv -"
+        f'edge-tts --voice "en-US-AndrewNeural" '
+        f'--text {safe_text} '
+        f'--write-media - | mpv -'
     )
     process = None
     try:
@@ -2544,15 +1338,9 @@ def _speak_blocking(text: str, debug: bool = False) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            start_new_session=(sys.platform != "win32"),
         )
         stdout, stderr = process.communicate()
-        if debug:
-            print(process)
-            if stdout:
-                print(stdout)
-            if stderr:
-                print(stderr)
         if stderr and stderr.strip():
             return stderr.strip()
         return "OK"
@@ -2560,22 +1348,25 @@ def _speak_blocking(text: str, debug: bool = False) -> str:
     except KeyboardInterrupt:
         if process is not None:
             try:
-                os.killpg(process.pid, signal.SIGINT)
+                process.kill()
             except Exception:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-        print("\nInterrupted")
+                pass
         return "Interrupted"
 
     except Exception as e:
-        if debug:
-            print(e)
         return f"[EXCEPTION] {e}"
 
 
-def sleep_mode() -> None:
+def speak(text: str, block: bool = False) -> None:
+    global _speak_thread
+    if block:
+        _speak_blocking(text)
+    else:
+        _speak_thread = threading.Thread(target=_speak_blocking, args=(text,), daemon=True)
+        _speak_thread.start()
+
+
+def sleep_mode() -> str:
     CONFIG_PATH = paths.CONFIG_FILE
     DEFAULT_CONFIG = {
         "stt_path":    os.path.join(BASE_DIR, "Termux-STT"),
@@ -2598,20 +1389,20 @@ def sleep_mode() -> None:
 
     try:
         from main import listen
+        check_cmd = "where edge-tts" if sys.platform == "win32" else "which edge-tts"
         if subprocess.run(
-            "which edge-tts",
+            check_cmd,
             shell=True,
             capture_output=True
         ).returncode != 0:
             raise Exception("edge-tts not found")
+        check_mpv = "where mpv" if sys.platform == "win32" else "which mpv"
         if subprocess.run(
-            "which mpv",
+            check_mpv,
             shell=True,
             capture_output=True
         ).returncode != 0:
             raise Exception("mpv not found")
-        if not os.path.isdir(os.path.join(BASE_DIR, "Termux-STT")):
-            raise Exception("Termux-STT not found.")
     except Exception as e:
         return f"[ERR] Wake mode not initiated. Reason: {e}"
     print(f"{GRAY}[SLEEP MODE ACTIVE]{RESET}")
@@ -2633,16 +1424,8 @@ def sleep_mode() -> None:
             continue
 
         print(f"{GRAY}[WAKE WORD DETECTED]{RESET}")
-        try:
-            relevant = is_wake_relevant(heard)
-            if relevant:
-                print(f"{GRAY}[WAKING UP]{RESET}")
-                return heard
-            else:
-                print(f"{GRAY}[IGNORED]{RESET}")
-        except Exception as e:
-            print(f"{RED}[WAKE CHECK FAILED] {e}{RESET}")
-            
+        return heard
+
 
 def intermediate_print(text: str, voice: bool = False) -> None:
     print("AI (Intermediate) >")
@@ -2650,21 +1433,30 @@ def intermediate_print(text: str, voice: bool = False) -> None:
     print()
     if voice:
         speak(render_for_voice(text))
-        
+
 
 def _check_battery() -> dict:
     try:
-        result = subprocess.run(
-            ["termux-battery-status"],
-            capture_output=True, text=True, timeout=8
-        )
-        data = json.loads(result.stdout)
-        return {
-            "level_pct":    data.get("percentage"),
-            "status":       data.get("status"),
-            "temperature_c": data.get("temperature"),
-            "plugged":      data.get("plugged"),
-        }
+        if sys.platform == "win32":
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Battery | Select-Object EstimatedChargeRemaining, BatteryStatus"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            return {"raw": res.stdout.strip()}
+        else:
+            try:
+                from tools.wrapper_termux_battery_status import get_battery_status
+                return get_battery_status()
+            except Exception:
+                result = subprocess.run(
+                    ["termux-battery-status"],
+                    capture_output=True, text=True, timeout=8
+                )
+                data = json.loads(result.stdout)
+                return {
+                    "level_pct":    data.get("percentage"),
+                    "status":       data.get("status"),
+                    "temperature_c": data.get("temperature"),
+                    "plugged":      data.get("plugged"),
+                }
     except Exception as e:
         return {"error": str(e)}
 
@@ -2680,7 +1472,6 @@ def _check_weather() -> dict:
         forecast = []
         for day in data.get("weather", [])[:3]:
             hourly = day.get("hourly", [])
-
             peak = max(hourly, key=lambda h: int(h.get("FeelsLikeC", 0))) if hourly else {}
 
             max_uv        = max((int(h.get("uvIndex",           0)) for h in hourly), default=0)
@@ -2730,57 +1521,90 @@ def _check_weather() -> dict:
 
 def _check_storage() -> dict:
     try:
-        result = subprocess.run(
-            ["df", "-h", os.path.expanduser("~")],
-            capture_output=True, text=True, timeout=8
-        )
-        lines = result.stdout.strip().splitlines()
-        if len(lines) >= 2:
-            parts = lines[1].split()
-            return {
-                "total":       parts[1],
-                "used":        parts[2],
-                "available":   parts[3],
-                "use_percent": parts[4],
-            }
-        return {"error": "unexpected df output"}
+        import shutil
+        total, used, free = shutil.disk_usage(os.path.expanduser("~"))
+        total_gb = f"{total / (1024**3):.1f}G"
+        used_gb = f"{used / (1024**3):.1f}G"
+        available_gb = f"{free / (1024**3):.1f}G"
+        use_percent = f"{used / total * 100:.1f}%"
+        return {
+            "total":       total_gb,
+            "used":        used_gb,
+            "available":   available_gb,
+            "use_percent": use_percent,
+        }
     except Exception as e:
         return {"error": str(e)}
 
 
 def _check_memory() -> dict:
     try:
-        info = {}
-        with open("/proc/meminfo") as f:
-            for line in f:
-                key, val = line.split(":", 1)
-                info[key.strip()] = val.strip()
-        total     = int(info["MemTotal"].split()[0])
-        available = int(info["MemAvailable"].split()[0])
-        used      = total - available
-        return {
-            "total_mb":     round(total     / 1024),
-            "used_mb":      round(used      / 1024),
-            "available_mb": round(available / 1024),
-            "use_percent":  round(used / total * 100, 1),
-        }
+        if sys.platform == "win32":
+            ps_code = "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize, (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_code]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            lines = result.stdout.strip().splitlines()
+            if len(lines) >= 2:
+                total_kb = int(lines[0].strip())
+                free_kb = int(lines[1].strip())
+                used_kb = total_kb - free_kb
+                return {
+                    "total_mb":     round(total_kb / 1024),
+                    "used_mb":      round(used_kb / 1024),
+                    "available_mb": round(free_kb / 1024),
+                    "use_percent":  round(used_kb / total_kb * 100, 1),
+                }
+            return {"error": "unexpected powershell memory output"}
+        else:
+            info = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    key, val = line.split(":", 1)
+                    info[key.strip()] = val.strip()
+            total     = int(info["MemTotal"].split()[0])
+            available = int(info["MemAvailable"].split()[0])
+            used      = total - available
+            return {
+                "total_mb":     round(total     / 1024),
+                "used_mb":      round(used      / 1024),
+                "available_mb": round(available / 1024),
+                "use_percent":  round(used / total * 100, 1),
+            }
     except Exception as e:
         return {"error": str(e)}
 
 
 def _check_network() -> dict:
     try:
-        result = subprocess.run(
-            ["termux-wifi-connectioninfo"],
-            capture_output=True, text=True, timeout=8
-        )
-        data = json.loads(result.stdout)
-        return {
-            "ssid":           data.get("ssid"),
-            "link_speed_mbps": data.get("link_speed_mbps"),
-            "rssi_dbm":       data.get("rssi"),
-            "ip":             data.get("ip"),
-        }
+        if sys.platform == "win32":
+            cmd = ["netsh", "wlan", "show", "interfaces"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            return {"raw": res.stdout.strip()[:500]}
+        else:
+            try:
+                from tools.wrapper_termux_wifi_scaninfo import get_wifi_scan_info
+                networks = get_wifi_scan_info()
+                if networks:
+                    best = networks[0]
+                    return {
+                        "ssid":           best.get("ssid"),
+                        "link_speed_mbps": "N/A",
+                        "rssi_dbm":       best.get("rssi"),
+                        "ip":             "N/A",
+                    }
+            except Exception:
+                pass
+            result = subprocess.run(
+                ["termux-wifi-connectioninfo"],
+                capture_output=True, text=True, timeout=8
+            )
+            data = json.loads(result.stdout)
+            return {
+                "ssid":           data.get("ssid"),
+                "link_speed_mbps": data.get("link_speed_mbps"),
+                "rssi_dbm":       data.get("rssi"),
+                "ip":             data.get("ip"),
+            }
     except Exception as e:
         return {"error": str(e)}
 
@@ -2817,11 +1641,9 @@ def run_diagnosis() -> dict:
     return results
 
 
-
-# --- WHATSAPP CORE TOOLS ---
+# ── WHATSAPP CORE TOOLS ────────────────────────────────────────────────────────
 
 def send_whatsapp_message(to_phone: str, message_text: str) -> str:
-    """Send a WhatsApp message to a specific phone number or contact ID."""
     log_write(f"[send_whatsapp_message] to:{to_phone} msg:{message_text}")
     print(f"{GRAY}[WhatsApp] Sending message to {to_phone}...{RESET}")
     if not WP_AVAILABLE:
@@ -2844,7 +1666,6 @@ def send_whatsapp_message(to_phone: str, message_text: str) -> str:
 
 
 def get_whatsapp_status() -> str:
-    """Get the current status of the WhatsApp bot client and any pending received messages."""
     log_write("[get_whatsapp_status]")
     print(f"{GRAY}[WhatsApp] Checking status...{RESET}")
     if not WP_AVAILABLE:
@@ -2871,7 +1692,6 @@ def get_whatsapp_status() -> str:
 
 
 def get_whatsapp_chats(filter_type: str = "all") -> str:
-    """List all WhatsApp chats and groups with JIDs, names, unread counts, and metadata."""
     log_write(f"[get_whatsapp_chats] filter:{filter_type}")
     print(f"{GRAY}[WhatsApp] Fetching chats (filter: {filter_type})...{RESET}")
     if not WP_AVAILABLE:
@@ -2907,7 +1727,6 @@ def get_whatsapp_chats(filter_type: str = "all") -> str:
 
 
 def silence_whatsapp_contact(jid: str, hours: float = 24) -> str:
-    """Silence auto-replies to a contact/group for N hours. hours=0 lifts immediately."""
     log_write(f"[silence_whatsapp_contact] jid:{jid} hours:{hours}")
     print(f"{GRAY}[WhatsApp] Silencing {jid} for {hours} hour(s)...{RESET}")
     if not WP_AVAILABLE:
@@ -2917,7 +1736,6 @@ def silence_whatsapp_contact(jid: str, hours: float = 24) -> str:
 
 
 def react_to_whatsapp_message(message_id: str, emoji: str) -> str:
-    """React to a WhatsApp message with an emoji."""
     log_write(f"[react_to_whatsapp_message] id:{message_id} emoji:{emoji}")
     print(f"{GRAY}[WhatsApp] Reacting to message {message_id} with {emoji}...{RESET}")
     if not WP_AVAILABLE:
@@ -2927,7 +1745,6 @@ def react_to_whatsapp_message(message_id: str, emoji: str) -> str:
 
 
 def get_whatsapp_contact_info(jid: str) -> str:
-    """Fetch profile info for a WhatsApp contact."""
     log_write(f"[get_whatsapp_contact_info] jid:{jid}")
     print(f"{GRAY}[WhatsApp] Fetching contact info for {jid}...{RESET}")
     if not WP_AVAILABLE:
@@ -2951,7 +1768,6 @@ def get_whatsapp_contact_info(jid: str) -> str:
 
 
 def get_whatsapp_group_participants(jid: str) -> str:
-    """List all participants of a WhatsApp group with their roles."""
     log_write(f"[get_whatsapp_group_participants] jid:{jid}")
     print(f"{GRAY}[WhatsApp] Fetching group participants for {jid}...{RESET}")
     if not WP_AVAILABLE:
@@ -2975,7 +1791,6 @@ def get_whatsapp_group_participants(jid: str) -> str:
 
 
 def download_whatsapp_media(message_id: str) -> str:
-    """Download and save media from a WhatsApp message to /tmp."""
     log_write(f"[download_whatsapp_media] id:{message_id}")
     print(f"{GRAY}[WhatsApp] Downloading media for message {message_id}...{RESET}")
     if not WP_AVAILABLE:
@@ -2989,7 +1804,9 @@ def download_whatsapp_media(message_id: str) -> str:
     if "." not in filename:
         ext = mimetypes.guess_extension(mimetype) or ".bin"
         filename += ext
-    out_path = f"/tmp/{filename}"
+    out_dir = os.path.join(paths.WORKSPACE_DIR, "downloads")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, filename)
     with open(out_path, "wb") as f:
         f.write(base64.b64decode(result["data"]))
     size_kb = os.path.getsize(out_path) // 1024
@@ -2997,7 +1814,6 @@ def download_whatsapp_media(message_id: str) -> str:
 
 
 def schedule_whatsapp_message(to: str, message: str, send_at: str) -> str:
-    """Schedule a WhatsApp message to be sent at a specific ISO datetime."""
     log_write(f"[schedule_whatsapp_message] to:{to} send_at:{send_at}")
     print(f"{GRAY}[WhatsApp] Scheduling message to {to} at {send_at}...{RESET}")
     if not WP_AVAILABLE:
@@ -3007,7 +1823,6 @@ def schedule_whatsapp_message(to: str, message: str, send_at: str) -> str:
 
 
 def search_whatsapp_chat(jid: str, query: str, limit: int = 20) -> str:
-    """Search for messages containing a keyword in a specific chat."""
     log_write(f"[search_whatsapp_chat] jid:{jid} query:{query}")
     print(f"{GRAY}[WhatsApp] Searching chat {jid} for '{query}'...{RESET}")
     if not WP_AVAILABLE:
@@ -3024,7 +1839,6 @@ def search_whatsapp_chat(jid: str, query: str, limit: int = 20) -> str:
 
 
 def archive_whatsapp_chat(jid: str, archive: bool = True) -> str:
-    """Archive or unarchive a WhatsApp chat."""
     log_write(f"[archive_whatsapp_chat] jid:{jid} archive:{archive}")
     print(f"{GRAY}[WhatsApp] {'Archiving' if archive else 'Unarchiving'} chat {jid}...{RESET}")
     if not WP_AVAILABLE:
@@ -3035,7 +1849,6 @@ def archive_whatsapp_chat(jid: str, archive: bool = True) -> str:
 
 
 def set_whatsapp_seen(jid: str) -> str:
-    """Mark a WhatsApp chat as read, clearing the unread count on the phone."""
     log_write(f"[set_whatsapp_seen] jid:{jid}")
     print(f"{GRAY}[WhatsApp] Marking chat {jid} as read...{RESET}")
     if not WP_AVAILABLE:
@@ -3045,7 +1858,6 @@ def set_whatsapp_seen(jid: str) -> str:
 
 
 def get_pending_whatsapp_messages(clear: bool = True) -> str:
-    """Retrieve and clear any pending received WhatsApp messages from the background queue."""
     log_write(f"[get_pending_whatsapp_messages] clear:{clear}")
     print(f"{GRAY}[WhatsApp] Retrieving pending messages (clear={clear})...{RESET}")
     if not WP_AVAILABLE:
@@ -3069,7 +1881,6 @@ def get_pending_whatsapp_messages(clear: bool = True) -> str:
 
 
 def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
-    """Fetch the recent chat message history timeline for a specific phone number or contact ID from WhatsApp."""
     log_write(f"[fetch_whatsapp_chat_history] to:{to_phone} limit:{limit}")
     print(f"{GRAY}[WhatsApp] Fetching chat history for {to_phone}...{RESET}")
     if not WP_AVAILABLE:
@@ -3091,7 +1902,6 @@ def fetch_whatsapp_chat_history(to_phone: str, limit: int = 5) -> str:
 
 
 def set_whatsapp_busy_mode(enabled: bool, instruction: str = "", exclude_all_groups_except: list = None) -> str:
-    """Enable or disable auto-reply 'busy' mode with a specific instruction and optional group exclusions."""
     log_write(f"[set_whatsapp_busy_mode] enabled:{enabled} instruction:{instruction} exclude_all_groups_except:{exclude_all_groups_except}")
     print(f"{GRAY}[WhatsApp] Setting busy mode (enabled={enabled})...{RESET}")
     if not WP_AVAILABLE:
@@ -3121,7 +1931,6 @@ def set_whatsapp_busy_mode(enabled: bool, instruction: str = "", exclude_all_gro
 
 
 def set_whatsapp_user_profile(profile: str) -> str:
-    """Set personal context about the user injected into every Orion auto-reply."""
     log_write(f"[set_whatsapp_user_profile] {profile}")
     print(f"{GRAY}[WhatsApp] Updating user profile context...{RESET}")
     if not WP_AVAILABLE:
@@ -3132,7 +1941,6 @@ def set_whatsapp_user_profile(profile: str) -> str:
 
 
 def get_whatsapp_report(clear: bool = False) -> str:
-    """Read whatsapp_log.jsonl and return a human-readable conversation report."""
     log_write(f"[get_whatsapp_report] clear:{clear}")
     print(f"{GRAY}[WhatsApp] Generating conversation report (clear={clear})...{RESET}")
     
@@ -3140,10 +1948,11 @@ def get_whatsapp_report(clear: bool = False) -> str:
         return "Termux-WP not available. Probably Termux-WP not installed."
     
     try:
-        if not os.path.exists(WA_LOG_FILE):
+        wa_log_file = os.path.join(paths.LOGS_DIR, "whatsapp_log.jsonl")
+        if not os.path.exists(wa_log_file):
             return "No WhatsApp log file found. No conversations have been recorded yet."
 
-        with open(WA_LOG_FILE, "r", encoding="utf-8") as fh:
+        with open(wa_log_file, "r", encoding="utf-8") as fh:
             lines = [l.strip() for l in fh if l.strip()]
 
         if not lines:
@@ -3159,8 +1968,6 @@ def get_whatsapp_report(clear: bool = False) -> str:
         if not entries:
             return "WhatsApp log contains no valid entries."
 
-        # Group by sender_id for a per-contact summary
-        from collections import defaultdict
         by_contact = defaultdict(list)
         for e in entries:
             by_contact[e["sender_id"]].append(e)
@@ -3182,7 +1989,7 @@ def get_whatsapp_report(clear: bool = False) -> str:
         report_lines.append("\n" + "=" * 50)
 
         if clear:
-            open(WA_LOG_FILE, "w", encoding="utf-8").close()
+            open(wa_log_file, "w", encoding="utf-8").close()
             report_lines.append(" Log cleared.")
 
         return "\n".join(report_lines)

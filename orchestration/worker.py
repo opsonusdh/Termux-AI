@@ -27,13 +27,17 @@ class Worker:
         print(f"{GRAY}[WORKER:{self.name}] type={task_type}{RESET}")
 
         if task_type == 'shell':
-            return self._run_subprocess(['bash', '-c', command], 'shell', start)
+            if sys.platform == "win32":
+                return self._run_subprocess(command, 'shell', start, shell=True)
+            else:
+                return self._run_subprocess(['bash', '-c', command], 'shell', start)
 
         elif task_type == 'python':
+            py_bin = 'python' if sys.platform == "win32" else 'python3'
             if os.path.exists(command):
-                cmd = ['python3', command]
+                cmd = [py_bin, command]
             else:
-                cmd = ['python3', '-c', command]
+                cmd = [py_bin, '-c', command]
             return self._run_subprocess(cmd, 'python', start)
 
         elif task_type == 'mock':
@@ -53,9 +57,9 @@ class Worker:
                 "duration":  time.time() - start,
             }
 
-    def _run_subprocess(self, cmd: list, task_type: str, start: float) -> dict:
+    def _run_subprocess(self, cmd, task_type: str, start: float, shell: bool = False) -> dict:
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
             return {
                 "worker":     self.name,
                 "task_type":  task_type,

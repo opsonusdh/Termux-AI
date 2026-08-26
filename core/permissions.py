@@ -1,24 +1,18 @@
 """
-permissions.py – Autonomy-first permission gate for ~/Termux-AI AI agent.
+permissions.py – Autonomy-first permission gate for Termux-AI and Windows-AI agent.
 
 Philosophy
 ----------
-The AI operates freely inside ~/Termux-AI. Permission is requested only when
+The AI operates freely inside its project root. Permission is requested only when
 an action would:
 
   1. Run a forbidden system command (sudo, reboot, …)
   2. Write into core/         – the AI's own source code
   3. Write into Termux-STT/   – the speech-to-text module
-  4. Write/execute outside ~/Termux-AI entirely
+  4. Write/execute outside project root entirely
 
 Everything else – workspace edits, package installs, reading files, running
 scripts, piping data, even installing packages – proceeds without interruption.
-
-Notes
------
-- Temporary files are best kept under ~/Termux-AI/workspace/.tmp/
-- Device sinks such as /dev/null are treated as non-files, so output redirection
-  to them does not trigger permission prompts.
 """
 
 import os
@@ -30,13 +24,13 @@ import subprocess
 from functools import lru_cache
 from typing import Iterable, List, Tuple
 
-#  Directory roots
-AI_ROOT   = os.path.abspath(os.path.expanduser("~/Termux-AI"))
+# Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
+BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AI_ROOT   = BASE_DIR
 CORE_DIR  = os.path.join(AI_ROOT, "core")
 STT_DIR   = os.path.join(AI_ROOT, "Termux-STT")
 WORKSPACE = os.path.join(AI_ROOT, "workspace")
 TEMP_ROOT = os.path.join(WORKSPACE, ".tmp")
-BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.json")
 DEFAULT_CONFIG = {
@@ -44,8 +38,7 @@ DEFAULT_CONFIG = {
     "tts_enabled": False,
 }
 
-# Keep the scratch area available. This is harmless and helps the agent
-# keep all disposable files in one predictable place.
+# Keep the scratch area available.
 os.makedirs(TEMP_ROOT, exist_ok=True)
 
 if not os.path.exists(CONFIG_PATH):
@@ -71,14 +64,9 @@ def is_voice_available():
     try:
         from main import listen  # noqa: F401
 
+        check_cmd = "where edge-tts" if sys.platform == "win32" else "which edge-tts"
         if subprocess.run(
-            "which edge-tts",
-            shell=True,
-            capture_output=True
-        ).returncode != 0:
-            return False
-        if subprocess.run(
-            "which mpv",
+            check_cmd,
             shell=True,
             capture_output=True
         ).returncode != 0:
@@ -97,35 +85,44 @@ PROTECTED_DIRS: List[str] = [CORE_DIR, STT_DIR]
 FORBIDDEN_COMMANDS = {
     "sudo", "su", "pkexec", "passwd",
     "shutdown", "reboot", "poweroff", "halt",
-    "mount", "umount",
+    "mount", "umount", "runas", "format",
 }
 
 # Pure read-only commands – they never create or change files on their own.
-# NOTE: we still check their output redirections below (echo "x" > core/f).
 READ_ONLY_COMMANDS = {
     "cat", "ls", "pwd", "whoami", "id", "echo", "printf",
     "head", "tail", "grep", "find", "wc", "sort", "uniq",
     "awk", "sed", "tree", "which", "command", "stat", "du",
     "file", "basename", "dirname", "realpath", "date", "env",
     "printenv", "diff", "less", "more", "type", "ldd", "strings",
+    # Windows native read-only commands:
+    "dir", "findstr", "where", "get-childitem", "get-content",
+    "get-location", "gci"
 }
 
 # Commands that modify the filesystem.
 MUTATING_COMMANDS = {
     "rm", "rmdir", "mv", "cp", "mkdir", "touch",
     "truncate", "tee", "ln", "chmod", "chown",
+    # Windows native file mutating commands:
+    "del", "erase", "move", "copy", "xcopy", "robocopy", "md",
+    "new-item", "remove-item", "copy-item", "move-item", "ni", "ri"
 }
 
 # Script/code interpreters – checked against what they are given to run.
 INTERPRETER_COMMANDS = {
     "python", "python3", "bash", "sh", "zsh",
     "node", "nodejs", "perl", "ruby",
+    # Windows native shell interpreters:
+    "powershell", "powershell.exe", "cmd", "cmd.exe", "pwsh", "pwsh.exe"
 }
 
 # Package managers – installing software is a normal, routine AI task.
 PACKAGE_MANAGERS = {
     "pip", "pip3", "npm", "pkg", "apt", "apt-get",
     "yarn", "npx", "gem", "cargo", "pipx",
+    # Windows package managers:
+    "winget", "choco", "scoop"
 }
 
 # Flags that accept a file output argument (wget -O, curl -o, etc.)
@@ -134,9 +131,11 @@ _OUTPUT_FLAGS = {"-o", "-O", "--output"}
 # Device sinks and pseudo-files that are safe to write to.
 _SPECIAL_SINKS = {
     os.path.realpath(os.devnull),
-    os.path.realpath("/dev/stdout"),
-    os.path.realpath("/dev/stderr"),
 }
+if sys.platform != "win32":
+    _SPECIAL_SINKS.add(os.path.realpath("/dev/stdout"))
+    _SPECIAL_SINKS.add(os.path.realpath("/dev/stderr"))
+
 _SPECIAL_PREFIXES = (
     "/proc/self/fd/",
     "/dev/fd/",
@@ -154,15 +153,15 @@ _DANGEROUS_INLINE_PATTERNS = [
 
 def _commonpath_is_inside(base: str, path: str) -> bool:
     try:
-        base = os.path.realpath(os.path.expanduser(base))
-        path = os.path.realpath(os.path.expanduser(path))
-        return os.path.commonpath([base, path]) == base
+        base = os.path.normpath(os.path.realpath(os.path.expanduser(base))).lower()
+        path = os.path.normpath(os.path.realpath(os.path.expanduser(path))).lower()
+        return os.path.commonpath([base, path]).lower() == base
     except Exception:
         return False
 
 
 def _expand_path(path: str) -> str:
-    return os.path.realpath(os.path.expanduser(path))
+    return os.path.normpath(os.path.realpath(os.path.expanduser(path)))
 
 
 def is_inside_root(path: str) -> bool:
@@ -184,7 +183,7 @@ def _is_protected(path: str) -> bool:
 
 
 def _is_outside_root(path: str) -> bool:
-    """True when path escapes ~/Termux-AI entirely."""
+    """True when path escapes project root entirely."""
     return not _commonpath_is_inside(AI_ROOT, _expand_path(path))
 
 
@@ -203,10 +202,6 @@ def _is_fd_dup_target(token: str) -> bool:
 
 
 def _is_owned_path(path: str) -> bool:
-    """
-    True when the path lives under a path that the agent previously registered
-    as disposable/owned. This is a best-effort helper for the wider agent.
-    """
     target = _expand_path(path)
     for owned in _load_owned_paths():
         if _commonpath_is_inside(owned, target):
@@ -215,10 +210,6 @@ def _is_owned_path(path: str) -> bool:
 
 
 def _path_verdict(path: str) -> Tuple[bool, str]:
-    """
-    Core sensitivity judgement for a single path.
-    Returns (needs_permission, human-readable reason).
-    """
     if _is_special_sink(path):
         return False, "OK"
 
@@ -231,9 +222,8 @@ def _path_verdict(path: str) -> Tuple[bool, str]:
         return True, f"path '{rel}' is inside protected directory '{protected_name}/'"
 
     if _is_outside_root(path):
-        return True, f"path '{path}' is outside ~/Termux-AI"
+        return True, f"path '{path}' is outside project directory {AI_ROOT}"
 
-    # Optional ownership hint for future integration.
     if _is_owned_path(path):
         return False, "OK"
 
@@ -268,7 +258,6 @@ def _save_owned_paths(paths: Iterable[str]) -> None:
 
 
 def register_owned_path(path: str) -> None:
-    """Record a file or directory as agent-owned/disposable."""
     target = _expand_path(path)
     owned = _load_owned_paths()
     owned.add(target)
@@ -276,7 +265,6 @@ def register_owned_path(path: str) -> None:
 
 
 def unregister_owned_path(path: str) -> None:
-    """Remove a file or directory from the ownership registry."""
     target = _expand_path(path)
     owned = _load_owned_paths()
     owned.discard(target)
@@ -286,7 +274,6 @@ def unregister_owned_path(path: str) -> None:
 # Shell parsing helpers -----------------------------------------------------
 
 def _split_shell_chain(cmd: str) -> List[str]:
-    """Split a shell command string on ;  &&  ||  and newlines."""
     parts: List[str] = []
     buf:   List[str] = []
     quote = None
@@ -348,7 +335,7 @@ def _split_shell_chain(cmd: str) -> List[str]:
 
 def _safe_split(cmd: str) -> List[str]:
     try:
-        return shlex.split(cmd, posix=True)
+        return shlex.split(cmd, posix=(sys.platform != "win32"))
     except Exception:
         return []
 
@@ -359,18 +346,12 @@ def _cmd_name(segment: str) -> str:
 
 
 def _extract_write_targets(tokens: List[str]) -> List[str]:
-    """
-    Return paths that shell output redirections write to.
-    Deliberately excludes < and << (input redirections) so reading
-    from a protected file is still allowed.
-    """
     targets: List[str] = []
     i = 0
 
     while i < len(tokens):
         tok = tokens[i]
 
-        # Separate operator + target token.
         if tok in {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"}:
             if i + 1 < len(tokens):
                 nxt = tokens[i + 1]
@@ -379,7 +360,6 @@ def _extract_write_targets(tokens: List[str]) -> List[str]:
                 i += 2
                 continue
 
-        # Embedded redirection like 2>/dev/null, 1>&2, &>/dev/null.
         m = re.match(r"^(?:(?P<fd>\d+)?(?P<op>>>|>>|>|<|<<)|(?P<amp>&>>|&>))(?P<target>.+)$", tok)
         if m:
             tgt = m.group("target").strip()
@@ -392,7 +372,6 @@ def _extract_write_targets(tokens: List[str]) -> List[str]:
 
 
 def _extract_output_flag_targets(tokens: List[str]) -> List[str]:
-    """Extract file paths from -o / -O / --output flags (curl, wget, …)."""
     targets: List[str] = []
     i = 1
     while i < len(tokens):
@@ -408,12 +387,10 @@ def _extract_output_flag_targets(tokens: List[str]) -> List[str]:
 
 
 def _non_flag_args(tokens: List[str]) -> List[str]:
-    """Return positional args, skipping shell-style option tokens."""
     return [t for t in tokens[1:] if t and not t.startswith("-")]
 
 
 def _target_directory_arg(tokens: List[str]) -> str | None:
-    """Extract destination directory for commands that support -t/--target-directory."""
     for i, tok in enumerate(tokens):
         if tok in {"-t", "--target-directory"} and i + 1 < len(tokens):
             return tokens[i + 1]
@@ -425,7 +402,6 @@ def _target_directory_arg(tokens: List[str]) -> str | None:
 # Per-category permission checks -------------------------------------------
 
 def _check_write_targets(cmd: str, targets: List[str]) -> Tuple[bool, str]:
-    """Shared helper: veto if any target in the list is sensitive."""
     for t in targets:
         needs, reason = _path_verdict(t)
         if needs:
@@ -434,115 +410,71 @@ def _check_write_targets(cmd: str, targets: List[str]) -> Tuple[bool, str]:
 
 
 def _check_mutating(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
-    """
-    File-mutating commands need permission only when their target paths
-    are protected or outside ~/Termux-AI. Writing freely to workspace/
-    or any other Termux-AI subdirectory is fine.
-    """
     positional = _non_flag_args(tokens)
     targets: List[str] = []
 
-    if cmd in {"rm", "rmdir", "mkdir", "touch", "truncate"}:
+    if cmd in {"rm", "rmdir", "mkdir", "touch", "truncate", "del", "erase", "remove-item", "ri", "new-item", "ni"}:
         targets = positional
 
     elif cmd == "tee":
-        # tee writes to its positional (non-flag) args
         targets = positional
 
-    elif cmd == "ln":
-        # ln writes the link name / destination directory, not the source.
+    elif cmd in {"ln", "copy-item", "move-item", "cp", "mv"}:
         dest_dir = _target_directory_arg(tokens)
         if dest_dir:
             targets = [dest_dir] + positional
         else:
             targets = positional[-1:] if positional else []
 
-    elif cmd == "cp":
-        # cp only writes to the destination, which is the final positional arg
-        # unless -t/--target-directory is used.
-        dest_dir = _target_directory_arg(tokens)
-        if dest_dir:
-            targets = [dest_dir]
-        else:
-            targets = positional[-1:] if positional else []
+    elif cmd in {"copy", "move", "xcopy", "robocopy"}:
+        targets = positional[-1:] if len(positional) > 1 else positional
 
-    elif cmd == "mv":
-        # mv is more sensitive because the source is effectively modified too.
-        dest_dir = _target_directory_arg(tokens)
-        if dest_dir:
-            targets = [dest_dir] + positional
-        else:
-            targets = positional
-
-    elif cmd in {"chmod", "chown"}:
-        # First positional arg is mode/owner spec, not a file path.
+    elif cmd in {"chmod", "chown", "icacls"}:
         targets = positional[1:] if len(positional) > 1 else []
 
-    # Shell redirections can also be the write target
     targets += _extract_write_targets(tokens)
 
-    # rm/rmdir with no recoverable path → be cautious
-    if cmd in {"rm", "rmdir"} and not targets:
+    if cmd in {"rm", "rmdir", "del", "erase", "remove-item", "ri"} and not targets:
         return True, f"'{cmd}' with no verifiable target path"
 
     return _check_write_targets(cmd, targets)
 
 
 def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
-    """
-    Interpreters are checked against *what* they run, not blanket-blocked.
-
-    • python -m …           → module runner (fine, covers pip via -m pip)
-    • python/bash -c "…"    → inline code scanned for protected refs & dangers
-    • python script.py      → script location checked
-    • bare python/bash      → interactive shell, fine
-    """
     i = 1
     while i < len(tokens):
         tok = tokens[i]
 
-        # -m flag: treat as a module/package-manager invocation – always fine
         if tok == "-m":
             return False, "OK"
 
-        # -c flag: analyse the inline code string
-        if tok == "-c" and i + 1 < len(tokens):
+        if tok in {"-c", "-Command", "/C"} and i + 1 < len(tokens):
             inline = tokens[i + 1]
 
-            # Protected directory name/path mentioned in the code
             for pdir in PROTECTED_DIRS:
                 name = os.path.basename(pdir)
                 if pdir in inline or name in inline:
                     return True, f"inline code references protected directory '{name}/'"
 
-            # Dangerous patterns (recursive rm, fork bomb, …)
             for pat in _DANGEROUS_INLINE_PATTERNS:
                 if pat.search(inline):
                     return True, "inline code contains a potentially destructive pattern"
 
             return False, "OK"
 
-        # Skip other flags
-        if tok.startswith("-"):
+        if tok.startswith("-") or tok.startswith("/"):
             i += 1
             continue
 
-        # First non-flag argument is the script file
         needs, reason = _path_verdict(tok)
         if needs:
             return True, f"'{cmd}': {reason}"
         return False, "OK"
 
-    # Bare interpreter with no arguments (interactive) – fine
     return False, "OK"
 
 
 def _check_generic(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
-    """
-    Catch-all for commands not in any other category.
-    Only blocks when output (via shell redirection or -o/-O flags)
-    lands in a protected directory or outside ~/Termux-AI.
-    """
     targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
     return _check_write_targets(cmd, targets)
 
@@ -556,38 +488,30 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
 
     cmd = _cmd_name(segment)
 
-    # 1. Hard stop
     if cmd in FORBIDDEN_COMMANDS:
         return True, f"'{cmd}' is a forbidden system command"
 
-    # 2. Pure read-only
-    # Still guard write redirections: `echo x > core/file` must be caught.
     if cmd in READ_ONLY_COMMANDS:
         write_targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
         if write_targets:
             return _check_write_targets(cmd, write_targets)
         return False, "OK"
 
-    # 3. Package managers
-    # Installing/removing packages is a routine, low-risk AI task.
     if cmd in PACKAGE_MANAGERS:
         targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
         if targets:
             return _check_write_targets(cmd, targets)
         return False, "OK"
 
-    # 4. File-mutating commands
     if cmd in MUTATING_COMMANDS:
         needs, reason = _check_mutating(cmd, tokens)
         if needs:
             return True, reason
-        # Redirections after command-specific checks still matter.
         redir_targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
         if redir_targets:
             return _check_write_targets(cmd, redir_targets)
         return False, "OK"
 
-    # 5. Interpreters
     if cmd in INTERPRETER_COMMANDS:
         needs, reason = _check_interpreter(cmd, tokens)
         if needs:
@@ -597,13 +521,10 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
             return _check_write_targets(cmd, redir_targets)
         return False, "OK"
 
-    # 6. Everything else
-    # Default is ALLOW. Only veto if output clearly writes to a sensitive path.
     return _check_generic(cmd, tokens)
 
 
 def command_needs_permission(cmd: str) -> bool:
-    """Quick boolean check – does this command chain need user confirmation?"""
     return any(
         _segment_needs_permission(seg)[0]
         for seg in _split_shell_chain(cmd)
@@ -611,13 +532,6 @@ def command_needs_permission(cmd: str) -> bool:
 
 
 def validate_command(cmd: str) -> Tuple[bool, str]:
-    """
-    Gate a full command string.
-
-    Returns (allowed: bool, reason: str).
-    Prompts the user only for genuinely sensitive operations; everything else
-    passes through silently.
-    """
     for segment in _split_shell_chain(cmd):
         needs, reason = _segment_needs_permission(segment)
 
@@ -625,20 +539,20 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
             print(f"\n[PERMISSION] The AI wants to run:\n  {segment}")
             print(f"  Reason: {reason}")
 
-            # Voice notification
             try:
                 if is_voice_available():
+                    text_alert = f"Permission required. Reason: {reason}"
                     subprocess.Popen(
                         (
                             'edge-tts '
                             '--voice "en-US-AndrewNeural" '
-                            f'--text "Permission required. Reason: {reason}" '
+                            f'--text "{text_alert}" '
                             '--write-media - | mpv -'
                         ),
                         shell=True,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        start_new_session=True,
+                        start_new_session=(sys.platform != "win32"),
                     )
             except Exception:
                 pass
@@ -653,14 +567,6 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
     return True, "OK"
 
 
-# Optional helper for the wider agent --------------------------------------
-
 def temp_path(name: str, session_id: str | None = None) -> str:
-    """
-    Return a disposable path under the agent temp directory.
-
-    Other parts of the agent can use this helper to keep temp files in a
-    predictable place, which makes cleanup and permission handling easier.
-    """
     sid = session_id or os.environ.get("TERMUX_AI_SESSION_ID") or "default"
     return os.path.join(TEMP_ROOT, sid, name)

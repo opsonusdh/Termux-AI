@@ -48,14 +48,17 @@ if STT_PATH not in sys.path:
 try:
     from main import listen
 
+    check_stt = "where edge-tts" if sys.platform == "win32" else "which edge-tts"
     if subprocess.run(
-        "which edge-tts",
+        check_stt,
         shell=True,
         capture_output=True
     ).returncode != 0:
         raise Exception("edge-tts not found")
+
+    check_mpv = "where mpv" if sys.platform == "win32" else "which mpv"
     if subprocess.run(
-        "which mpv",
+        check_mpv,
         shell=True,
         capture_output=True
     ).returncode != 0:
@@ -93,6 +96,7 @@ def _get_diag_history():
 
 def chat_loop():
     # Start WhatsApp Manager
+    log_write("—"*20)
     global config
     try:
         whatsapp_manager.start()
@@ -127,6 +131,7 @@ def chat_loop():
             reply = ask_ai(greeting_prompt, history=greeting_history, voice=config.get("tts_enabled", False))
             print(render_markdown_terminal(reply))
             speak(reply, block=True)
+            log_write(f"\nAI (Voice) > {reply}")
             history.append({"role": "user",      "content": greeting_prompt})
             history.append({"role": "assistant",  "content": reply})
         except:
@@ -201,6 +206,7 @@ def chat_loop():
                 time.sleep(1)
             continue
 
+        log_write(f"\nUser > {user_input}")
         print("\n[Thinking]")
 
         # Inject diagnosis on first user message if not already done at greeting
@@ -238,17 +244,16 @@ def chat_loop():
 
         if config.get("tts_enabled") and HAS_STT:
             print("\nAI (Voice) >")
+            log_write(f"\nAI (Voice) > {reply}")
         else:
             print("\nAI >")
+            log_write(f"\nAI > {reply}")
 
         print(render_markdown_terminal(reply))
         if config.get("tts_enabled") and HAS_STT:
             speak(reply, block=True)
 
         # Close the chunk with the final reply, then trigger background summarization.
-        # NOTE: do NOT append user/assistant to the session 'history' list here.
-        # build_history() reconstructs the full conversation from chunks on every turn.
-        # The session-level 'history' is reserved for pre-loop one-time injections only.
         _cm.close_chunk(reply)
         _cm.maybe_summarize_async()
 

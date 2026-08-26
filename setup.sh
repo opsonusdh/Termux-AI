@@ -1,12 +1,14 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 set -e
 
-echo "[setup] Installing system packages..."
-pkg install -y python rust git cmake clang which
+if command -v pkg >/dev/null 2>&1; then
+  echo "[setup] Termux detected. Updating system packages..."
+  pkg update -y && pkg upgrade -y || true
+  pkg install -y python rust git cmake clang which make pkg-config openssl libffi || true
+fi
 
-export ANDROID_API_LEVEL=24
-
-echo "[setup] Installing Python packages..."
+echo "[setup] Installing/upgrading Python packages..."
+python -m pip install -U pip setuptools wheel
 pip install openai requests beautifulsoup4 jsonschema
 
 echo "[setup] Creating directory structure..."
@@ -18,7 +20,8 @@ if [ ! -f config/api.keys ]; then
 {
   "google": ["YOUR_GOOGLE_API_KEY_HERE"],
   "nvidia": [],
-  "groq":   []
+  "groq":   [],
+  "openrouter": []
 }
 KEYS
   echo "  → config/api.keys created. Fill in your API keys."

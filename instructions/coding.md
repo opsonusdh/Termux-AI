@@ -10,6 +10,13 @@ Read the target file in full before making any modification. This is not optiona
 
 **Why:** You cannot safely modify a file whose current state you don't know. Memory of what a file "probably contains" is not the same as seeing it. Files change between sessions. A write based on a stale mental model causes regressions that are hard to trace.
 
+**Pre-edit Analysis:**
+Before proposing any code change:
+1. **Full File Read:** Always read the *entire* target file to understand its current state, context, and existing patterns.
+2. **Dependency Check:** Identify all direct and indirect dependencies of the code you intend to modify. Consider how changes might impact other modules or components.
+3. **Exact Line Number Identification:** For targeted edits, pinpoint the precise line numbers where changes need to occur.
+4. **Related Files:** If the task involves a new feature or significant change, proactively identify other files (e.g., `paths.py`, `core/tools.py`, `core/llm_client.py`) that might require corresponding updates.
+
 **Action-gated rule:** Before any `write_file`, `run_code` (that writes), or bash command that modifies a file — confirm you have read that file in the current session. If you haven't, read it first.
 
 ---
@@ -28,12 +35,12 @@ Before writing a single line, identify whether this is:
 
 ## 1. Environment Constraints
 
-Termux is a sandboxed Linux-like environment on Android:
+The system runs cross-platform across Termux/Android, Linux, macOS, and Windows:
 
-- **No global writable paths.** `/tmp`, `/var`, `/usr/local` are not reliably writable. All paths must resolve through `paths.py` under `~/Termux-AI`.
-- **IPC limitations.** Named pipes (FIFOs) and POSIX shared memory are restricted by Android's security model. Use `multiprocessing.Queue` exclusively.
-- **Resource pressure.** Mobile CPUs throttle aggressively. Keep threads minimal, always join subprocesses, and close file handles in `finally` blocks.
-- **No root assumed.** Never require root, SELinux policy changes, or kernel modules.
+- **No global writable paths.** `/tmp`, `/var`, `/usr/local` are not reliably writable across all platforms. All paths must resolve through `paths.py` under the project root.
+- **IPC limitations.** Named pipes (FIFOs) and POSIX shared memory are restricted on Android. Use `multiprocessing.Queue` exclusively.
+- **Resource pressure.** Keep threads minimal, always join subprocesses, and close file handles in `finally` blocks.
+- **Cross-Platform Compatibility.** Never hardcode OS-specific commands without a platform check (`sys.platform == 'win32'`).
 
 ---
 
@@ -42,12 +49,12 @@ Termux is a sandboxed Linux-like environment on Android:
 Every package has a strict responsibility. Crossing these boundaries causes regressions.
 
 | Package | Responsibility | Import Pattern |
-|---|---|---|
+|:---|:---|:---|
 | `core/` | LLM inference, tool dispatch, context management, chat loop | flat imports within core (`from tools import *`) |
 | `agent/` | Task state, planning, execution, validation | `from agent import state_manager` |
 | `orchestration/` | Multi-process delegation, IPC | `from orchestration import Manager, Worker` |
 | `reflection/` | Execution logging, failure analysis, auto-retry | `from reflection import ReflectionLoop, attempt_correction` |
-| `tools/` | Termux hardware API wrappers only | `from tools import wrapper_termux_battery_status` |
+| `tools/` | Platform hardware API wrappers only | `from tools import wrapper_termux_battery_status` |
 | `config/` | Secrets and runtime settings — no logic | read via `paths.API_KEYS_FILE`, `paths.CONFIG_FILE` |
 | `data/` | Persistent state and schemas — no logic | read/write via `agent/state_manager.py` only |
 
@@ -74,8 +81,6 @@ if _ROOT not in sys.path: sys.path.insert(1, _ROOT)
 
 This must appear **before** any project imports.
 
-**Why `core/` first:** `import tools` must resolve to `core/tools.py` (LLM-callable tool implementations), not to `tools/` (Termux API wrappers). These are different modules with different purposes.
-
 ---
 
 ## 4. Centralized Path Resolution (`paths.py`)
@@ -91,67 +96,53 @@ config_file   = paths.CONFIG_FILE
 logs_dir      = paths.LOGS_DIR
 ```
 
-**Never** construct paths with string literals, `os.getcwd()`, or `~`. The rule exists because manually constructed paths silently break when the working directory or install location changes.
-
 ---
 
-## 5. Error Handling
+## 5. Error Handling & Defensive Programming
 
-- **Never swallow exceptions silently.** No `except: pass` or `except Exception: pass` without at minimum a `print` or log entry. Silent failures are the hardest category of bug to diagnose.
-- **Structured fallbacks.** Hardware failures (battery check, Wi-Fi scan) must return a clean `{"status": "error", "error_type": "...", "message": "..."}` dict, not raise.
-- **Background threads must not crash silently.** The summarizer and reflection logger must wrap their work in `try/except` and exit cleanly on failure.
-- **Summarizer failures are non-fatal.** If `_call_summarizer()` returns `""`, the chunk has no summary yet. This is acceptable.
+- **Never swallow exceptions silently.** No `except: pass` or `except Exception: pass` without at minimum a `print` or log entry.
+- **Programmatic Exception Diagnosis:** Inspect errors programmatically.
+- **Idempotence & Safety:** Every script or background logic block must be safe to execute multiple times.
+- **Timeouts and Resource Limits:** When interacting with external systems or long-running operations, implement explicit timeouts.
 
 ---
 
 ## 6. Concurrency Rules
 
-- **Main inference thread is single.** `ask_ai()` is synchronous. Only one inference call runs at a time.
+- **Main inference thread is single.** `ask_ai()` is synchronous.
 - **Two background daemon threads permitted:** context summarizer (`maybe_summarize_async`) and reflection logger.
-- **Thread-safe state access.** `context_manager.py` uses `_lock` around all reads/writes to shared state. Always acquire the lock.
+- **Thread-safe state access.** `context_manager.py` uses `_lock` around all reads/writes to shared state.
 - **No shared mutable state between processes.** `orchestration/Manager` communicates exclusively through `multiprocessing.Queue`.
 
 ---
 
 ## 7. Adding a New LLM-Callable Tool
 
-The addition chain is always the same. Do not skip steps:
-
 1. Write the implementation function in `core/tools.py`
 2. Add the JSON schema to `TOOLS_DESCRIPTION` in `core/llm_client.py`
 3. Add the dispatch `lambda` to `_dispatch_tool()` in `core/llm_client.py`
-4. If the tool wraps a Termux API: create `tools/wrapper_<name>.py` first, call it from `core/tools.py`
+4. If the tool wraps a platform API: create wrapper first, call it from `core/tools.py`
 5. Run syntax check on all modified files
 6. Write a minimal dispatch test that calls `_dispatch_tool()` and asserts the return value
-
-Missing any step in this chain produces a tool that the LLM can request but the system cannot execute.
 
 ---
 
 ## 8. Testing & Verification
 
-Every change must be verified. The verification must match the scope:
+Every change must be verified:
 
-```python
-# Syntax check — required after every file edit
-python3 -c "import ast; ast.parse(open('core/tools.py').read()); print('OK')"
+```bash
+# Syntax compilation check
+python3 -m py_compile <path_to_file>
 
-# Import check — required after structural changes
+# Import check
 python3 -c "import sys; sys.path.insert(0,'core'); import tools; print('OK')"
-
-# Behavioral check — required after logic changes
-python3 -c "
-import sys; sys.path.insert(0,'core'); sys.path.insert(1,'.')
-import context_manager as cm
-cm.open_chunk('test'); cm.set_tool_context([]); cid = cm.close_chunk('reply')
-assert cid == 1, f'Expected 1, got {cid}'
-print('OK')
-"
 ```
 
-Integration tests must:
-1. Cover the full call chain (not just the changed function in isolation)
-2. Assert specific values, not just "no exception"
-3. Test edge cases: empty inputs, missing files, boundary conditions
+---
 
-See `verification.md` for the full verification protocol.
+## 9. Python 3.10+ Best Practices
+
+- **Type Hints:** Use explicit typing and `X | Y` for Union types.
+- **Pattern Matching:** Use `match ... case` statements where suitable.
+- **Context Managers:** Always use `with` statements for resource management.
