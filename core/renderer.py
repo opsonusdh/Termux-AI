@@ -723,7 +723,7 @@ def _render_thinking_block(block_text: str, term_width: int) -> List[str]:
     if not lines:
         return []
     
-    header = f"{MAG}{BOLD}🧠 Thinking Process:{RESET}"
+    header = f"{MAG}{BOLD}Thinking Process:{RESET}"
     rendered = [header]
     for l in lines:
         rendered.append(f"{GRAY}│ {l}{RESET}")
