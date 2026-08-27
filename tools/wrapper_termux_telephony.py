@@ -1,5 +1,9 @@
-"""Wrapper for termux-telephony-deviceinfo command.
+"""Wrapper for telephony deviceinfo command (Termux and Windows compatible).
 """
+import sys
+import os
+import platform
+import socket
 import subprocess
 import json
 
@@ -8,7 +12,21 @@ RED   = "\033[31m"
 RESET = "\033[0m"
 
 def get_telephony_device_info() -> dict:
-    """Execute `termux-telephony-deviceinfo` and return parsed JSON."""
+    """Retrieve telephony / system device info as JSON dict."""
+    if sys.platform == "win32":
+        try:
+            return {
+                "device_name": socket.gethostname(),
+                "os": f"Windows {platform.release()} ({platform.version()})",
+                "architecture": platform.architecture()[0],
+                "processor": platform.processor(),
+                "phone_number": "N/A (Desktop)",
+                "sim_operator_name": "N/A",
+                "network_type": "Ethernet/Wi-Fi"
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     try:
         print(f"{GRAY}[EXECUTING] termux-telephony-deviceinfo{RESET}")
         result = subprocess.run(['termux-telephony-deviceinfo'], capture_output=True, text=True, check=True)

@@ -1,14 +1,36 @@
-"""Wrapper for termux-location command.
+"""Wrapper for location command (Termux and Windows compatible).
 """
+import sys
 import subprocess
 import json
+import urllib.request
 
 GRAY  = "\033[90m"
 RED   = "\033[31m"
 RESET = "\033[0m"
 
 def get_location(provider: str = "gps", request: str = "once") -> dict:
-    """Execute `termux-location` with specified provider and request type and parse JSON."""
+    """Retrieve location data as JSON dict."""
+    if sys.platform == "win32":
+        try:
+            print(f"{GRAY}[EXECUTING] IP Location Fallback for Windows{RESET}")
+            req = urllib.request.Request("https://ipapi.co/json/", headers={"User-Agent": "curl/7.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                return {
+                    "latitude": data.get("latitude"),
+                    "longitude": data.get("longitude"),
+                    "altitude": 0.0,
+                    "accuracy": 1000.0,
+                    "provider": "ipapi-fallback",
+                    "city": data.get("city"),
+                    "region": data.get("region"),
+                    "country": data.get("country_name")
+                }
+        except Exception as e:
+            print(f"{RED}[ERR] Failed to fetch Windows IP location: {e}{RESET}")
+            return {"error": str(e)}
+
     valid_providers = {"gps", "network", "passive"}
     valid_requests = {"once", "last", "updates"}
 

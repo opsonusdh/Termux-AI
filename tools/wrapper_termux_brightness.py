@@ -1,10 +1,8 @@
-"""Wrapper for termux-brightness command.
-
-Provides a Python function to set the screen brightness.
+"""Wrapper for screen brightness command (Termux and Windows compatible).
 """
+import sys
 import subprocess
 
-# Gray debug trail colors
 GRAY  = "\033[90m"
 RED   = "\033[31m"
 RESET = "\033[0m"
@@ -12,9 +10,26 @@ RESET = "\033[0m"
 def set_brightness(brightness: str | int) -> bool:
     """Set the screen brightness.
     
-    brightness: int (0-255) or the string 'auto'
-    Returns True on success. Raises RuntimeError on failure.
+    brightness: int (0-255 or 0-100 on Windows) or 'auto'
     """
+    if sys.platform == "win32":
+        try:
+            val = str(brightness).strip()
+            if val.lower() == "auto":
+                pct = 50
+            else:
+                pct = int(val)
+                if pct > 100:
+                    pct = int(pct * 100 / 255)
+            ps_cmd = f"(Get-WmiObject -Namespace root/WMI -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, {pct})"
+            print(f"{GRAY}[EXECUTING] PowerShell WmiSetBrightness {pct}%{RESET}")
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd], check=True)
+            print(f"{GRAY}[OUT] Windows screen brightness set to {pct}%.{RESET}")
+            return True
+        except Exception as e:
+            print(f"{RED}[ERR] Failed to set Windows brightness: {e}{RESET}")
+            return False
+
     try:
         val = str(brightness).strip()
         cmd = ['termux-brightness', val]

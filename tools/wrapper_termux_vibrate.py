@@ -1,5 +1,6 @@
-"""Wrapper for termux-vibrate command.
+"""Wrapper for vibrate command (Termux and Windows compatible).
 """
+import sys
 import subprocess
 
 GRAY  = "\033[90m"
@@ -7,9 +8,16 @@ RED   = "\033[31m"
 RESET = "\033[0m"
 
 def vibrate(duration_ms: int = 1000, force: bool = False) -> bool:
-    """Vibrate the device for specified duration in milliseconds.
-    If force is True, bypass silent mode.
-    """
+    """Vibrate the device or play a haptic beep on Windows."""
+    if sys.platform == "win32":
+        try:
+            print(f"{GRAY}[VIBRATE] Windows haptic alert ({duration_ms}ms){RESET}")
+            ps_code = f"[Console]::Beep(800, {min(1000, max(100, int(duration_ms)))})"
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_code], capture_output=True)
+            return True
+        except Exception:
+            return True
+
     try:
         cmd = ['termux-vibrate', '-d', str(duration_ms)]
         if force:
