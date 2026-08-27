@@ -149,50 +149,58 @@ def _reset_provider(provider_id: str) -> None:
 
 def _msg_to_dict(msg) -> dict:
     if isinstance(msg, dict):
-        return msg
-
-    if hasattr(msg, "model_dump"):
+        d = dict(msg)
+    elif hasattr(msg, "model_dump"):
         try:
-            return msg.model_dump(exclude_none=True)
+            d = msg.model_dump(exclude_none=True)
         except Exception:
-            pass
+            d = {"role": getattr(msg, "role", "assistant")}
+    else:
+        d = {"role": getattr(msg, "role", "assistant")}
 
-    # Manual fallback for non-Pydantic objects
-    d: dict = {"role": getattr(msg, "role", "assistant")}
+    if not isinstance(msg, dict):
+        content = getattr(msg, "content", None)
+        reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+        if content is not None:
+            d["content"] = content
+        if reasoning:
+            d["reasoning"] = reasoning
 
-    content = getattr(msg, "content", None)
-    if content is not None:
-        d["content"] = content
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            serialised = []
+            for tc in tool_calls:
+                tc_dict: dict = {
+                    "id":       tc.id,
+                    "type":     "function",
+                    "function": {
+                        "name":      tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                extra = getattr(tc, "extra_content", None)
+                if extra is None and hasattr(tc, "model_extra"):
+                    extra = (tc.model_extra or {}).get("extra_content")
+                if extra is not None:
+                    if isinstance(extra, dict):
+                        tc_dict["extra_content"] = extra
+                    elif hasattr(extra, "model_dump"):
+                        tc_dict["extra_content"] = extra.model_dump(exclude_none=True)
+                    elif hasattr(extra, "__dict__"):
+                        tc_dict["extra_content"] = extra.__dict__
+                serialised.append(tc_dict)
+            d["tool_calls"] = serialised
 
-    tool_calls = getattr(msg, "tool_calls", None)
-    if tool_calls:
-        serialised = []
-        for tc in tool_calls:
-            tc_dict: dict = {
-                "id":       tc.id,
-                "type":     "function",
-                "function": {
-                    "name":      tc.function.name,
-                    "arguments": tc.function.arguments,
-                },
-            }
+    content = d.get("content")
+    reasoning = d.pop("reasoning", None) or d.pop("reasoning_content", None)
 
-            # Check all known locations for extra_content
-            extra = getattr(tc, "extra_content", None)
-            if extra is None and hasattr(tc, "model_extra"):
-                extra = (tc.model_extra or {}).get("extra_content")
-            if extra is not None:
-                if isinstance(extra, dict):
-                    tc_dict["extra_content"] = extra
-                elif hasattr(extra, "model_dump"):
-                    tc_dict["extra_content"] = extra.model_dump(exclude_none=True)
-                elif hasattr(extra, "__dict__"):
-                    tc_dict["extra_content"] = extra.__dict__
-
-            serialised.append(tc_dict)
-        d["tool_calls"] = serialised
+    if reasoning and not content:
+        d["content"] = f"<thought>\n{reasoning}\n</thought>"
+    elif reasoning and content and "<thought>" not in content and "<think>" not in content:
+        d["content"] = f"<thought>\n{reasoning}\n</thought>\n{content}"
 
     return d
+
 
 
 _DUMMY_SIG = "context_engineering_is_the_way_to_go"
@@ -206,35 +214,48 @@ def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict
 
     for m in messages:
         if not isinstance(m, dict):
-            result.append(m)
             continue
+
+        clean_m = {"role": m.get("role", "user")}
 
         content = m.get("content")
         if isinstance(content, (dict, list)):
-            m = {**m, "content": json.dumps(content, ensure_ascii=False)}
+            clean_m["content"] = json.dumps(content, ensure_ascii=False)
+        elif content is not None:
+            clean_m["content"] = content
+        else:
+            clean_m["content"] = None
 
-        if "tool_calls" not in m:
-            result.append(m)
-            continue
+        if "tool_call_id" in m:
+            clean_m["tool_call_id"] = m["tool_call_id"]
+        if "name" in m:
+            clean_m["name"] = m["name"]
 
-        new_tcs = []
-        for i, tc in enumerate(m["tool_calls"]):
-            tc = dict(tc)
-            has_sig = (
-                isinstance(tc.get("extra_content"), dict)
-                and tc["extra_content"].get("google", {}).get("thought_signature")
-            )
+        if "tool_calls" in m and m["tool_calls"]:
+            new_tcs = []
+            for i, tc in enumerate(m["tool_calls"]):
+                tc = dict(tc)
+                clean_tc = {
+                    "id": tc.get("id", ""),
+                    "type": tc.get("type", "function"),
+                    "function": tc.get("function", {}),
+                }
+                has_sig = (
+                    isinstance(tc.get("extra_content"), dict)
+                    and tc["extra_content"].get("google", {}).get("thought_signature")
+                )
 
-            if going_to_gemini and not has_sig:
-                if i == 0:
-                    tc["extra_content"] = {"google": {"thought_signature": _DUMMY_SIG}}
+                if going_to_gemini:
+                    if has_sig:
+                        clean_tc["extra_content"] = tc["extra_content"]
+                    elif i == 0:
+                        clean_tc["extra_content"] = {"google": {"thought_signature": _DUMMY_SIG}}
 
-            elif not going_to_gemini and has_sig:
-                tc.pop("extra_content", None)
+                new_tcs.append(clean_tc)
 
-            new_tcs.append(tc)
+            clean_m["tool_calls"] = new_tcs
 
-        result.append({**m, "tool_calls": new_tcs})
+        result.append(clean_m)
 
     return result
 
@@ -424,7 +445,6 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
 
 _EXHAUSTED_COOLDOWN = 30
 
-# Set to True to enable verbose debug output
 DEBUG = False
 
 def _dbg(*args) -> None:
@@ -524,8 +544,6 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                         if raw_extra and "extra_content" not in tc_dict:
                             tc_dict["extra_content"] = raw_extra
                             _dbg(f"  extra_content merged for tool call '{tc_dict['function']['name']}'")
-                        elif not raw_extra:
-                            _dbg(f"  no extra_content in raw JSON for '{tc_dict['function']['name']}'")
 
                 _dbg(f"← finish_reason: {finish_reason} | "
                      f"tool_calls: {len(msg_dict.get('tool_calls') or [])} | "
@@ -593,14 +611,10 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     f"{RED}[{pid}/{model_name}] Rate-limited. "
                     f"Keys remaining: {left}.{RESET}"
                 )
-                _dbg(f"  Rate-limit on key ...{api_key[-6:] if api_key else 'none'}. "
-                     f"Messages preserved: {len(messages)}. "
-                     f"Will retry same slot with next key.")
                 time.sleep(3)
                 if left == 0:
                     _reset_provider(pid)
                     slot += 1
-                    _dbg(f"  All keys exhausted for {pid}. Advancing to slot {slot}.")
 
             elif any(x in s for x in ("503", "UNAVAILABLE", "overloaded")):
                 print(f"{RED}[{pid}/{model_name}] Overloaded. Retrying in 5 s.{RESET}")
@@ -645,21 +659,16 @@ def run_agent_step(voice: bool = False) -> str:
         subtasks = state.get("subtasks", [])
         goal = state.get("goal", "Unknown")
 
-        # --- Supervisor: resolve which task to run (priority chain) ---
         task = None
-
-        # 1. active_task_id takes priority — we were interrupted mid-execution
         active_id = state.get("active_task_id")
         if active_id is not None:
             task = next((t for t in subtasks if t["id"] == active_id and t["status"] in ("pending", "active")), None)
 
-        # 2. cursor position
         if task is None:
             cursor = state.get("cursor")
             if cursor is not None:
                 task = next((t for t in subtasks if t["id"] == cursor and t["status"] in ("pending", "active")), None)
 
-        # 3. first pending task (recovery fallback)
         if task is None:
             task = next((t for t in subtasks if t["status"] in ("pending", "active")), None)
 
@@ -686,13 +695,11 @@ def run_agent_step(voice: bool = False) -> str:
             )
             return ask_ai(prompt, voice=voice)
 
-        # --- Worker Phase (attempt 1) ---
         state_manager.update_subtask(task_id, status="active",
                                      notes=f"Execution attempt {retry_count + 1} started.")
         worker_reply = _worker_call()
         state_manager.update_subtask(task_id, worker_output=worker_reply)
 
-        # --- Critic Phase (attempt 1) ---
         critic_reply = _critic_call(worker_reply)
         state_manager.update_subtask(task_id, critic_output=critic_reply,
                                      verification=critic_reply)
@@ -702,13 +709,11 @@ def run_agent_step(voice: bool = False) -> str:
                                          notes="Verified by LLM critic.")
             return f"Subtask {task_id} completed and verified."
 
-        # Critic says FAILED. One retry allowed.
         if retry_count >= 1:
             state_manager.update_subtask(task_id, status="failed",
                                          notes=f"Final failure after retry. {critic_reply}")
             return f"Subtask {task_id} failed after retry."
 
-        # --- Single retry ---
         print(f"{YELLOW}[Agent] Critic rejected task {task_id}. Running retry...{RESET}")
         state_manager.update_subtask(task_id, retry_count=1, status="active",
                                      notes=f"Retry 1 triggered. Previous: {critic_reply}")

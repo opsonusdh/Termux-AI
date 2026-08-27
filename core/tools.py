@@ -1996,3 +1996,60 @@ def get_whatsapp_report(clear: bool = False) -> str:
 
     except Exception as e:
         return f"[ERROR] Failed to read WhatsApp report: {e}"
+
+
+def ask_ai_simple(prompt: str, model_name: str = "gemini-2.5-flash-lite", system_prompt: str = "") -> str:
+    """Execute a lightweight tool-free LLM completion for internal tasks (summaries, auto-replies)."""
+    try:
+        from llm_client import API_KEYS, PROVIDERS
+        from openai import OpenAI
+
+        sys_content = system_prompt or "You are a helpful assistant."
+        messages = [
+            {"role": "system", "content": sys_content},
+            {"role": "user", "content": prompt}
+        ]
+
+        def _infer_provider(m: str) -> tuple[str, str]:
+            if m.startswith("openrouter") or "/" in m:
+                return "openrouter", "https://openrouter.ai/api/v1"
+            if m.startswith("gemini") or m.startswith("gemma"):
+                return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+            if "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
+                return "groq", "https://api.groq.com/openai/v1/"
+            if "nvidia" in m or "nemotron" in m or "deepseek" in m:
+                return "nvidia", "https://integrate.api.nvidia.com/v1"
+            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+        pid, url = _infer_provider(model_name)
+        keys = API_KEYS.get(pid, [])
+
+        if not keys:
+            for p, k_list in API_KEYS.items():
+                if k_list:
+                    pid = p
+                    url = PROVIDERS[p]["base_url"]
+                    keys = k_list
+                    break
+
+        if not keys:
+            return ""
+
+        headers = {"HTTP-Referer": "https://github.com/opsonusdh/Termux-AI", "X-Title": "Termux-AI"} if pid == "openrouter" else None
+
+        for key in keys:
+            try:
+                client = OpenAI(api_key=key, base_url=url, default_headers=headers)
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    max_tokens=1024
+                )
+                return resp.choices[0].message.content or ""
+            except Exception:
+                continue
+
+        return ""
+    except Exception as e:
+        return ""
+
