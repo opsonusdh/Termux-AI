@@ -717,9 +717,31 @@ def _render_list_line(indent: str, marker: str, body: str, ordered: bool = False
     return f"{prefix}{color}{marker}{RESET} {render_inline(body)}"
 
 
+def _render_thinking_block(block_text: str, term_width: int) -> List[str]:
+    """Render an explicit XML thinking block (<thought> or <think>) as a styled terminal blob."""
+    lines = block_text.strip().splitlines()
+    if not lines:
+        return []
+    
+    header = f"{MAG}{BOLD}🧠 Thinking Process:{RESET}"
+    rendered = [header]
+    for l in lines:
+        rendered.append(f"{GRAY}│ {l}{RESET}")
+    rendered.append(f"{GRAY}└{'─' * min(40, max(10, term_width - 4))}{RESET}")
+    return rendered
+
+
 def render_markdown_terminal(text: str) -> str:
-    """Transform markdown into ANSI-coloured terminal output."""
+    """Transform markdown into ANSI-coloured terminal output, rendering <thought> blobs distinctly."""
     term_width, _ = _term_size()
+
+    # Pre-process <thought> or <think> XML tags into distinct rendered blocks
+    def _repl_think(m):
+        content = m.group(1) or m.group(2) or ""
+        rendered_lines = _render_thinking_block(content, term_width)
+        return "\n" + "\n".join(rendered_lines) + "\n"
+
+    text = re.sub(r"<(?:thought|think)>\s*(.*?)\s*</(?:thought|think)>", _repl_think, text, flags=re.DOTALL)
 
     lines = text.splitlines()
     rendered: List[str] = []
@@ -851,6 +873,7 @@ def render_markdown_terminal(text: str) -> str:
         rendered.extend(_render_code_block(code_lines, code_lang, term_width))
 
     return "\n".join(rendered)
+
 
 
 render_for_printing = render_markdown_terminal

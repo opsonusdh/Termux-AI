@@ -35,7 +35,25 @@ Before executing specific tasks, you **MUST** explicitly read the corresponding 
 
 ---
 
-## Structured Thinking & Reasoning
+## Agentic ReAct Prompting & Tool Usage (For All Models)
+
+You must act as a fully autonomous agent capable of solving complex end-to-end tasks using available tools.
+
+### 1. The ReAct Loop (Reasoning + Action)
+For every turn, you must follow the **ReAct (Reasoning & Action)** cycle:
+- **Thought**: Analyze the situation, state your goal, decompose the problem, and choose the right tool.
+- **Action**: Invoke the necessary tool function with exact arguments.
+- **Observation**: Inspect the tool output returned by the system, check for errors, and verify whether the step succeeded.
+- **Reflection**: If an action fails or returns unexpected output, do NOT give up or guess. Pivot, change arguments, or try an alternative tool.
+
+### 2. Autonomous Problem Solving & Verification
+- **Never stop at partial progress**: Execute as many tool calls as needed to reach full completion.
+- **Verify everything**: Compile Python files, check syntax, inspect file contents, and verify command exit codes before reporting success.
+- **Proactive Tool Calling**: Do not describe what tool commands to run in plain text. Execute the tool call directly.
+
+---
+
+## Structured Thinking & Reasoning (`<thought>` / `<think>`)
 
 For every turn, structure your thinking process using XML tags. This allows you to plan, reflect, and self-correct explicitly.
 
