@@ -17,7 +17,7 @@ if _ROOT not in sys.path:
 import paths
 
 # Project imports
-from llm_client import ask_ai
+from llm_client import ask_ai, ask_agent, get_last_response_metadata
 from renderer import render_markdown_terminal, GRAY, RESET, RED
 from tools import *
 import context_manager as _cm
@@ -104,6 +104,8 @@ def chat_loop():
         print(f"{RED}[Whatsapp] Failed to start WhatsApp Manager: {e}{RESET}")
 
     history: list[dict] = []
+    agent_history: list[dict] = []
+    agent_mode = False
     _diag_injected = False
 
     print("Terminal AI ready. Type 'exit' to quit.")
@@ -195,15 +197,85 @@ def chat_loop():
                  json.dump(config, f, indent=4)
             continue
 
-        if user_input.lower().strip().startswith("agent") or user_input.lower().strip().startswith("/agent"):
+        command = user_input.strip()
+        command_low = command.casefold()
+
+        # Legacy project runner: /agent auto
+        if command_low in ("/agent auto", "agent auto"):
             import llm_client
-            is_auto = "auto" in user_input.lower()
             while True:
                 result = llm_client.run_agent_step(voice=config.get("tts_enabled", False))
                 print(render_markdown_terminal(f"**Agent Status:** {result}"))
-                if not is_auto or "No pending" in result or "failed" in result:
+                if "No pending" in result or "failed" in result.lower():
                     break
                 time.sleep(1)
+            continue
+
+        # Direct persistent agent mode.
+        if command_low == "/agent" or command_low.startswith("/agent "):
+            agent_mode = True
+            inline_prompt = command[6:].strip()
+            print(f"{GRAY}[Agent mode enabled. Use /normal to return.]{RESET}")
+            if inline_prompt:
+                try:
+                    print("\n[Agent Thinking]")
+                    reply = ask_agent(
+                        inline_prompt,
+                        history=list(agent_history),
+                        voice=config.get("tts_enabled", False),
+                    )
+                    print("\nAgent AI >")
+                    print(render_markdown_terminal(reply))
+                    if config.get("tts_enabled") and HAS_STT:
+                        speak(reply, block=True)
+                    metadata = get_last_response_metadata()
+                    assistant_msg = {"role": "assistant", "content": reply}
+                    if metadata.get("reasoning_details"):
+                        assistant_msg["reasoning_details"] = metadata["reasoning_details"]
+                        assistant_msg["_reasoning_provider"] = metadata.get("reasoning_provider")
+                    agent_history.extend([
+                        {"role": "user", "content": inline_prompt},
+                        assistant_msg,
+                    ])
+                except KeyboardInterrupt:
+                    print("\nInterrupted.")
+                except Exception as e:
+                    print(f"\n[ERROR] {e}")
+            continue
+
+        if command_low in ("/normal", "/chat"):
+            agent_mode = False
+            print(f"{GRAY}[Agent mode disabled. Returning to normal AI.]{RESET}")
+            continue
+
+        if agent_mode:
+            try:
+                print("\n[Agent Thinking]")
+                reply = ask_agent(
+                    user_input,
+                    history=list(agent_history),
+                    voice=config.get("tts_enabled", False),
+                )
+            except KeyboardInterrupt:
+                print("\nInterrupted.")
+                continue
+            except Exception as e:
+                print(f"\n[ERROR] {e}")
+                continue
+
+            print("\nAgent AI >")
+            print(render_markdown_terminal(reply))
+            if config.get("tts_enabled") and HAS_STT:
+                speak(reply, block=True)
+            metadata = get_last_response_metadata()
+            assistant_msg = {"role": "assistant", "content": reply}
+            if metadata.get("reasoning_details"):
+                assistant_msg["reasoning_details"] = metadata["reasoning_details"]
+                assistant_msg["_reasoning_provider"] = metadata.get("reasoning_provider")
+            agent_history.extend([
+                {"role": "user", "content": user_input},
+                assistant_msg,
+            ])
             continue
 
         log_write(f"\nUser > {user_input}")

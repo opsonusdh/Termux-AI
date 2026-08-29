@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import json
+import re
 
 # Path bootstrap
 _CORE   = os.path.dirname(os.path.abspath(__file__))
@@ -36,25 +37,38 @@ PROVIDERS: dict[str, dict] = {
     },
 }
 
-
 MODEL_SLOTS: list[dict] = [
-    {"provider_id": "google",     "name": "gemini-3.5-flash",                     "max_tokens": None},
-    {"provider_id": "google",     "name": "gemini-3-flash-preview",                "max_tokens": None},
-    {"provider_id": "openrouter", "name": "openrouter/auto",                      "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "deepseek/deepseek-r1",              "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "anthropic/claude-3.5-sonnet",       "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "google/gemini-2.0-flash-001",       "max_tokens": None},
+    # Google models
+    {"provider_id": "google", "name": "gemini-3.7-flash",                   "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.6-flash",                   "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.5-flash",                   "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.1-flash-lite",              "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.1-flash-lite-preview",      "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3-flash-preview",             "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.1-pro-preview",             "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.1-pro-preview-customtools", "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-flash-latest",                "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-flash-lite-latest",           "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-pro-latest",                  "max_tokens": None},
+    {"provider_id": "google", "name": "gemma-4-31b-it",                     "max_tokens": None},
+    {"provider_id": "google", "name": "gemma-4-26b-a4b-it",                 "max_tokens": None},
+
+    # Open-source Reasoning & Coding models (Groq, OpenRouter, Nvidia)
+    {"provider_id": "groq",       "name": "deepseek-r1-distill-llama-70b", "max_tokens": 4096},
+    {"provider_id": "groq",       "name": "qwen-2.5-32b",                  "max_tokens": 4096},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",           "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "deepseek/deepseek-r1",           "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "qwen/qwen3.8-27b",              "max_tokens": 4096},
     {"provider_id": "openrouter", "name": "meta-llama/llama-3.3-70b-instruct", "max_tokens": 4096},
-    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                  "max_tokens": 4096},
-    {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-v4-flash",        "max_tokens": 4096},
-    {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-r1",              "max_tokens": 4096},
-    {"provider_id": "google",     "name": "gemma-4-31b-it",                       "max_tokens": None},
-    {"provider_id": "google",     "name": "gemini-2.5-flash",                     "max_tokens": None},
-    {"provider_id": "google",     "name": "gemini-3.1-flash-lite",                "max_tokens": None},
-    {"provider_id": "groq",       "name": "qwen/qwen3-32b",                       "max_tokens": None},
-    {"provider_id": "groq",       "name": "deepseek-r1-distill-llama-70b",        "max_tokens": None},
-    {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "max_tokens": 4096},
-    {"provider_id": "google",     "name": "gemini-2.5-flash-lite",                "max_tokens": None},
+    {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-r1",       "max_tokens": 4096},
+    {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-70b-instruct", "max_tokens": 4096},
+]
+
+# Agent mode model slots
+AGENT_MODEL_SLOTS: list[dict] = [
+    {"provider_id": "groq",       "name": "qwen/qwen3.8-27b", "max_tokens": 4096},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b", "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "cohere/north-mini-code:free", "max_tokens": None}
 ]
 
 
@@ -115,39 +129,219 @@ def _warn_missing_keys() -> None:
 
 _warn_missing_keys()
 
-_key_cursor: dict[str, int]      = {}
-_bad_keys:   dict[str, set[str]] = {}
+# Availability state is scoped as narrowly as possible.
+# Rate limits/transient failures affect one provider + key + model only.
+# Invalid credentials disable one key; 404/model-not-found disables one model.
+_key_cursor: dict[tuple[str, str], int] = {}
+_bad_keys: dict[str, set[str]] = {}
+_bad_models: set[tuple[str, str]] = set()
+_account_restricted_until: dict[str, float] = {}
+_rate_limited_until: dict[tuple[str, str, str], float] = {}
+_transient_until: dict[tuple[str, str, str], float] = {}
+
+_RATE_LIMIT_COOLDOWN = 30.0
+_TRANSIENT_COOLDOWN = 5.0
+_ACCOUNT_RESTRICTION_COOLDOWN = 300.0
 
 
-def _next_key(provider_id: str) -> str | None:
+def _next_key(provider_id: str, model_name: str) -> str | None:
     keys = API_KEYS.get(provider_id, [])
-    if not keys:
+    if not keys or (provider_id, model_name) in _bad_models:
         return None
-    bad       = _bad_keys.get(provider_id, set())
-    available = [k for k in keys if k not in bad]
+    if _account_restricted_until.get(provider_id, 0.0) > time.monotonic():
+        return None
+
+    now = time.monotonic()
+    bad = _bad_keys.get(provider_id, set())
+    available = [
+        key for key in keys
+        if key not in bad
+        and _rate_limited_until.get((provider_id, key, model_name), 0.0) <= now
+        and _transient_until.get((provider_id, key, model_name), 0.0) <= now
+    ]
     if not available:
         return None
-    idx = _key_cursor.get(provider_id, 0) % len(available)
-    _key_cursor[provider_id] = idx + 1
-    return available[idx]
+
+    cursor_key = (provider_id, model_name)
+    idx = _key_cursor.get(cursor_key, 0) % len(keys)
+    for offset in range(len(keys)):
+        key = keys[(idx + offset) % len(keys)]
+        if key in available:
+            _key_cursor[cursor_key] = (keys.index(key) + 1) % len(keys)
+            return key
+    return None
 
 
-def _available_key_count(provider_id: str) -> int:
+def _available_key_count(provider_id: str, model_name: str) -> int:
+    if (provider_id, model_name) in _bad_models:
+        return 0
+    if _account_restricted_until.get(provider_id, 0.0) > time.monotonic():
+        return 0
     keys = API_KEYS.get(provider_id, [])
-    bad  = _bad_keys.get(provider_id, set())
-    return len([k for k in keys if k not in bad])
+    bad = _bad_keys.get(provider_id, set())
+    now = time.monotonic()
+    return sum(
+        1
+        for key in keys
+        if key not in bad
+        and _rate_limited_until.get((provider_id, key, model_name), 0.0) <= now
+        and _transient_until.get((provider_id, key, model_name), 0.0) <= now
+    )
 
 
 def _mark_bad(provider_id: str, key: str) -> None:
+    # Invalid/forbidden credentials are key-wide.
     _bad_keys.setdefault(provider_id, set()).add(key)
 
 
+def _mark_account_restricted(provider_id: str) -> None:
+    # Organization/account restrictions affect every key under this provider.
+    _account_restricted_until[provider_id] = (
+        time.monotonic() + _ACCOUNT_RESTRICTION_COOLDOWN
+    )
+
+
+def _mark_model_bad(provider_id: str, model_name: str) -> None:
+    _bad_models.add((provider_id, model_name))
+
+
+def _mark_rate_limited(provider_id: str, key: str, model_name: str) -> None:
+    _rate_limited_until[(provider_id, key, model_name)] = (
+        time.monotonic() + _RATE_LIMIT_COOLDOWN
+    )
+
+
+def _mark_transient(provider_id: str, key: str, model_name: str) -> None:
+    _transient_until[(provider_id, key, model_name)] = (
+        time.monotonic() + _TRANSIENT_COOLDOWN
+    )
+
+
+def _clear_expired_state() -> None:
+    now = time.monotonic()
+    for provider_id, until in list(_account_restricted_until.items()):
+        if until <= now:
+            _account_restricted_until.pop(provider_id, None)
+    for store in (_rate_limited_until, _transient_until):
+        for identity, until in list(store.items()):
+            if until <= now:
+                store.pop(identity, None)
+
+
+def _temporary_retry_delay() -> float | None:
+    _clear_expired_state()
+    now = time.monotonic()
+    deadlines = [
+        until
+        for until in (*_rate_limited_until.values(), *_transient_until.values())
+        if until > now
+    ]
+    if not deadlines:
+        return None
+    return max(0.0, min(deadlines) - now)
+
+
 def _reset_provider(provider_id: str) -> None:
-    _bad_keys[provider_id]   = set()
-    _key_cursor[provider_id] = 0
+    # Compatibility helper: reset temporary provider state. Permanent failures
+    # stay disabled, except account restrictions which are deliberately cooldown-based.
+    _account_restricted_until.pop(provider_id, None)
+    for key in list(_key_cursor):
+        if key[0] == provider_id:
+            _key_cursor.pop(key, None)
+    for identity in list(_rate_limited_until):
+        if identity[0] == provider_id:
+            _rate_limited_until.pop(identity, None)
+    for identity in list(_transient_until):
+        if identity[0] == provider_id:
+            _transient_until.pop(identity, None)
+
+
+def _error_status(exc: Exception) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    message = str(exc)
+    for code in (400, 401, 403, 404, 429, 500, 502, 503, 504):
+        if re.search(rf"\b{code}\b", message):
+            return code
+    return None
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    status = _error_status(exc)
+    s = str(exc).lower()
+    return status == 429 or any(
+        x in s for x in ("resource_exhausted", "rate limit", "rate-limit", "too many requests")
+    )
+
+
+def _is_transient(exc: Exception) -> bool:
+    status = _error_status(exc)
+    s = str(exc).lower()
+    return status in {500, 502, 503, 504} or any(
+        x in s for x in ("temporarily unavailable", "server error", "overloaded", "unavailable")
+    )
+
+
+def _is_account_restriction(exc: Exception) -> bool:
+    """Identify 400-level account/org restrictions that are not model errors."""
+    status = _error_status(exc)
+    if status != 400:
+        return False
+    s = str(exc).lower()
+    return any(
+        x in s
+        for x in (
+            "organization has been restricted",
+            "organization is restricted",
+            "organization has been suspended",
+            "organization is suspended",
+            "account has been restricted",
+            "account is restricted",
+            "account has been suspended",
+            "account is suspended",
+            "project has been disabled",
+            "project is disabled",
+        )
+    )
+
+
+def _is_context_error(exc: Exception) -> bool:
+    """Identify request-size/context errors independently of HTTP status."""
+    s = str(exc).lower()
+    return any(
+        x in s
+        for x in (
+            "context", "token_limit", "max_tokens", "exceed",
+            "excluding", "window", "too many tokens", "prompt is too long",
+        )
+    )
+
+
+def _is_invalid_request(exc: Exception) -> bool:
+    """Identify recoverable 400/422 request-shape errors."""
+    status = _error_status(exc)
+    if status not in {400, 422}:
+        return False
+    if _is_account_restriction(exc) or _is_context_error(exc):
+        return False
+    s = str(exc).lower()
+    return any(
+        x in s
+        for x in (
+            "invalid request", "invalid parameter", "invalid value",
+            "invalid argument", "malformed", "unsupported field",
+            "all elements", "expected", "must be",
+        )
+    )
 
 
 def _msg_to_dict(msg) -> dict:
+    """Serialize an SDK message while preserving native reasoning metadata."""
     if isinstance(msg, dict):
         d = dict(msg)
     elif hasattr(msg, "model_dump"):
@@ -160,21 +354,27 @@ def _msg_to_dict(msg) -> dict:
 
     if not isinstance(msg, dict):
         content = getattr(msg, "content", None)
-        reasoning = getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None)
+        reasoning = getattr(msg, "reasoning", None) or getattr(
+            msg, "reasoning_content", None
+        )
+        reasoning_details = getattr(msg, "reasoning_details", None)
+
         if content is not None:
             d["content"] = content
         if reasoning:
             d["reasoning"] = reasoning
+        if reasoning_details is not None:
+            d["reasoning_details"] = reasoning_details
 
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             serialised = []
             for tc in tool_calls:
-                tc_dict: dict = {
-                    "id":       tc.id,
-                    "type":     "function",
+                tc_dict = {
+                    "id": tc.id,
+                    "type": "function",
                     "function": {
-                        "name":      tc.function.name,
+                        "name": tc.function.name,
                         "arguments": tc.function.arguments,
                     },
                 }
@@ -191,13 +391,10 @@ def _msg_to_dict(msg) -> dict:
                 serialised.append(tc_dict)
             d["tool_calls"] = serialised
 
-    content = d.get("content")
-    reasoning = d.pop("reasoning", None) or d.pop("reasoning_content", None)
-
-    if reasoning and not content:
-        d["content"] = f"<thought>\n{reasoning}\n</thought>"
-    elif reasoning and content and "<thought>" not in content and "<think>" not in content:
-        d["content"] = f"<thought>\n{reasoning}\n</thought>\n{content}"
+    if "reasoning_details" not in d and hasattr(msg, "model_extra"):
+        extra = getattr(msg, "model_extra", None) or {}
+        if isinstance(extra, dict) and "reasoning_details" in extra:
+            d["reasoning_details"] = extra["reasoning_details"]
 
     return d
 
@@ -208,7 +405,11 @@ _DUMMY_SIG = "context_engineering_is_the_way_to_go"
 _GEMINI_PROVIDERS = {"google"}
 
 
-def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict]:
+def _sanitize_messages_for_provider(
+    messages: list[dict],
+    pid: str,
+    preserve_native_reasoning: bool = True,
+) -> list[dict]:
     going_to_gemini = pid in _GEMINI_PROVIDERS
     result = []
 
@@ -230,6 +431,14 @@ def _sanitize_messages_for_provider(messages: list[dict], pid: str) -> list[dict
             clean_m["tool_call_id"] = m["tool_call_id"]
         if "name" in m:
             clean_m["name"] = m["name"]
+
+        if (
+            preserve_native_reasoning
+            and pid == "openrouter"
+            and m.get("_reasoning_provider") == "openrouter"
+            and "reasoning_details" in m
+        ):
+            clean_m["reasoning_details"] = m["reasoning_details"]
 
         if "tool_calls" in m and m["tool_calls"]:
             new_tcs = []
@@ -347,19 +556,19 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 filter_type  = g("filter_type", "all")
                             ),
         "get_pending_whatsapp_messages": lambda: get_pending_whatsapp_messages(
-                                clear        = bool(g("clear", True)),
+                                clear        = _safe_bool(g("clear", True)),
                             ),
         "fetch_whatsapp_chat_history": lambda: fetch_whatsapp_chat_history(
                                 to_phone     = g("to_phone", ""),
                                 limit        = int(g("limit", 5)),
                             ),
         "set_whatsapp_busy_mode": lambda: set_whatsapp_busy_mode(
-                                enabled      = bool(g("enabled", False)),
+                                enabled      = _safe_bool(g("enabled", False)),
                                 instruction  = g("instruction", ""),
                                 exclude_all_groups_except = g("exclude_all_groups_except", None)
                             ),
         "get_whatsapp_report": lambda: get_whatsapp_report(
-                                clear        = bool(g("clear", False)),
+                                clear        = _safe_bool(g("clear", False)),
                             ),
         "set_whatsapp_user_profile": lambda: set_whatsapp_user_profile(
                                 profile      = g("profile", ""),
@@ -411,7 +620,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                             ),
         "archive_whatsapp_chat": lambda: archive_whatsapp_chat(
                                 jid     = g("jid", ""),
-                                archive = bool(g("archive", True)),
+                                archive = _safe_bool(g("archive", True)),
                             ),
         "set_whatsapp_seen": lambda: set_whatsapp_seen(
                                 jid = g("jid", ""),
@@ -419,7 +628,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "delegate_subtask":  lambda: delegate_subtask(
                                 task       = g("task", ""),
                                 context    = g("context", ""),
-                                model      = g("model", "gemini-2.5-flash-lite"),
+                                model      = g("model", "openai/gpt-oss-120b"),
                                 max_tokens = int(g("max_tokens", 2048)),
                              ),
         "generate_image":    lambda: generate_image(
@@ -427,11 +636,55 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 quality  = g("quality", "flash"),
                                 filename = g("filename", None),
                              ),
+        "list_directory":    lambda: list_directory(
+                                path      = g("path", "."),
+                                recursive = _safe_bool(g("recursive", False)),
+                                max_depth = int(g("max_depth", 3)),
+                             ),
+        "search_in_files":  lambda: search_in_files(
+                                path             = g("path", "."),
+                                query            = g("query", ""),
+                                file_pattern     = g("file_pattern", "*"),
+                                case_sensitive   = _safe_bool(g("case_sensitive", False)),
+                                max_results      = int(g("max_results", 50)),
+                                max_file_size_kb = int(g("max_file_size_kb", 2048)),
+                             ),
+        "search_files":      lambda: search_files(
+                                path        = g("path", "."),
+                                pattern     = g("pattern", ""),
+                                file_type   = g("file_type", "all"),
+                                max_results = int(g("max_results", 50)),
+                             ),
+        "rename_file":       lambda: rename_file(
+                                old_path = g("old_path", ""),
+                                new_path = g("new_path", ""),
+                             ),
+        "delete_file":       lambda: delete_file(
+                                path  = g("path", ""),
+                                force = _safe_bool(g("force", False)),
+                             ),
+        "http_request":      lambda: http_request(
+                                url     = g("url", ""),
+                                method  = g("method", "GET"),
+                                headers = g("headers", None),
+                                body    = g("body", None),
+                                timeout = int(g("timeout", 15)),
+                             ),
+        "get_datetime":      lambda: get_datetime(),
     }
 
     fn = routes.get(name)
     if fn:
-        res = fn()
+        started = time.monotonic()
+        print(f"{GRAY}[TOOL] {name}{RESET}")
+        try:
+            res = fn()
+        except Exception as exc:
+            elapsed = time.monotonic() - started
+            print(f"{RED}[TOOL ERROR] {name} ({elapsed:.2f}s): {exc}{RESET}")
+            return f"[TOOL ERROR] {name} raised an exception: {exc}"
+        elapsed = time.monotonic() - started
+        print(f"{GRAY}[TOOL DONE] {name} ({elapsed:.2f}s){RESET}")
         if res is None:
             return "Success"
         if isinstance(res, str):
@@ -445,109 +698,238 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
 
 _EXHAUSTED_COOLDOWN = 30
 
+
+def _safe_bool(value) -> bool:
+    """Normalize booleans coming from model-generated JSON arguments."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"false", "0", "no", "off", "none", "null", ""}:
+            return False
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+    return bool(value)
+
+
 DEBUG = False
+
+_last_response_metadata: dict = {}
+
 
 def _dbg(*args) -> None:
     if DEBUG:
         print(f"[DEBUG]", *args)
 
 
-def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) -> str:
-    memory_block   = build_memory_block(prompt)
-    system_content = (memory_block + "\n\n" + SYSTEM_PROMPT) if memory_block else SYSTEM_PROMPT
+def get_last_response_metadata() -> dict:
+    """Return native reasoning metadata from the most recent response."""
+    return dict(_last_response_metadata)
 
+
+def _display_reasoning(
+    provider_id: str,
+    model_name: str,
+    reasoning: object = None,
+    reasoning_details: object = None,
+) -> None:
+    """Display provider-supplied reasoning without mixing it into content."""
+    if not reasoning and not reasoning_details:
+        return
+
+    print(f"\n{GRAY}[Reasoning | {provider_id}/{model_name}]{RESET}")
+
+    if reasoning:
+        print(str(reasoning).rstrip())
+    elif reasoning_details:
+        if isinstance(reasoning_details, list):
+            for item in reasoning_details:
+                if isinstance(item, dict) and item.get("text"):
+                    print(str(item["text"]).rstrip())
+                elif item:
+                    print(str(item).rstrip())
+        else:
+            print(str(reasoning_details).rstrip())
+
+    print(f"{GRAY}[End reasoning]{RESET}\n")
+
+
+_AGENT_SYSTEM_PROMPT = """You are the direct coding and reasoning agent for Termux-AI.
+
+Solve the user's task, especially software engineering, debugging, code editing,
+project investigation, and multi-step reasoning.
+
+Use the available project tools actively. Inspect real files before making
+assumptions, edit files when asked, execute tests/commands when appropriate,
+and verify changes. Never claim a change was made unless a tool actually made it.
+Preserve the existing architecture unless a change is necessary for correctness.
+"""
+
+
+def _ask_with_slots(
+    prompt: str,
+    history: list[dict] | None,
+    voice: bool,
+    system_content: str,
+    model_slots: list[dict],
+) -> str:
+    global _last_response_metadata
     base_messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
         base_messages.extend(history)
     base_messages.append({"role": "user", "content": prompt})
 
-    slot      = 0
+    slot = 0
     last_slot = -1
-    messages  = []
-    base_len  = len(base_messages)
+    messages: list[dict] = []
+    base_len = len(base_messages)
+
+    # Guard against an agent repeatedly issuing the exact same failing tool call.
+    # The model gets an explicit recovery instruction after two identical failures,
+    # and the third identical attempt ends the turn instead of burning the context.
+    tool_failure_counts: dict[str, int] = {}
+    reasoning_exhaustion_retries: dict[tuple[str, str, str], int] = {}
+    invalid_request_retries: set[tuple[str, str, str]] = set()
 
     while True:
-        if slot >= len(MODEL_SLOTS):
-            print(
-                f"{YELLOW}[WARN] All models exhausted. "
-                f"Resetting and retrying from top in {_EXHAUSTED_COOLDOWN} s...{RESET}"
+        _clear_expired_state()
+
+        if slot >= len(model_slots):
+            delay = _temporary_retry_delay()
+            if delay is not None:
+                wait_for = min(max(delay, 0.25), _RATE_LIMIT_COOLDOWN)
+                print(
+                    f"{YELLOW}[WARN] Temporary API capacity exhausted. "
+                    f"Retrying in {wait_for:.1f}s...{RESET}"
+                )
+                time.sleep(wait_for)
+                slot = 0
+                last_slot = -1
+                messages = []
+                continue
+
+            _last_response_metadata = {
+                "state": "all_models_unavailable",
+                "reasoning_complete": False,
+            }
+            return (
+                "[ERROR] All configured models are currently unavailable. "
+                "No retryable key/model combination remains."
             )
-            time.sleep(_EXHAUSTED_COOLDOWN)
-            for pid in API_KEYS:
-                _reset_provider(pid)
-            slot      = 0
-            last_slot = -1
-            messages  = []
 
-        slot_cfg   = MODEL_SLOTS[slot]
-        pid        = slot_cfg["provider_id"]
+        slot_cfg = model_slots[slot]
+        pid = slot_cfg["provider_id"]
         model_name = slot_cfg["name"]
-        max_tok    = slot_cfg["max_tokens"]
+        max_tok = slot_cfg["max_tokens"]
 
-        if not API_KEYS.get(pid):
+        if (pid, model_name) in _bad_models:
             slot += 1
             continue
 
-        api_key = _next_key(pid)
+        if _account_restricted_until.get(pid, 0.0) > time.monotonic():
+            slot += 1
+            continue
 
+        api_key = _next_key(pid, model_name)
         if api_key is None:
-            print(f"{RED}[{pid}] All keys exhausted — skipping '{model_name}'.{RESET}")
             slot += 1
             continue
-        
+
         if slot != last_slot:
-            source    = messages if messages else list(base_messages)
-            messages  = _sanitize_messages_for_provider(source, pid)
+            source = messages if messages else list(base_messages)
+            messages = _sanitize_messages_for_provider(source, pid)
             last_slot = slot
-            carried   = len(messages) - len(base_messages)
+            carried = max(0, len(messages) - len(base_messages))
             if carried > 0:
-                print(f"{YELLOW}[{pid}/{model_name}] Continuing with {carried} accumulated message(s) from previous model.{RESET}")
-            _dbg(f"Slot changed → [{pid}/{model_name}]. "
-                 f"Messages carried: {len(messages)} (base: {len(base_messages)})")
+                print(
+                    f"{YELLOW}[{pid}/{model_name}] Continuing with "
+                    f"{carried} accumulated message(s) from previous model.{RESET}"
+                )
         else:
-            _dbg(f"Key retry on [{pid}/{model_name}]. "
-                 f"Preserving {len(messages)} messages.")
+            _dbg(f"Key retry on [{pid}/{model_name}]")
 
         client = _make_client(pid, api_key)
 
         try:
             while True:
-                kwargs: dict = dict(
-                    model       = model_name,
-                    messages    = messages,
-                    tools       = TOOLS_DESCRIPTION,
-                    tool_choice = "auto",
-                )
+                kwargs: dict = {
+                    "model": model_name,
+                    "messages": messages,
+                    "tools": TOOLS_DESCRIPTION,
+                    "tool_choice": "auto",
+                }
                 if max_tok is not None:
                     kwargs["max_tokens"] = max_tok
 
-                _dbg(f"→ API call [{pid}/{model_name}] | "
-                     f"messages: {len(messages)} | "
-                     f"max_tokens: {max_tok}")
+                # Native reasoning controls documented by the providers.
+                # Agent/normal routing keeps provider-native reasoning separate
+                # from assistant content so it can be displayed and reused safely.
+                if pid == "groq":
+                    effort = slot_cfg.get("reasoning_effort", "high")
+                    kwargs["reasoning_effort"] = effort
+                elif pid == "openrouter":
+                    kwargs["extra_body"] = {
+                        "reasoning": {"enabled": True}
+                    }
 
-                raw           = client.chat.completions.with_raw_response.create(**kwargs)
-                response      = raw.parse()
-                raw_json      = json.loads(raw.text)
+                _dbg(
+                    f"→ API call [{pid}/{model_name}] | "
+                    f"messages: {len(messages)} | max_tokens: {max_tok}"
+                )
 
-                choice        = response.choices[0]
+                raw = client.chat.completions.with_raw_response.create(**kwargs)
+                response = raw.parse()
+                raw_json = json.loads(raw.text)
+                choice = response.choices[0]
                 finish_reason = choice.finish_reason
-                msg_dict      = _msg_to_dict(choice.message)
+                msg_dict = _msg_to_dict(choice.message)
+
+                reasoning = msg_dict.get("reasoning") or msg_dict.get(
+                    "reasoning_content"
+                )
+                reasoning_details = msg_dict.get("reasoning_details")
+                if reasoning or reasoning_details:
+                    msg_dict["_reasoning_provider"] = pid
+
+                _last_response_metadata = {
+                    "provider": pid,
+                    "model": model_name,
+                    "reasoning": reasoning,
+                    "reasoning_details": reasoning_details,
+                    "reasoning_provider": pid if (reasoning or reasoning_details) else None,
+                    "finish_reason": finish_reason,
+                }
 
                 if msg_dict.get("tool_calls"):
                     raw_tcs = (
                         raw_json.get("choices", [{}])[0]
-                                .get("message", {})
-                                .get("tool_calls", [])
+                        .get("message", {})
+                        .get("tool_calls", [])
                     )
                     for tc_dict, raw_tc in zip(msg_dict["tool_calls"], raw_tcs):
                         raw_extra = raw_tc.get("extra_content")
                         if raw_extra and "extra_content" not in tc_dict:
                             tc_dict["extra_content"] = raw_extra
-                            _dbg(f"  extra_content merged for tool call '{tc_dict['function']['name']}'")
 
-                _dbg(f"← finish_reason: {finish_reason} | "
-                     f"tool_calls: {len(msg_dict.get('tool_calls') or [])} | "
-                     f"content_len: {len(msg_dict.get('content') or '')}")
+                if pid == "openrouter" and not msg_dict.get("reasoning_details"):
+                    raw_message = (
+                        raw_json.get("choices", [{}])[0]
+                        .get("message", {})
+                    )
+                    raw_details = raw_message.get("reasoning_details")
+                    if raw_details:
+                        msg_dict["reasoning_details"] = raw_details
+                        reasoning_details = raw_details
+                        _last_response_metadata["reasoning_details"] = raw_details
+
+                # Display the final native reasoning payload after all SDK/raw
+                # fallback extraction has completed.
+                _display_reasoning(
+                    pid,
+                    model_name,
+                    reasoning,
+                    reasoning_details,
+                )
 
                 if msg_dict.get("tool_calls"):
                     if finish_reason == "length":
@@ -558,7 +940,7 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                         messages.append(msg_dict)
                         for tc in msg_dict["tool_calls"]:
                             messages.append({
-                                "role":         "tool",
+                                "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "content": (
                                     "[ERROR] Tool call was cut off by the token limit. "
@@ -569,17 +951,101 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
 
                     messages.append(msg_dict)
                     for tc in msg_dict["tool_calls"]:
-                        tool_name   = tc["function"]["name"]
+                        tool_name = tc["function"].get("name", "unknown")
+                        raw_args = tc["function"].get("arguments", "{}")
                         tool_result = _dispatch_tool(tc, voice=voice)
-                        _dbg(f"  tool '{tool_name}' → result len: {len(str(tool_result))}")
+
+                        # Stable signature: identical tool + arguments + error.
+                        failure_markers = (
+                            "[ERROR]", "[TOOL ERROR]", "[PERMISSION DENIED]",
+                            "[TIMEOUT]"
+                        )
+                        is_failure = (
+                            isinstance(tool_result, str)
+                            and tool_result.startswith(failure_markers)
+                        )
+                        signature = (
+                            f"{tool_name}:{raw_args}"
+                            if is_failure else ""
+                        )
+
+                        if is_failure:
+                            count = tool_failure_counts.get(signature, 0) + 1
+                            tool_failure_counts[signature] = count
+
+                            if count == 2:
+                                tool_result += (
+                                    "\n[AGENT RECOVERY] This exact tool call has "
+                                    "failed twice. Do not repeat the same call. "
+                                    "Use a different tool/command or explain the blocker."
+                                )
+                            elif count >= 3:
+                                tool_result += (
+                                    "\n[AGENT RECOVERY] Repeated identical tool "
+                                    "failure detected. The current turn will stop "
+                                    "after this result to prevent an infinite loop."
+                                )
+
                         messages.append({
-                            "role":         "tool",
+                            "role": "tool",
                             "tool_call_id": tc["id"],
-                            "content":      tool_result,
+                            "content": tool_result,
                         })
+
+                        if is_failure and tool_failure_counts.get(signature, 0) >= 3:
+                            _last_response_metadata["state"] = "repeated_tool_failure"
+                            _cm.set_tool_context(messages[base_len:])
+                            return (
+                                f"[ERROR] Agent stopped after repeated identical "
+                                f"failure from tool '{tool_name}'."
+                            )
                     continue
 
                 partial = msg_dict.get("content") or ""
+
+                # Reasoning-budget exhaustion is different from an ordinary
+                # truncated final answer. If the model produced reasoning but
+                # no final content, blindly asking it to "continue" can create
+                # an infinite reasoning-only loop.
+                if (
+                    finish_reason == "length"
+                    and (reasoning or reasoning_details)
+                    and not partial.strip()
+                ):
+                    exhaustion_key = (pid, model_name, api_key)
+                    retry_count = reasoning_exhaustion_retries.get(exhaustion_key, 0)
+                    _last_response_metadata["state"] = "reasoning_exhausted"
+                    _last_response_metadata["reasoning_complete"] = False
+
+                    if retry_count == 0:
+                        reasoning_exhaustion_retries[exhaustion_key] = 1
+                        retry_cfg = slot_cfg.copy()
+
+                        # Groq supports a reasoning-effort control. Drop from
+                        # "high" to "medium" once so a final answer has room.
+                        if pid == "groq" and kwargs.get("reasoning_effort") == "high":
+                            retry_cfg["reasoning_effort"] = "medium"
+                            slot_cfg = retry_cfg
+                            max_tok = slot_cfg["max_tokens"]
+                            print(
+                                f"{YELLOW}[{pid}/{model_name}] "
+                                f"Reasoning budget exhausted before a final answer. "
+                                f"Retrying once with reasoning_effort=medium.{RESET}"
+                            )
+                            continue
+
+                        print(
+                            f"{YELLOW}[{pid}/{model_name}] "
+                            f"Reasoning budget exhausted before a final answer. "
+                            f"Falling back instead of continuing the same reasoning loop.{RESET}"
+                        )
+
+                    # No second reasoning-only retry for this exact
+                    # key/model. Move to another key/model combination.
+                    slot += 1
+                    last_slot = -1
+                    messages = []
+                    continue
 
                 if finish_reason == "length":
                     anchor = partial[-80:].strip() if partial else ""
@@ -589,7 +1055,7 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     )
                     messages.append({"role": "assistant", "content": partial})
                     messages.append({
-                        "role":    "user",
+                        "role": "user",
                         "content": (
                             "Continue exactly from where you left off. "
                             f"Do not repeat anything. Last words: '...{anchor}'"
@@ -597,54 +1063,150 @@ def ask_ai(prompt: str, history: list[dict] | None = None, voice: bool = False) 
                     })
                     continue
 
-                _cm.set_tool_context(messages[base_len:])
-                return _stitch_assistant_turns(messages[base_len:], partial) or "[EMPTY RESPONSE]"
-
-        except Exception as e:
-            s = str(e)
-
-            if any(x in s for x in ("429", "RESOURCE_EXHAUSTED", "rate limit")):
-                if api_key:
-                    _mark_bad(pid, api_key)
-                left = _available_key_count(pid)
-                print(
-                    f"{RED}[{pid}/{model_name}] Rate-limited. "
-                    f"Keys remaining: {left}.{RESET}"
+                _last_response_metadata["state"] = "complete"
+                _last_response_metadata["reasoning_complete"] = bool(
+                    reasoning or reasoning_details
                 )
-                time.sleep(3)
-                if left == 0:
-                    _reset_provider(pid)
+                _cm.set_tool_context(messages[base_len:])
+                return _stitch_assistant_turns(
+                    messages[base_len:], partial
+                ) or "[EMPTY RESPONSE]"
+
+        except Exception as exc:
+            status = _error_status(exc)
+            message = str(exc)
+            s_lower = message.lower()
+
+            if _is_rate_limit(exc):
+                _mark_rate_limited(pid, api_key, model_name)
+                left = _available_key_count(pid, model_name)
+                print(
+                    f"{RED}[{pid}/{model_name}] Rate-limited for this key. "
+                    f"Usable keys for this model: {left}.{RESET}"
+                )
+                if left <= 0:
                     slot += 1
+                else:
+                    time.sleep(0.1)
+                continue
 
-            elif any(x in s for x in ("503", "UNAVAILABLE", "overloaded")):
-                print(f"{RED}[{pid}/{model_name}] Overloaded. Retrying in 5 s.{RESET}")
-                time.sleep(5)
+            if _is_account_restriction(exc):
+                _mark_account_restricted(pid)
+                print(
+                    f"{RED}[{pid}/{model_name}] Account/organization restricted "
+                    f"for this provider (400). Skipping its remaining keys for "
+                    f"the cooldown and moving to another provider/model.{RESET}"
+                )
+                slot += 1
+                last_slot = -1
+                continue
 
-            elif any(x in s.lower() for x in ("context", "token_limit", "max_tokens", "exceed", "excluding", "window")):
+            if status in {401, 403} or any(
+                x in s_lower
+                for x in ("api_key_invalid", "permission_denied", "denied access", "invalid api key")
+            ):
+                _mark_bad(pid, api_key)
+                left = _available_key_count(pid, model_name)
+                print(
+                    f"{RED}[{pid}/{model_name}] Credential rejected for this key; "
+                    f"{left} key(s) remain for this model.{RESET}"
+                )
+                # Stay on the same model when another key can still serve it.
+                if left <= 0:
+                    slot += 1
+                continue
+
+            if _is_invalid_request(exc):
+                recovery_key = (pid, model_name, api_key)
+                if recovery_key not in invalid_request_retries:
+                    invalid_request_retries.add(recovery_key)
+                    print(
+                        f"{YELLOW}[{pid}/{model_name}] Recoverable invalid request. "
+                        f"Rebuilding provider-safe history and retrying once.{RESET}"
+                    )
+                    messages = _sanitize_messages_for_provider(
+                        messages, pid, preserve_native_reasoning=False
+                    )
+                    last_slot = slot
+                    continue
+                print(
+                    f"{RED}[{pid}/{model_name}] Request remained invalid after "
+                    f"provider-safe rebuild; trying the next model/key.{RESET}"
+                )
+                slot += 1
+                last_slot = -1
+                continue
+
+            if status == 404 or any(
+                x in s_lower for x in ("model not found", "unknown model")
+            ):
+                _mark_model_bad(pid, model_name)
+                print(
+                    f"{RED}[{pid}/{model_name}] Model unavailable "
+                    f"(404/not found). Disabling only this model and continuing.{RESET}"
+                )
+                slot += 1
+                continue
+
+            if _is_transient(exc):
+                _mark_transient(pid, api_key, model_name)
+                left = _available_key_count(pid, model_name)
+                print(
+                    f"{RED}[{pid}/{model_name}] Server/transient error "
+                    f"({status or '5xx'}). {left} other key(s) available.{RESET}"
+                )
+                if left <= 0:
+                    slot += 1
+                else:
+                    time.sleep(0.1)
+                continue
+
+            if _is_context_error(exc):
                 if max_tok and max_tok > 512:
-                    new_max = max_tok // 2
+                    slot_cfg["max_tokens"] = max_tok // 2
                     print(
                         f"{YELLOW}[{pid}/{model_name}] Context/token limit hit. "
-                        f"Reducing max_tokens from {max_tok} to {new_max} and retrying...{RESET}"
+                        f"Reducing max_tokens to {slot_cfg['max_tokens']} and retrying.{RESET}"
                     )
-                    slot_cfg["max_tokens"] = new_max
                     continue
-                else:
-                    print(
-                        f"{RED}[{pid}/{model_name}] Context window exceeded or max_tokens already minimal. "
-                        f"Advancing to next slot...{RESET}"
-                    )
-                    slot += 1
-                    continue
-
-            elif any(x in s or x in s.lower() for x in ("api_key_invalid", "403", "permission_denied", "denied access")):
-                if api_key:
-                    _mark_bad(pid, api_key)
-                print(f"{RED}[{pid}] API key invalid, permission denied, or 403 — skipping '{model_name}'.{RESET}")
                 slot += 1
-            else:
-                _dbg(f"  Unhandled exception: {s[:300]}")
-                raise
+                continue
+
+            print(
+                f"{RED}[{pid}/{model_name}] API error: {message[:180]} "
+                f"— falling back to the next model.{RESET}"
+            )
+            slot += 1
+
+
+def ask_ai(
+    prompt: str,
+    history: list[dict] | None = None,
+    voice: bool = False,
+) -> str:
+    memory_block = build_memory_block(prompt)
+    system_content = (
+        (memory_block + "\n\n" + SYSTEM_PROMPT)
+        if memory_block else SYSTEM_PROMPT
+    )
+    return _ask_with_slots(
+        prompt, history, voice, system_content, MODEL_SLOTS
+    )
+
+
+def ask_agent(
+    prompt: str,
+    history: list[dict] | None = None,
+    voice: bool = False,
+) -> str:
+    """Execute one turn of the persistent direct coding/reasoning agent."""
+    memory_block = build_memory_block(prompt)
+    system_content = _AGENT_SYSTEM_PROMPT
+    if memory_block:
+        system_content = memory_block + "\n\n" + system_content
+    return _ask_with_slots(
+        prompt, history, voice, system_content, AGENT_MODEL_SLOTS
+    )
 
 
 def run_agent_step(voice: bool = False) -> str:

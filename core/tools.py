@@ -5,7 +5,9 @@ import json
 import html
 import time
 import shlex
+import shutil
 import signal
+import fnmatch
 import heapq
 import requests
 import threading
@@ -48,6 +50,16 @@ PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
 AI_ROOT = _ROOT_DIR
 DIAGNOSIS_TIMEOUT = 10
+
+
+def _safe_bool(val) -> bool:
+    """Safely convert LLM-provided values to bool (handles string 'false')."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower() not in ('false', '0', 'no', 'none', '')
+    return bool(val)
+
 
 _speak_thread: threading.Thread | None = None
 
@@ -157,7 +169,8 @@ TOOLS_DESCRIPTION = [
             "description": (
                 "Read the contents of a file without using the shell. "
                 "Optionally read only a segment by specifying start and end "
-                "positions as line numbers (1-indexed, inclusive) or byte offsets."
+                "positions as line numbers (1-indexed, inclusive) or byte offsets. "
+                "NOTE: Line numbers are 1-indexed (the first line of the file is line 1, not 0)."
             ),
             "parameters": {
                 "type": "object",
@@ -190,7 +203,7 @@ TOOLS_DESCRIPTION = [
                         "default": "lines",
                     },
                 },
-                "required": ["path"],
+               "required": ["path"],
             },
         },
     },
@@ -204,7 +217,8 @@ TOOLS_DESCRIPTION = [
                 "'overwrite' replaces the entire file, "
                 "'append' adds content to the end, "
                 "'prepend' inserts content at the start, "
-                "'segment' replaces only the specified line range or byte range."
+                "'segment' replaces only the specified line range or byte range. "
+                "NOTE: Line numbers are 1-indexed (the first line of the file is line 1, not 0)."
             ),
             "parameters": {
                 "type": "object",
@@ -743,7 +757,7 @@ TOOLS_DESCRIPTION = [
                     "model": {
                         "type": "string",
                         "description": "Optional sub-AI model name.",
-                        "default": "gemini-2.5-flash-lite",
+                        "default": "openai/gpt-oss-120b",
                     },
                     "max_tokens": {
                         "type": "integer",
@@ -781,6 +795,227 @@ TOOLS_DESCRIPTION = [
                     },
                 },
                 "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_in_files",
+            "description": (
+                "Search file contents recursively for text. "
+                "Supports filename glob filtering, case sensitivity, "
+                "bounded result count, and bounded per-file size."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Text to find in file contents.",
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": "Filename glob such as '*.py'. Default '*'.",
+                        "default": "*",
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Whether matching is case-sensitive.",
+                        "default": False,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum matching lines to return.",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                    "max_file_size_kb": {
+                        "type": "integer",
+                        "description": "Maximum file size to scan in KiB.",
+                        "default": 2048,
+                        "minimum": 1,
+                        "maximum": 16384,
+                    },
+                },
+                "required": ["path", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": (
+                "List files and directories at a given path. "
+                "Supports recursive listing with configurable depth."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or ~ path to the directory.",
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "If true, list contents recursively. Default false.",
+                        "default": False,
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum depth for recursive listing. Default 3.",
+                        "default": 3,
+                        "minimum": 1,
+                        "maximum": 10,
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": (
+                "Search for files and directories matching a name pattern within a directory tree. "
+                "Uses glob-style matching and substring search. "
+                "Automatically skips .git, node_modules, __pycache__, and virtual environments."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Root directory to search in.",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern or substring to match filenames (e.g. '*.py', 'config', '*.json').",
+                    },
+                    "file_type": {
+                        "type": "string",
+                        "enum": ["all", "file", "dir"],
+                        "description": "Filter by type: 'all', 'file', or 'dir'. Default 'all'.",
+                        "default": "all",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return. Default 50.",
+                        "default": 50,
+                    },
+                },
+                "required": ["path", "pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rename_file",
+            "description": (
+                "Rename or move a file or directory to a new path. "
+                "Creates parent directories if needed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "old_path": {
+                        "type": "string",
+                        "description": "Current path of the file or directory.",
+                    },
+                    "new_path": {
+                        "type": "string",
+                        "description": "Destination path.",
+                    },
+                },
+                "required": ["old_path", "new_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": (
+                "Delete a file or directory. "
+                "By default only deletes files and empty directories. "
+                "Set force=true to recursively delete non-empty directories."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file or directory to delete.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "If true, recursively delete non-empty directories. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "http_request",
+            "description": (
+                "Make an HTTP/HTTPS request and return the response. "
+                "Supports GET, POST, PUT, PATCH, DELETE methods. "
+                "Use for API calls, webhooks, or fetching raw data."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to request.",
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                        "description": "HTTP method. Default GET.",
+                        "default": "GET",
+                    },
+                    "headers": {
+                        "type": "string",
+                        "description": "Headers as JSON string or comma-separated 'Key: Value' pairs.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Request body (typically JSON string for POST/PUT).",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Request timeout in seconds. Default 15.",
+                        "default": 15,
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_datetime",
+            "description": (
+                "Get the current date, time, day of week, UTC time, "
+                "and timezone offset. Use when you need to know the current time."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -1058,12 +1293,9 @@ Rules:
 """
 
 _DELEGATE_MODELS = [
-    {"provider_id": "google",     "name": "gemini-2.5-flash-lite", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/"},
-    {"provider_id": "openrouter", "name": "google/gemini-2.0-flash-001", "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-nano-8b-v1", "base_url": "https://integrate.api.nvidia.com/v1"},
-    {"provider_id": "groq",       "name": "qwen/qwen3-32b", "base_url": "https://api.groq.com/openai/v1/"},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b", "base_url": "https://api.groq.com/openai/v1/"},
+    {"provider_id": "openrouter", "name": "qwen/qwen3.8-27b",    "base_url": "https://openrouter.ai/api/v1"},
 ]
-
 
 def _dispatch_sub_tool(name: str, args_raw: str) -> str:
     """Helper to execute tools on behalf of a delegated sub-AI."""
@@ -1100,6 +1332,13 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         "run_diagnosis": run_diagnosis,
         "sleep_mode": sleep_mode,
         "intermediate_print": intermediate_print,
+        "search_in_files": search_in_files,
+        "list_directory": list_directory,
+        "search_files": search_files,
+        "rename_file": rename_file,
+        "delete_file": delete_file,
+        "http_request": http_request,
+        "get_datetime": get_datetime,
     }
 
     if name in local_funcs:
@@ -1117,7 +1356,7 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
 def delegate_subtask(
     task: str,
     context: str = "",
-    model: str = "gemini-2.5-flash-lite",
+    model: str = "openai/gpt-oss-120b",
     max_tokens: int = 2048,
     system_prompt: str | None = None,
 ) -> str:
@@ -1131,7 +1370,7 @@ def delegate_subtask(
         user_message += f"\n\n## Context\n{context.strip()}"
 
     def _infer_provider(m: str) -> tuple[str, str]:
-        if m.startswith("openrouter") or "/" in m:
+        if m.startswith("openrouter") or m.startswith("qwen/") or "/" in m:
             return "openrouter", "https://openrouter.ai/api/v1"
         if m.startswith("gemini") or m.startswith("gemma"):
             return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -1271,6 +1510,353 @@ def generate_image(
     return f"[generate_image ERROR] Failed to generate image: {last_error}"
 
 
+# ── NEW UTILITY TOOLS ──────────────────────────────────────────────────────────
+
+def list_directory(path: str, recursive: bool = False, max_depth: int = 3) -> str:
+    """List files and directories at a given path."""
+    log_write(f"[list_directory] path:{path} recursive:{recursive} max_depth:{max_depth}")
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
+
+    if not os.path.isdir(p):
+        return f"[ERROR] Directory not found: {path}"
+
+    try:
+        entries = []
+        if not recursive:
+            for name in sorted(os.listdir(p)):
+                full = os.path.join(p, name)
+                if os.path.isdir(full):
+                    entries.append(f"  [DIR]  {name}/")
+                else:
+                    try:
+                        size = os.path.getsize(full)
+                        entries.append(f"  [FILE] {name}  ({size} bytes)")
+                    except OSError:
+                        entries.append(f"  [FILE] {name}")
+                if len(entries) >= 200:
+                    entries.append(f"  ... (truncated at 200 entries)")
+                    break
+        else:
+            count = 0
+            for root, dirs, files in os.walk(p):
+                depth = root.replace(p, "").count(os.sep)
+                if depth >= max_depth:
+                    dirs.clear()
+                    continue
+                indent = "  " * depth
+                rel = os.path.relpath(root, p)
+                if rel == ".":
+                    entries.append(f"{os.path.basename(p)}/")
+                else:
+                    entries.append(f"{indent}[DIR]  {os.path.basename(root)}/")
+                sub_indent = "  " * (depth + 1)
+                for f in sorted(files):
+                    entries.append(f"{sub_indent}[FILE] {f}")
+                    count += 1
+                    if count >= 200:
+                        entries.append(f"{sub_indent}... (truncated at 200 entries)")
+                        break
+                if count >= 200:
+                    break
+
+        header = f"Directory listing: {p}\n{'=' * 40}"
+        return header + "\n" + "\n".join(entries) if entries else header + "\n  (empty directory)"
+    except Exception as e:
+        return f"[ERROR] Failed to list directory: {e}"
+
+
+def search_files(path: str, pattern: str, file_type: str = "all", max_results: int = 50) -> str:
+    """Search for files and directories matching a name pattern."""
+    log_write(f"[search_files] path:{path} pattern:{pattern} type:{file_type}")
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
+
+    if not os.path.isdir(p):
+        return f"[ERROR] Directory not found: {path}"
+
+    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache"}
+    results = []
+
+    try:
+        for root, dirs, files in os.walk(p):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+
+            candidates = []
+            if file_type in ("all", "dir"):
+                candidates.extend((d, True) for d in dirs)
+            if file_type in ("all", "file"):
+                candidates.extend((f, False) for f in files)
+
+            for name, is_dir in candidates:
+                if fnmatch.fnmatch(name, pattern) or pattern.lower() in name.lower():
+                    rel = os.path.relpath(os.path.join(root, name), p)
+                    tag = "[DIR] " if is_dir else "[FILE]"
+                    results.append(f"  {tag} {rel}")
+                    if len(results) >= max_results:
+                        break
+            if len(results) >= max_results:
+                break
+
+        if not results:
+            return f"No matches found for '{pattern}' in {path}."
+        header = f"Search results for '{pattern}' in {p} ({len(results)} match{'es' if len(results) != 1 else ''}):\n"
+        if len(results) >= max_results:
+            header += f"(truncated at {max_results} results)\n"
+        return header + "\n".join(results)
+    except Exception as e:
+        return f"[ERROR] Failed to search files: {e}"
+
+
+def rename_file(old_path: str, new_path: str) -> str:
+    """Rename or move a file or directory."""
+    log_write(f"[rename_file] {old_path} -> {new_path}")
+    op = os.path.expanduser(old_path)
+    if not os.path.isabs(op):
+        op = os.path.join(paths.ROOT, op)
+    np = os.path.expanduser(new_path)
+    if not os.path.isabs(np):
+        np = os.path.join(paths.ROOT, np)
+
+    if not os.path.exists(op):
+        return f"[ERROR] Source not found: {old_path}"
+
+    try:
+        os.makedirs(os.path.dirname(np), exist_ok=True)
+        shutil.move(op, np)
+        return f"Successfully moved '{old_path}' to '{new_path}'."
+    except Exception as e:
+        return f"[ERROR] Failed to rename/move: {e}"
+
+
+def delete_file(path: str, force: bool = False) -> str:
+    """Delete a file or directory with safety checks."""
+    log_write(f"[delete_file] path:{path} force:{force}")
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
+
+    real = os.path.realpath(p)
+    if real == "/" or real == os.path.realpath(AI_ROOT):
+        return f"[ERROR] Refusing to delete protected path: {real}"
+
+    if not os.path.exists(p):
+        return f"[ERROR] Path not found: {path}"
+
+    try:
+        if os.path.isfile(p) or os.path.islink(p):
+            os.remove(p)
+            return f"Successfully deleted file: {path}"
+        elif os.path.isdir(p):
+            if not os.listdir(p):
+                os.rmdir(p)
+                return f"Successfully deleted empty directory: {path}"
+            elif force:
+                shutil.rmtree(p)
+                return f"Successfully deleted directory and all contents: {path}"
+            else:
+                return (
+                    f"[ERROR] Directory '{path}' is not empty. "
+                    f"Set force=true to recursively delete."
+                )
+        else:
+            return f"[ERROR] Unknown file type at: {path}"
+    except Exception as e:
+        return f"[ERROR] Failed to delete: {e}"
+
+
+def http_request(
+    url: str,
+    method: str = "GET",
+    headers: str | None = None,
+    body: str | None = None,
+    timeout: int = 15,
+) -> str:
+    """Make an HTTP/HTTPS request and return the response."""
+    log_write(f"[http_request] {method} {url}")
+    print(f"{GRAY}[HTTP] {method} {url[:80]}{'...' if len(url) > 80 else ''}{RESET}")
+
+    parsed_headers = {}
+    if headers:
+        try:
+            parsed_headers = json.loads(headers)
+        except (json.JSONDecodeError, TypeError):
+            for line in headers.split(","):
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    parsed_headers[k.strip()] = v.strip()
+
+    try:
+        kwargs = {
+            "method": method.upper(),
+            "url": url,
+            "headers": parsed_headers or None,
+            "timeout": min(max(1, timeout), 60),
+        }
+
+        if body and method.upper() in ("POST", "PUT", "PATCH"):
+            if "Content-Type" not in parsed_headers and "content-type" not in parsed_headers:
+                try:
+                    json.loads(body)
+                    parsed_headers["Content-Type"] = "application/json"
+                    kwargs["headers"] = parsed_headers
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            kwargs["data"] = body.encode("utf-8") if isinstance(body, str) else body
+
+        resp = requests.request(**kwargs)
+
+        important_headers = {k: v for k, v in resp.headers.items()
+                            if k.lower() in ("content-type", "content-length", "server",
+                                             "date", "location", "x-ratelimit-remaining")}
+
+        resp_body = resp.text[:10000]
+        if len(resp.text) > 10000:
+            resp_body += f"\n... (truncated, total {len(resp.text)} chars)"
+
+        parts = [
+            f"Status: {resp.status_code} {resp.reason}",
+            f"Headers: {json.dumps(important_headers, indent=2)}",
+            f"Body:\n{resp_body}",
+        ]
+        return "\n".join(parts)
+    except requests.exceptions.Timeout:
+        return f"[ERROR] Request timed out after {timeout}s."
+    except requests.exceptions.ConnectionError as e:
+        return f"[ERROR] Connection failed: {e}"
+    except Exception as e:
+        return f"[ERROR] HTTP request failed: {e}"
+
+
+def get_datetime() -> str:
+    """Get the current date, time, timezone, and related info."""
+    log_write("[get_datetime]")
+    now = datetime.now()
+    try:
+        from datetime import timezone as _tz
+        utc_now = datetime.now(_tz.utc)
+        offset = now.astimezone().strftime("%z")
+        tz_name = time.tzname[time.daylight] if time.daylight else time.tzname[0]
+    except Exception:
+        utc_now = None
+        offset = "unknown"
+        tz_name = "unknown"
+
+    lines = [
+        f"Local Time : {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"Day of Week: {now.strftime('%A')}",
+        f"Date       : {now.strftime('%B %d, %Y')}",
+    ]
+    if utc_now:
+        lines.append(f"UTC Time   : {utc_now.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.extend([
+        f"Timezone   : {tz_name} (UTC{offset[:3]}:{offset[3:]})",
+        f"Unix Epoch : {int(now.timestamp())}",
+    ])
+    return "\n".join(lines)
+
+def search_in_files(
+    path: str,
+    query: str,
+    file_pattern: str = "*",
+    case_sensitive: bool = False,
+    max_results: int = 50,
+    max_file_size_kb: int = 2048,
+) -> str:
+    """Search text content across a directory without traversing symlinked directories."""
+    log_write(
+        f"[search_in_files] path:{path} query:{query[:80]!r} "
+        f"pattern:{file_pattern} case_sensitive:{case_sensitive}"
+    )
+    print(
+        f"{GRAY}[SEARCH] {path} | {query[:72]}"
+        f"{'...' if len(query) > 72 else ''}{RESET}"
+    )
+
+    p = os.path.expanduser(str(path or "").strip())
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
+
+    query = str(query or "")
+    file_pattern = str(file_pattern or "*")
+    case_sensitive = bool(case_sensitive)
+    try:
+        max_results = max(1, min(200, int(max_results)))
+        max_file_size_kb = max(1, min(16384, int(max_file_size_kb)))
+    except (TypeError, ValueError):
+        return "[ERROR] Invalid numeric search limits."
+
+    if not query:
+        return "[ERROR] Search query must not be empty."
+    if not os.path.isdir(p):
+        return f"[ERROR] Directory not found: {path}"
+
+    needle = query if case_sensitive else query.casefold()
+    skip_dirs = {
+        ".git", "node_modules", "__pycache__", ".venv",
+        "venv", ".tox", ".mypy_cache",
+    }
+    matches = []
+    scanned = 0
+
+    try:
+        for root, dirs, files in os.walk(p, topdown=True, followlinks=False):
+            dirs[:] = [
+                d for d in dirs
+                if d not in skip_dirs
+                and not os.path.islink(os.path.join(root, d))
+            ]
+
+            for filename in sorted(files, key=str.casefold):
+                full = os.path.join(root, filename)
+
+                # Never follow symlinked files into another target.
+                if os.path.islink(full):
+                    continue
+                if not fnmatch.fnmatchcase(filename.casefold(), file_pattern.casefold()):
+                    continue
+
+                try:
+                    if os.path.getsize(full) > max_file_size_kb * 1024:
+                        continue
+
+                    with open(
+                        full, "r", encoding="utf-8", errors="replace"
+                    ) as fh:
+                        for lineno, line in enumerate(fh, 1):
+                            haystack = line if case_sensitive else line.casefold()
+                            if needle in haystack:
+                                rel = os.path.relpath(full, p)
+                                matches.append(
+                                    f"{rel}:{lineno}: {line.rstrip()}"
+                                )
+                                if len(matches) >= max_results:
+                                    result = (
+                                        f"Content search for {query!r} in {p}\n"
+                                        f"{'=' * 60}\n"
+                                        f"{chr(10).join(matches)}\n"
+                                        f"... (truncated at {max_results} results)"
+                                    )
+                                    return result
+                    scanned += 1
+                except (OSError, UnicodeError):
+                    continue
+
+        if not matches:
+            return f"No matches found for {query!r} in {p}."
+
+        return (
+            f"Content search for {query!r} in {p}\n"
+            f"{'=' * 60}\n"
+            f"{chr(10).join(matches)}\n"
+            f"Files scanned: {scanned}"
+        )
+    except OSError as exc:
+        return f"[ERROR] Failed to search file contents: {exc}"
+
+
 # ── TOOL FUNCTIONS ─────────────────────────────────────────────────────────────
 
 def run_code(bash: str, timeout: int = 0) -> str:
@@ -1278,8 +1864,8 @@ def run_code(bash: str, timeout: int = 0) -> str:
     log_write(f"[run_code] timeout:{timeout} cmd:{bash}")
     print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")
 
-    needs_perm, reason = validate_command(bash)
-    if needs_perm:
+    allowed, reason = validate_command(bash)
+    if not allowed:
         return f"[PERMISSION DENIED] Action blocked by security policy. Reason: {reason}"
 
     start_t = time.time()
@@ -1998,7 +2584,7 @@ def get_whatsapp_report(clear: bool = False) -> str:
         return f"[ERROR] Failed to read WhatsApp report: {e}"
 
 
-def ask_ai_simple(prompt: str, model_name: str = "gemini-2.5-flash-lite", system_prompt: str = "") -> str:
+def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_prompt: str = "") -> str:
     """Execute a lightweight tool-free LLM completion for internal tasks (summaries, auto-replies)."""
     try:
         from llm_client import API_KEYS, PROVIDERS

@@ -8,14 +8,25 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 
 - **Multi-provider LLM fallback** — Cycles through Google Gemini, Groq, and NVIDIA models automatically; rotates API keys on rate-limits.
 - **Tool use** — `run_code`, `read_file`, `write_file`, `web_scrape`, `save_memory`, `retrieve_memory`, `index_files`, `intermediate_print`, `sleep_mode`.
+- **Enhanced Tool Suite** — 7 new utility tools added:
+  - `search_in_files` - recursive file content search with advanced options and filters
+  - `list_directory` - directory listing with configurable depth
+  - `search_files` - filename pattern matching with wildcard support
+  - `rename_file` - safe file/directory rename/move with protection
+  - `delete_file` - secure file/directory deletion with safety checks
+  - `http_request` - HTTP client for API calls with comprehensive headers
+  - `get_datetime` - current time information in multiple formats
 - **Chunk-based context memory** — Conversation history is divided into stable numbered chunks. Old chunks are progressively compressed (short → micro → one-line summary) in a background thread. Raw chunks are permanently stored and retrievable by ID via `retrieve_chunk` / `list_chunks` tool calls.
 - **Persistent memory** — Two-tier RAG system: personal facts (`memories.txt`) and indexed code/docs (`indexed_memory.txt`).
 - **Agentic execution** — `/agent` triggers a Supervisor → Worker → Critic loop. Tasks are planned via `agent/planner.py`, executed with one retry, and persisted across restarts through `data/state.json`.
+- **Enhanced Agent Interface** — Persistent agent mode state with direct prompts via `/agent [prompt]` syntax, clean toggle commands (`/normal`, `/chat`), and improved history tracking.
+- **Modern Terminal Rendering** — Enhanced CLI code block styling with open-right gutter design, cleaner borders, and improved terminal integration.
 - **Orchestration** — `orchestration/` provides multi-process task delegation (`Manager` → `Worker`) over a `multiprocessing.Queue` IPC channel.
 - **Self-correction** — `reflection/` logs every execution outcome and automatically retries failures via `attempt_correction()`.
 - **Voice I/O** — Optional STT via [Termux-STT](https://github.com/opsonusdh/Termux-STT) and TTS via `edge-tts` + `mpv`.
 - **WhatsApp integration** — Send/receive messages and enable busy mode via [Termux-WP](https://github.com/opsonusdh/Termux-WP).
 - **Safe execution** — `permissions.py` validates every shell command before dispatch.
+- **Advanced LLM Client** — Enhanced model slot organization with agent-specific slots, advanced error handling for API failures, reasoning budget exhaustion management, native reasoning metadata preservation, and tool execution timeout tracking.
 
 ---
 
@@ -91,7 +102,9 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 │   ├── prompt.py                   ← System prompt
 │   ├── renderer.py                 ← Terminal markdown renderer, ANSI colours
 │   ├── permissions.py              ← Shell command safety validator
-│   └── whatsapp_manager.py         ← WhatsApp bridge
+│   ├── whatsapp_manager.py         ← WhatsApp bridge
+│   └── input_handler.py            ← Enhanced CLI input with arrow navigation,
+│                                      multiline support, and persistent history
 │
 ├── agent/                          ← Planning, execution, validation, state
 │   ├── state_manager.py            ← Task CRUD, cursor, crash recovery,
@@ -152,6 +165,9 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 ```
 YOU > /agent          # run one step: resolve next task → worker → critic
 YOU > /agent auto     # loop until no pending tasks or a failure
+YOU > /agent [prompt] # direct agent prompt with custom instructions
+YOU > /normal         # switch to standard chat mode
+YOU > /chat           # switch to conversational mode
 ```
 
 Initialize a project and add tasks through normal chat — Orion uses the `initialize_project` and `add_subtask` tools. State persists in `data/state.json` and survives restarts.

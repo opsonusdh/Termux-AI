@@ -129,7 +129,7 @@ logs_dir      = paths.LOGS_DIR
 
 ## 8. Testing & Verification
 
-Every change must be verified:
+Every change **MUST** be verified:
 
 ```bash
 # Syntax compilation check
@@ -138,6 +138,8 @@ python3 -m py_compile <path_to_file>
 # Import check
 python3 -c "import sys; sys.path.insert(0,'core'); import tools; print('OK')"
 ```
+
+If any, **MUST** fix errors that are found.
 
 ---
 

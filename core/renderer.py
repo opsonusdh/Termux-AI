@@ -490,48 +490,30 @@ def fit_column_widths(max_widths: Sequence[int], term_width: int, min_col_width:
             i += 1
 
     return widths
-
-
 def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int) -> List[str]:
     """
-    Render a fenced code block with a padded box and width-safe lines.
-    Border width is fixed from one calculation so top, rows, and bottom match.
+    Render a fenced code block using a modern CLI open-right gutter style.
+    Anchored with top (╭── lang ──) and bottom (╰──) borders with a left accent bar (│ ),
+    allowing clean line rendering without rigid right-border clipping or double-box distortion.
     """
-    clean_lang = (lang_str or "code").strip()
+    clean_lang = (lang_str or "").strip()
     max_line_width = max((display_width(x) for x in code_lines), default=20)
 
-    # Keep the label visible, but don't let it push the box wider than the screen.
-    max_inner_width = max(10, term_width - 2)
-    label = clean_lang
-    label_room = max(0, max_inner_width - 3)  # want at least one dash/space
-    if display_width(label) > max(0, label_room - 4):
-        label = truncate_to_width(label, max(0, label_room - 4))
+    # Compute header/footer width bounded by terminal size
+    max_bar_width = max(10, term_width - 2)
+    bar_width = max(20, min(max_bar_width, max_line_width + 4))
 
-    inner_width = max(
-        20,
-        max_line_width + 2,
-        display_width(label) + 4,
-    )
-    inner_width = min(inner_width, max_inner_width)
-    content_width = max(1, inner_width - 2)
+    label_part = f" {clean_lang} " if clean_lang else ""
+    remaining_dashes = max(2, bar_width - display_width(label_part) - 3)
 
-    # Top border: corners + one dash + label + one dash + fill dashes
-    left_dash = 1
-    label_fragment = f" {label} "
-    right_dash = max(1, inner_width - left_dash - display_width(label_fragment))
-    top = f"{GRAY}┌{'─' * left_dash}{label_fragment}{'─' * right_dash}┐{RESET}"
-    bottom = f"{GRAY}└{'─' * inner_width}┘{RESET}"
+    top = f"{GRAY}╭──{CYAN}{label_part}{GRAY}{'─' * remaining_dashes}{RESET}"
+    bottom = f"{GRAY}╰{'─' * bar_width}{RESET}"
 
     rendered = [top]
     for code_line in code_lines:
-        fitted = truncate_with_ellipsis(code_line, content_width)
-        rendered.append(
-            f"{GRAY}│ {pad_ansi_string(fitted, content_width)} │{RESET}"
-        )
+        rendered.append(f"{GRAY}│{RESET} {code_line}")
     rendered.append(bottom)
     return rendered
-
-
 def render_table(raw_rows: List[List[str]], term_width: int, header_color: str = BOLD + CYAN, border_color: str = GRAY) -> str:
     """Render a markdown table cleanly in the terminal."""
     if not raw_rows:
