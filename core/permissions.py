@@ -24,6 +24,8 @@ import subprocess
 from functools import lru_cache
 from typing import Iterable, List, Tuple
 
+import paths
+
 # Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AI_ROOT   = BASE_DIR
@@ -32,7 +34,12 @@ STT_DIR   = os.path.join(AI_ROOT, "Termux-STT")
 WORKSPACE = os.path.join(AI_ROOT, "workspace")
 TEMP_ROOT = os.path.join(WORKSPACE, ".tmp")
 
-CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.json")
+# Same file interface.py and tools.py read/write (paths.CONFIG_FILE) — this
+# used to be recomputed independently here as BASE_DIR/config/config.json,
+# which happened to match but would silently diverge (autonomous-mode checks
+# reading a different file than the /autonomous command writes to, with no
+# error) the moment paths.py's definition ever changed.
+CONFIG_PATH = paths.CONFIG_FILE
 DEFAULT_CONFIG = {
     "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,

@@ -1311,7 +1311,6 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         args = json.loads(args_raw)
     except Exception:
         args = {}
-        args = {}
 
     local_funcs = {
         "run_code": run_code,

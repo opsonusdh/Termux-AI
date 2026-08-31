@@ -6,7 +6,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 
 ## Features
 
-- **Multi-provider LLM fallback** — Cycles through Google Gemini, Groq, and NVIDIA models automatically; rotates API keys on rate-limits.
+- **Multi-provider LLM fallback** — Cycles through Google Gemini, OpenRouter, Groq, and NVIDIA models automatically. Rate-limited or invalid keys rotate to the next key for the same model; a transient server error (500/502/503/504) skips straight to the next model instead of retrying every key for it.
 - **Tool use** — `run_code`, `read_file`, `write_file`, `web_scrape`, `save_memory`, `retrieve_memory`, `index_files`, `intermediate_print`, `sleep_mode`.
 - **Enhanced Tool Suite** — 7 new utility tools added:
   - `search_in_files` - recursive file content search with advanced options and filters
@@ -16,16 +16,18 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
   - `delete_file` - secure file/directory deletion with safety checks
   - `http_request` - HTTP client for API calls with comprehensive headers
   - `get_datetime` - current time information in multiple formats
+- **Tool call transparency** — every tool call prints a collapsed one-line status by default; `Ctrl+O` (or `/expand`) reveals the full command/path and complete output. See [Tool Call Display](#tool-call-display).
 - **Chunk-based context memory** — Conversation history is divided into stable numbered chunks. Old chunks are progressively compressed (short → micro → one-line summary) in a background thread. Raw chunks are permanently stored and retrievable by ID via `retrieve_chunk` / `list_chunks` tool calls.
 - **Persistent memory** — Two-tier RAG system: personal facts (`memories.txt`) and indexed code/docs (`indexed_memory.txt`).
 - **Agentic execution** — `/agent` triggers a Supervisor → Worker → Critic loop. Tasks are planned via `agent/planner.py`, executed with one retry, and persisted across restarts through `data/state.json`.
-- **Enhanced Agent Interface** — Persistent agent mode state with direct prompts via `/agent [prompt]` syntax, clean toggle commands (`/normal`, `/chat`), and improved history tracking.
+- **Enhanced Agent Interface** — Persistent agent mode state with direct prompts via `/agent [prompt]` syntax, clean toggle commands (`/normal`, `/chat`), `/expand`/`/collapse` for tool-detail visibility, and improved history tracking.
 - **Modern Terminal Rendering** — Enhanced CLI code block styling with open-right gutter design, cleaner borders, and improved terminal integration.
 - **Orchestration** — `orchestration/` provides multi-process task delegation (`Manager` → `Worker`) over a `multiprocessing.Queue` IPC channel.
 - **Self-correction** — `reflection/` logs every execution outcome and automatically retries failures via `attempt_correction()`.
 - **Voice I/O** — Optional STT via [Termux-STT](https://github.com/opsonusdh/Termux-STT) and TTS via `edge-tts` + `mpv`.
 - **WhatsApp integration** — Send/receive messages and enable busy mode via [Termux-WP](https://github.com/opsonusdh/Termux-WP).
 - **Safe execution** — `permissions.py` validates every shell command before dispatch.
+- **Autonomous mode (opt-in)** — `/autonomous on` bypasses the permission layer entirely; off by default. See [Autonomous Mode](#autonomous-mode).
 - **Advanced LLM Client** — Enhanced model slot organization with agent-specific slots, advanced error handling for API failures, reasoning budget exhaustion management, native reasoning metadata preservation, and tool execution timeout tracking.
 
 ---
@@ -68,9 +70,10 @@ nano config/api.keys
 
 ```json
 {
-  "google": ["YOUR_GEMINI_KEY_1", "YOUR_GEMINI_KEY_2"],
-  "groq":   ["YOUR_GROQ_KEY"],
-  "nvidia": ["YOUR_NVIDIA_KEY"]
+  "google":     ["YOUR_GEMINI_KEY_1", "YOUR_GEMINI_KEY_2"],
+  "openrouter": ["YOUR_OPENROUTER_KEY"],
+  "groq":       ["YOUR_GROQ_KEY"],
+  "nvidia":     ["YOUR_NVIDIA_KEY"]
 }
 ```
 
@@ -137,7 +140,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 │   └── environment_and_tools.md    ← Termux API, security, wrapper pattern
 │
 ├── config/                         ← Secrets and runtime config (gitignored)
-│   ├── api.keys                    ← {"google":[...], "groq":[...], "nvidia":[...]}
+│   ├── api.keys                    ← {"google":[...], "openrouter":[...], "groq":[...], "nvidia":[...]}
 │   ├── config.json                 ← {"stt_path":"...", "tts_enabled":false}
 │   └── capability_registry.json    ← Registered module/function capabilities
 │
@@ -171,6 +174,87 @@ YOU > /chat           # switch to conversational mode
 ```
 
 Initialize a project and add tasks through normal chat — Orion uses the `initialize_project` and `add_subtask` tools. State persists in `data/state.json` and survives restarts.
+
+---
+
+## Autonomous Mode
+
+```
+YOU > /autonomous on       # bypass the permission layer entirely
+YOU > /autonomous off      # restore normal permission gating (default)
+YOU > /autonomous status   # check which mode is currently active
+```
+
+While autonomous mode is on, `run_code` never asks for approval — not for writes into `core/`, not for commands on the forbidden list, nothing. It's **off by default**, and the setting persists in `config/config.json`. Turn it on only when you trust what you're about to have the agent do: there's no per-action confirmation left to catch a mistake once it's on.
+
+---
+
+## Tool Call Display
+
+Every tool call prints to the terminal as it runs. Collapsed (the default) gives a one-line status per call; `Ctrl+O` / `/expand` reveals the full command or path plus the complete output (see [Input Controls](#input-controls)).
+
+Running code (`run_code`) — collapsed:
+
+```
+[EXEC]
+echo "step 1"
+echo "step 2"
+echo "step 3"
+[TOOL DONE] (0.34s)
+```
+
+only the first three lines of the command are shown, and expanded shows the rest plus the full output:
+
+```
+[EXEC]
+echo "step 1"
+echo "step 2"
+echo "step 3"
+[OUTPUT]
+step 1
+step 2
+step 3
+[TOOL DONE] (0.34s)
+```
+
+Editing a file (`write_file`) / reading one (`read_file`) — collapsed shows nothing but the bare tag:
+
+```
+[EDITING FILE]
+[TOOL DONE] (0.08s)
+```
+
+expanded:
+
+```
+[EDITING FILE] core/llm_client.py | mode: overwrite | lines: 10-25
+[OUTPUT]
+Wrote 16 lines to core/llm_client.py
+[TOOL DONE] (0.08s)
+```
+
+Every other tool follows the same shape — `[TOOL_NAME]` collapsed, `[TOOL_NAME] <key argument>` plus a full `[OUTPUT]` block expanded — and a failed call closes with `[TOOL ERROR] (Xs)` instead of `[TOOL DONE]`. This is presentation only: the model always receives the complete tool output regardless of what the terminal happens to be showing.
+
+---
+
+## Input Controls
+
+| Key | Action |
+|---|---|
+| `Enter` | Send the message |
+| `Ctrl+N` | Insert a newline, for multiline messages |
+| `Ctrl+J` | Also sends (compatibility alias) |
+| `Ctrl+Enter` | Also sends, on terminals that can signal it distinctly from plain Enter |
+| `Ctrl+O` | Toggle collapsed ↔ expanded tool/reasoning detail |
+
+If a terminal doesn't pass a key combo through, the same toggle is available as a command, in both `/agent` and normal chat:
+
+```
+YOU > /expand      # aliases: /details on, /view extended
+YOU > /collapse    # aliases: /details off, /view collapsed
+```
+
+Pasting 300+ characters or 4+ lines saves the content to `workspace/pasted_content_DDMMYY-HHMMSS.txt` instead of dropping it into the input line — the model sees only a short reference and can read the file itself if it needs the full text.
 
 ---
 
@@ -227,13 +311,14 @@ YOU > Enable busy mode on WhatsApp for the next hour.
 
 ## api.keys Format
 
-Multiple keys per provider are rotated round-robin and retired on rate-limit:
+Multiple keys per provider rotate round-robin and are retired on an invalid credential or a rate-limit; a transient server error (5xx) skips the rest of that model's keys entirely and moves to the next model instead:
 
 ```json
 {
-  "google": ["key1", "key2"],
-  "groq":   ["key1"],
-  "nvidia": ["key1"]
+  "google":     ["key1", "key2"],
+  "openrouter": ["key1"],
+  "groq":       ["key1"],
+  "nvidia":     ["key1"]
 }
 ```
 

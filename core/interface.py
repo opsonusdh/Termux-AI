@@ -49,12 +49,37 @@ STT_PATH = os.path.expanduser(config["stt_path"])
 if STT_PATH not in sys.path:
     sys.path.append(STT_PATH)
 
+
+def _update_config(**kwargs) -> dict:
+    """Merge kwargs into config.json with a fresh read right before writing.
+
+    display_state.py (Ctrl+O / /expand / /collapse) persists to this same
+    file independently and can run mid-session — e.g. while a message is
+    still being composed, before this loop's next top-of-loop reload. Reading
+    fresh here (instead of writing back whatever this module's `config` var
+    last held) avoids clobbering a show_details change that landed after
+    `config` was last loaded but before this write.
+    """
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = dict(config)
+    data.update(kwargs)
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    os.replace(tmp, CONFIG_PATH)
+    return data
+
 try:
     from main import listen
 
     check_stt = "where edge-tts" if sys.platform == "win32" else "which edge-tts"
     if subprocess.run(
-        check_cmd := check_stt,
+        check_stt,
         shell=True,
         capture_output=True
     ).returncode != 0:
@@ -172,9 +197,7 @@ def chat_loop():
                     continue
             except KeyboardInterrupt:
                 print(f"\n{GRAY}[Voice mode cancelled. Switching to typing mode]{RESET}")
-                config["tts_enabled"] = False
-                with open(CONFIG_PATH, "w") as f:
-                    json.dump(config, f, indent=4)
+                config = _update_config(tts_enabled=False)
                 continue
             except Exception as e:
                 print(f"\n[STT ERROR] {e}")
@@ -186,26 +209,16 @@ def chat_loop():
             print("Session ended.")
             break
         if user_input.lower() in ["start voice.", "start voice"]:
-            config["tts_enabled"] = True
-            with open(CONFIG_PATH, "w") as f:
-                 json.dump(config, f, indent=4)
+            config = _update_config(tts_enabled=True)
             continue
         if user_input.lower() in ["start voice local.", "start voice local"]:
-            config["tts_enabled"] = True
-            config["use_groq"] = False
-            with open(CONFIG_PATH, "w") as f:
-                 json.dump(config, f, indent=4)
+            config = _update_config(tts_enabled=True, use_groq=False)
             continue
         if user_input.lower() in ["start voice remote.", "start voice remote"]:
-             config["tts_enabled"] = True
-             config["use_groq"] = True
-             with open(CONFIG_PATH, "w") as f:
-                  json.dump(config, f, indent=4)
-             continue
+            config = _update_config(tts_enabled=True, use_groq=True)
+            continue
         if user_input.lower() in ("stop voice.", "stop voice"):
-            config["tts_enabled"] = False
-            with open(CONFIG_PATH, "w") as f:
-                 json.dump(config, f, indent=4)
+            config = _update_config(tts_enabled=False)
             continue
 
         command = user_input.strip()
@@ -213,16 +226,12 @@ def chat_loop():
 
         # Autonomous mode commands
         if command_low in ("/autonomous on", "autonomous on", "/autonomous enable", "autonomous enable", "/autonomous 1", "/autonomous true"):
-            config["autonomous"] = True
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=4)
+            config = _update_config(autonomous=True)
             print(f"{GRAY}[AI Mode: AUTONOMOUS (Permission layer bypassed)]{RESET}")
             continue
 
         if command_low in ("/autonomous off", "autonomous off", "/autonomous disable", "autonomous disable", "/autonomous 0", "/autonomous false"):
-            config["autonomous"] = False
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=4)
+            config = _update_config(autonomous=False)
             print(f"{GRAY}[AI Mode: NON-AUTONOMOUS (Permission layer active)]{RESET}")
             continue
 
@@ -233,9 +242,7 @@ def chat_loop():
 
         if command_low in ("/autonomous", "autonomous", "/autonomous toggle", "autonomous toggle"):
             new_state = not config.get("autonomous", False)
-            config["autonomous"] = new_state
-            with open(CONFIG_PATH, "w") as f:
-                json.dump(config, f, indent=4)
+            config = _update_config(autonomous=new_state)
             status_str = "AUTONOMOUS (Permission layer bypassed)" if new_state else "NON-AUTONOMOUS (Permission layer active)"
             print(f"{GRAY}[AI Mode toggled to: {status_str}]{RESET}")
             continue

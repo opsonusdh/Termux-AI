@@ -113,6 +113,7 @@ def _load_api_keys() -> dict[str, list[str]]:
 
     return res
 
+API_KEYS: dict[str, list[str]] = _load_api_keys()
 # Tracks whether we are currently executing an autonomous agent task
 _in_agent_mode = False
 
@@ -503,6 +504,69 @@ def _stitch_assistant_turns(messages: list[dict], last_chunk: str) -> str:
     return "".join(parts).strip()
 
 
+_TOOL_TAGS = {
+    "run_code":   "EXEC",
+    "write_file": "EDITING FILE",
+    "read_file":  "READING FILE",
+}
+
+# Individual lines longer than this in a *collapsed* command preview get cut
+# off — "first three lines" is meant to stay a brief preview even if one of
+# those lines is itself huge (e.g. a minified one-liner). Expanded mode is
+# never capped: that mode's whole point is to show everything.
+_COLLAPSED_LINE_CHAR_CAP = 200
+
+
+def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
+    """Build the tag/preview line(s) printed before [OUTPUT]/[TOOL DONE] for
+    one tool call. Presentation-layer only — never touches the tool's actual
+    return value, only what gets echoed to the terminal.
+    """
+    tag = _TOOL_TAGS.get(name, name.upper())
+
+    if name == "run_code":
+        bash = str(args.get("bash", "") or "")
+        lines = bash.splitlines() or [""]
+        if expanded:
+            body = bash
+        else:
+            preview_lines = lines[:3]
+            preview_lines = [
+                (l if len(l) <= _COLLAPSED_LINE_CHAR_CAP else l[: _COLLAPSED_LINE_CHAR_CAP - 3] + "...")
+                for l in preview_lines
+            ]
+            body = "\n".join(preview_lines)
+            if len(lines) > 3:
+                body += "\n..."
+        return [f"[{tag}]", body]
+
+    if name in ("write_file", "read_file"):
+        if not expanded:
+            return [f"[{tag}]"]
+        path = args.get("path", "")
+        seg_start = args.get("segment_start")
+        seg_end = args.get("segment_end")
+        unit = args.get("unit", "lines") or "lines"
+        span = f"{seg_start}-{seg_end}" if (seg_start is not None or seg_end is not None) else "all"
+        if name == "write_file":
+            mode = args.get("mode", "overwrite")
+            return [f"[{tag}] {path} | mode: {mode} | {unit}: {span}"]
+        return [f"[{tag}] {path} | {unit}: {span}"]
+
+    # Every other tool: unchanged detail-picking, restructured into the same
+    # tag(+detail)-then-OUTPUT-then-TOOL DONE shape as EXEC/EDITING FILE.
+    if not expanded:
+        return [f"[{tag}]"]
+    detail = ""
+    preferred = ("path", "bash", "query", "url", "to", "jid", "filename", "prompt")
+    for key in preferred:
+        value = args.get(key)
+        if value not in (None, ""):
+            detail = str(value)
+            break
+    return [f"[{tag}]{' ' + detail if detail else ''}"]
+
+
 def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     name     = tool_call["function"]["name"]
     raw_args = tool_call["function"].get("arguments", "{}")
@@ -684,14 +748,19 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
 
     fn = routes.get(name)
     if fn:
+        expanded = display_state.is_expanded()
+        header_lines = _tool_header_lines(name, args, expanded)
+
         try:
             res = fn()
         except Exception as exc:
             elapsed = time.monotonic() - started
-            if display_state.is_expanded():
-                print(f"{RED}[{name.upper()} ERROR] ({elapsed:.2f}s): {exc}{RESET}")
-            else:
-                print(f"{RED}[{name.upper()} ERROR] ({elapsed:.2f}s){RESET}")
+            for line in header_lines:
+                print(f"{RED}{line}{RESET}")
+            if expanded:
+                print(f"{RED}[OUTPUT]{RESET}")
+                print(f"{RED}{exc}{RESET}")
+            print(f"{RED}[TOOL ERROR] ({elapsed:.2f}s){RESET}")
             return f"[TOOL ERROR] {name} raised an exception: {exc}"
 
         elapsed = time.monotonic() - started
@@ -704,23 +773,12 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         else:
             normalized = str(res)
 
-        if display_state.is_expanded():
-            detail = ""
-            preferred = ("path", "bash", "query", "url", "to", "jid", "filename", "prompt")
-            for key in preferred:
-                value = args.get(key)
-                if value not in (None, ""):
-                    detail = str(value)
-                    break
-            suffix = f" {detail}" if detail else ""
-            print(f"{GRAY}[{name.upper()}]{suffix} ({elapsed:.2f}s){RESET}")
-            if normalized and normalized != "Success":
-                first_line = normalized.splitlines()[0]
-                if len(first_line) > 180:
-                    first_line = first_line[:177] + "..."
-                print(f"{GRAY}[{name.upper()}_DONE] {first_line}{RESET}")
-        else:
-            print(f"{GRAY}[{name.upper()}] ({elapsed:.2f}s){RESET}")
+        for line in header_lines:
+            print(f"{GRAY}{line}{RESET}")
+        if expanded:
+            print(f"{GRAY}[OUTPUT]{RESET}")
+            print(f"{GRAY}{normalized}{RESET}")
+        print(f"{GRAY}[TOOL DONE] ({elapsed:.2f}s){RESET}")
 
         return normalized
     print(f"{RED}[ERROR] Unknown tool: {name}{RESET}")
