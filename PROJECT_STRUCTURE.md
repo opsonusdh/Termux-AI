@@ -175,17 +175,18 @@ reflection.attempt_correction()
   → ReflectionLoop.latest_entry()
   → if result.validation == 'Failure':
       → agent.executor.execute_plan(plan)   ← re-runs
-      → ReflectionLoop.record(plan, new_result, ...)
-```
-
----
-
-## Agent Mode Commands
+## Commands & Controls
 
 | Command | Behaviour |
 |---------|-----------|
+| `/autonomous on` | Enable autonomous mode (bypasses permission prompts for shell commands) |
+| `/autonomous off` | Disable autonomous mode (restores interactive permission prompts) |
+| `/expand` / `/collapse` | Toggle detailed tool/reasoning outputs in the terminal |
 | `/agent` | Run one agent step (Supervisor → Worker → Critic, one task) |
 | `/agent auto` | Run agent steps in a loop until no pending tasks or failure |
+
+Agent state lives in `data/state.json`. Initialize a project and add subtasks via
+the `initialize_project` and `add_subtask` LLM tools.
 
 Agent state lives in `data/state.json`. Initialize a project and add subtasks via
 the `initialize_project` and `add_subtask` LLM tools.

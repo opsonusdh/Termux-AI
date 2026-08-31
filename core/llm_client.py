@@ -37,7 +37,6 @@ PROVIDERS: dict[str, dict] = {
         "base_url": "https://api.groq.com/openai/v1/",
     },
 }
-
 MODEL_SLOTS: list[dict] = [
     # Google models
     {"provider_id": "google", "name": "gemini-3.7-flash",                   "max_tokens": None},
@@ -54,25 +53,31 @@ MODEL_SLOTS: list[dict] = [
     {"provider_id": "google", "name": "gemma-4-31b-it",                     "max_tokens": None},
     {"provider_id": "google", "name": "gemma-4-26b-a4b-it",                 "max_tokens": None},
 
-    # Open-source Reasoning & Coding models (Groq, OpenRouter, Nvidia)
+    # Groq & Nvidia models
     {"provider_id": "groq",       "name": "deepseek-r1-distill-llama-70b", "max_tokens": 4096},
     {"provider_id": "groq",       "name": "qwen-2.5-32b",                  "max_tokens": 4096},
     {"provider_id": "groq",       "name": "openai/gpt-oss-120b",           "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "deepseek/deepseek-r1",           "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "qwen/qwen3.8-27b",              "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "meta-llama/llama-3.3-70b-instruct", "max_tokens": 4096},
     {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-r1",       "max_tokens": 4096},
     {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-70b-instruct", "max_tokens": 4096},
+
+    # OpenRouter Top-Tier Reasoning & Coding Models (Ranked Smartest First)
+    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-ultra-550b-a55b:free",       "max_tokens": None},
+    {"provider_id": "openrouter", "name": "google/gemma-4-31b-it:free",                   "max_tokens": None},
+    {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                             "max_tokens": None},
+    {"provider_id": "openrouter", "name": "minimax/minimax-m3:free",                       "max_tokens": None},
+    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-super-120b-a12b:free",       "max_tokens": None},
+    {"provider_id": "openrouter", "name": "thinkingmachines/inkling:free",                 "max_tokens": None},
+    {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",                    "max_tokens": None},
+    {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",                  "max_tokens": None},
 ]
 
-# Agent mode model slots
 AGENT_MODEL_SLOTS: list[dict] = [
-    {"provider_id": "groq",       "name": "qwen/qwen3.8-27b", "max_tokens": 4096},
-    {"provider_id": "groq",       "name": "openai/gpt-oss-120b", "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "cohere/north-mini-code:free", "max_tokens": None}
+    {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                     "max_tokens": None},
+    {"provider_id": "groq",       "name": "qwen/qwen3.8-27b",                    "max_tokens": 4096},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                   "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-ultra-550b-a55b:free", "max_tokens": None},
+    {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",           "max_tokens": None},
 ]
-
-
 def _load_api_keys() -> dict[str, list[str]]:
     path = paths.API_KEYS_FILE
     res: dict[str, list[str]] = {}
@@ -107,9 +112,6 @@ def _load_api_keys() -> dict[str, list[str]]:
         res[provider] = existing
 
     return res
-
-
-API_KEYS: dict[str, list[str]] = _load_api_keys()
 
 # Tracks whether we are currently executing an autonomous agent task
 _in_agent_mode = False

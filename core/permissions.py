@@ -36,6 +36,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.json")
 DEFAULT_CONFIG = {
     "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,
+    "show_details": False,
+    "autonomous": False,
 }
 
 # Keep the scratch area available.
@@ -45,6 +47,36 @@ if not os.path.exists(CONFIG_PATH):
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
         json.dump(DEFAULT_CONFIG, f, indent=4)
+
+
+def is_autonomous() -> bool:
+    """Check if autonomous mode is enabled in config.json."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return bool(cfg.get("autonomous", False))
+    except Exception:
+        return False
+
+
+def set_autonomous(enabled: bool) -> bool:
+    """Enable or disable autonomous mode in config.json."""
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        data = {}
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        data["autonomous"] = bool(enabled)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        os.replace(tmp, CONFIG_PATH)
+        return True
+    except Exception:
+        return False
 
 
 def is_voice_available():
@@ -551,6 +583,8 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
 
 
 def command_needs_permission(cmd: str) -> bool:
+    if is_autonomous():
+        return False
     return any(
         _segment_needs_permission(seg)[0]
         for seg in _split_shell_chain(cmd)
@@ -560,10 +594,12 @@ def command_needs_permission(cmd: str) -> bool:
 def validate_command(cmd: str) -> Tuple[bool, str]:
     """Validate a complete shell command and obtain explicit approval when needed.
 
-    The boolean result means *allowed to execute*. Every risky segment in a
-    shell chain is considered before returning, so approving one segment can
-    never accidentally approve uninspected later segments.
+    If autonomous mode is enabled in config, the permission gate is bypassed
+    and commands execute without interactive approval.
     """
+    if is_autonomous():
+        return True, "Autonomous mode active (permission gate bypassed)"
+
     segments = _split_shell_chain(cmd)
     requests: List[Tuple[str, str]] = []
 

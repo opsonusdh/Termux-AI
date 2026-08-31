@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "tts_enabled": False,
     "use_groq":    False,
     "show_details": False,
+    "autonomous": False,
 }
 os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
 if not os.path.exists(CONFIG_PATH):
@@ -53,7 +54,7 @@ try:
 
     check_stt = "where edge-tts" if sys.platform == "win32" else "which edge-tts"
     if subprocess.run(
-        check_stt,
+        check_cmd := check_stt,
         shell=True,
         capture_output=True
     ).returncode != 0:
@@ -116,7 +117,7 @@ def chat_loop():
     _diag_injected = False
 
     # Display initial status
-    print(f"{GRAY}[Info] Enter = send | Ctrl+N = new line | Ctrl+O (or /expand, /collapse) = toggle details. Current: {'EXPANDED' if display_state.is_expanded() else 'COLLAPSED'}{RESET}")
+    print(f"{GRAY}[Info] Enter = send | Ctrl+N = new line | Ctrl+O (or /expand, /collapse) = toggle details. Current: {'EXPANDED' if display_state.is_expanded() else 'COLLAPSED'} | AI Mode: {'AUTONOMOUS' if config.get('autonomous', False) else 'NON-AUTONOMOUS'}{RESET}")
 
     print("Terminal AI ready. Type 'exit' to quit.")
     if HAS_STT:
@@ -209,6 +210,35 @@ def chat_loop():
 
         command = user_input.strip()
         command_low = command.casefold()
+
+        # Autonomous mode commands
+        if command_low in ("/autonomous on", "autonomous on", "/autonomous enable", "autonomous enable", "/autonomous 1", "/autonomous true"):
+            config["autonomous"] = True
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=4)
+            print(f"{GRAY}[AI Mode: AUTONOMOUS (Permission layer bypassed)]{RESET}")
+            continue
+
+        if command_low in ("/autonomous off", "autonomous off", "/autonomous disable", "autonomous disable", "/autonomous 0", "/autonomous false"):
+            config["autonomous"] = False
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=4)
+            print(f"{GRAY}[AI Mode: NON-AUTONOMOUS (Permission layer active)]{RESET}")
+            continue
+
+        if command_low in ("/autonomous status", "autonomous status"):
+            status_str = "AUTONOMOUS (Permission layer bypassed)" if config.get("autonomous", False) else "NON-AUTONOMOUS (Permission layer active)"
+            print(f"{GRAY}[AI Mode is currently: {status_str}]{RESET}")
+            continue
+
+        if command_low in ("/autonomous", "autonomous", "/autonomous toggle", "autonomous toggle"):
+            new_state = not config.get("autonomous", False)
+            config["autonomous"] = new_state
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(config, f, indent=4)
+            status_str = "AUTONOMOUS (Permission layer bypassed)" if new_state else "NON-AUTONOMOUS (Permission layer active)"
+            print(f"{GRAY}[AI Mode toggled to: {status_str}]{RESET}")
+            continue
 
         # Legacy project runner: /agent auto
         if command_low in ("/agent auto", "agent auto"):

@@ -756,8 +756,8 @@ TOOLS_DESCRIPTION = [
                     },
                     "model": {
                         "type": "string",
-                        "description": "Optional sub-AI model name.",
-                        "default": "openai/gpt-oss-120b",
+                        "description": "Sub-AI model to delegate the subtask to (e.g. 'cohere/north-mini-code:free', 'google/gemma-4-26b-a4b-it:free', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', 'openai/gpt-oss-120b'). Never use 'openrouter/free'.",
+                        "default": "cohere/north-mini-code:free",
                     },
                     "max_tokens": {
                         "type": "integer",
@@ -1293,15 +1293,24 @@ Rules:
 """
 
 _DELEGATE_MODELS = [
-    {"provider_id": "groq",       "name": "openai/gpt-oss-120b", "base_url": "https://api.groq.com/openai/v1/"},
-    {"provider_id": "openrouter", "name": "qwen/qwen3.8-27b",    "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",                  "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "google/gemma-4-26b-a4b-it:free",               "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "poolside/laguna-xs-2.1:free",                  "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "minimax/minimax-m2.7:free",                    "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "thinkingmachines/inkling-small:free",          "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "inclusionai/ling-3.0-flash-fin:free",          "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "openrouter", "name": "liquid/lfm-2.5-2.6b:free",                     "base_url": "https://openrouter.ai/api/v1"},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                         "base_url": "https://api.groq.com/openai/v1/"},
 ]
+
 
 def _dispatch_sub_tool(name: str, args_raw: str) -> str:
     """Helper to execute tools on behalf of a delegated sub-AI."""
     try:
         args = json.loads(args_raw)
     except Exception:
+        args = {}
         args = {}
 
     local_funcs = {
@@ -1356,7 +1365,7 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
 def delegate_subtask(
     task: str,
     context: str = "",
-    model: str = "openai/gpt-oss-120b",
+    model: str = "cohere/north-mini-code:free",
     max_tokens: int = 2048,
     system_prompt: str | None = None,
 ) -> str:
@@ -1370,7 +1379,21 @@ def delegate_subtask(
         user_message += f"\n\n## Context\n{context.strip()}"
 
     def _infer_provider(m: str) -> tuple[str, str]:
-        if m.startswith("openrouter") or m.startswith("qwen/") or "/" in m:
+        if (
+            m.startswith("openrouter")
+            or m.startswith("cohere/")
+            or m.startswith("google/")
+            or m.startswith("nvidia/")
+            or m.startswith("poolside/")
+            or m.startswith("thinkingmachines/")
+            or m.startswith("z-ai/")
+            or m.startswith("minimax/")
+            or m.startswith("inclusionai/")
+            or m.startswith("liquid/")
+            or m.startswith("deepseek/")
+            or m.startswith("qwen/")
+            or "/" in m
+        ):
             return "openrouter", "https://openrouter.ai/api/v1"
         if m.startswith("gemini") or m.startswith("gemma"):
             return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -1379,8 +1402,6 @@ def delegate_subtask(
         if "nvidia" in m or "nemotron" in m or "deepseek" in m:
             return "nvidia", "https://integrate.api.nvidia.com/v1"
         return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
-
-    primary_pid, primary_url = _infer_provider(model)
 
     from llm_client import API_KEYS
     rotation: list[dict] = []
@@ -1952,14 +1973,14 @@ def speak(text: str, block: bool = False) -> None:
     else:
         _speak_thread = threading.Thread(target=_speak_blocking, args=(text,), daemon=True)
         _speak_thread.start()
-
-
 def sleep_mode() -> str:
     CONFIG_PATH = paths.CONFIG_FILE
     DEFAULT_CONFIG = {
         "stt_path":    os.path.join(BASE_DIR, "Termux-STT"),
         "tts_enabled": False,
         "use_groq":    False,
+        "show_details": False,
+        "autonomous":  False,
     }
     if not os.path.exists(CONFIG_PATH):
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -1971,9 +1992,6 @@ def sleep_mode() -> str:
     except Exception:
         config = DEFAULT_CONFIG
     STT_PATH = os.path.expanduser(config["stt_path"])
-
-    if STT_PATH not in sys.path:
-        sys.path.append(STT_PATH)
 
     try:
         from main import listen
