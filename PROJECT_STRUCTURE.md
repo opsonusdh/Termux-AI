@@ -11,22 +11,25 @@ Termux-AI/
 │
 ├── paths.py                    ← Single source of truth for ALL file paths.
 │                                 Every module imports from here. Never hardcode.
-│
 ├── setup.sh                    ← Fresh-install bootstrap script (pkg + pip)
 ├── PROJECT_STRUCTURE.md        ← This file
+├── memories.txt                ← Stored long-term facts, preferences, and instructions
+├── indexed_memory.txt          ← RAG indexed code and document search chunks
 │
 ├── core/                       ← Main runtime engine
-│   ├── __main__.py             ← Entry point  (python core  or  python -m core)
+│   ├── __main__.py             ← Entry point (python core or python -m core)
 │   ├── interface.py            ← Chat loop, /agent trigger, STT/TTS wiring
 │   ├── llm_client.py           ← ask_ai(), multi-provider routing, key rotation,
 │   │                             tool dispatch, run_agent_step()
 │   ├── context_manager.py      ← Two-layer chunk memory (raw store + active window)
 │   ├── tools.py                ← All LLM-callable tools, build_memory_block(),
 │   │                             ask_ai_simple(), run_diagnosis(), sleep_mode()
-│   ├── prompt.py               ← SYSTEM_PROMPT constant
+│   ├── PROMPT.md               ← SYSTEM_PROMPT source of truth
+│   ├── display_state.py        ← Visual status display, banners, and task formatting
+│   ├── input_handler.py        ← Terminal input reading and slash-command parsing
 │   ├── renderer.py             ← Markdown → terminal, TTS render helpers, ANSI colors
 │   ├── permissions.py          ← Command safety validation (validate_command)
-│   └── whatsapp_manager.py     ← WhatsApp bridge integration
+│   └── whatsapp_manager.py     ← WhatsApp bridge integration manager
 │
 ├── agent/                      ← Planning, execution, validation, state
 │   ├── __init__.py
@@ -38,50 +41,82 @@ Termux-AI/
 │
 ├── orchestration/              ← Multi-process task delegation
 │   ├── __init__.py             ← Exports: Orchestrator, Manager, Worker, IPCProtocol
-│   ├── orchestrator.py         ← High-level subprocess delegator (spawns worker scripts)
+│   ├── orchestrator.py         ← High-level subprocess delegator
 │   ├── manager.py              ← Sequential multi-worker task manager over IPC
 │   ├── worker.py               ← Task execution: shell / python / mock
 │   └── protocol.py             ← multiprocessing.Queue IPC wrapper
 │
 ├── reflection/                 ← Self-diagnosis and correction
 │   ├── __init__.py             ← Exports: ReflectionLoop, attempt_correction
-│   │                             ReflectionLoop.record() / .latest_entry() / .analyze()
 │   ├── reflector.py            ← Failure analyser: produces diagnosis + suggested fix
 │   └── self_correction.py      ← Reads reflection log, re-runs failed plans
 │
-├── tools/                      ← Termux API wrapper package (hardware/OS bindings)
-│   ├── __init__.py             ← Package marker (kept minimal — NOT core/tools.py)
-│   ├── tool_wrappers.py        ← Generic wrapper base classes
+├── tools/                      ← Termux API hardware/OS wrappers
+│   ├── __init__.py             ← Package marker
+│   ├── tool_wrappers.py        ← Base wrapper abstractions & command runners
 │   ├── wrapper_termux_battery_status.py
+│   ├── wrapper_termux_brightness.py
+│   ├── wrapper_termux_clipboard.py
+│   ├── wrapper_termux_location.py
+│   ├── wrapper_termux_sms.py
+│   ├── wrapper_termux_telephony.py
+│   ├── wrapper_termux_torch.py
+│   ├── wrapper_termux_vibrate.py
+│   ├── wrapper_termux_volume.py
 │   └── wrapper_termux_wifi_scaninfo.py
 │
-├── config/                     ← Secrets and runtime config (gitignored)
-│   ├── api.keys                ← JSON: {"google": [...], "nvidia": [...], "groq": [...]}
-│   ├── config.json             ← {"stt_path": "...", "tts_enabled": false, ...}
-│   └── capability_registry.json← Module/function registry for registered capabilities
+├── config/                     ← Secrets and runtime config (gitignored secrets)
+│   ├── api.keys                ← JSON API keys for providers
+│   ├── api.keys.template       ← Template for API key configuration
+│   ├── config.json             ← Runtime settings (STT path, TTS toggles, models)
+│   ├── capability_registry.json← Registry for executable sub-AI capabilities
+│   └── whatsapp_filters.json   ← Contact/group filtering rules for WhatsApp
 │
 ├── data/                       ← Persistent state and schemas
-│   ├── state.json              ← Live agent state (gitignored, written by state_manager)
-│   └── validator_schema.json   ← JSON schema for execution result validation
+│   ├── state.json              ← Live agent state (written by state_manager)
+│   ├── validator_schema.json   ← JSON schema for execution result validation
+│   └── cli_history             ← Terminal prompt command history
 │
-├── logs/                       ← All log files (gitignored)
+├── logs/                       ← Execution and chat logs
 │   ├── chunks.jsonl            ← Raw conversation chunk store (append-only)
 │   ├── chunk_summaries.json    ← Progressive summaries keyed by chunk ID
-│   ├── reflection.jsonl        ← Reflection loop records (plan→result→success)
-│   └── history.jsonl           ← Legacy turn log (retained for compatibility)
+│   ├── reflection.jsonl        ← Reflection loop records
+│   ├── whatsapp_log.jsonl      ← WhatsApp interaction history
+│   └── history.jsonl           ← Turn history log
 │
-├── instructions/               ← Agent system instructions (markdown)
-│   ├── readme.md               ← Index of all instruction manuals
-│   ├── coding.md               ← Coding standards, paths.py usage, error handling
-│   ├── reasoning.md            ← Task decomposition and troubleshooting patterns
-│   ├── orchestration_workflows.md ← Worker lifecycle, IPC protocol, delegation
-│   └── environment_and_tools.md   ← Termux API, security boundaries, wrapper pattern
+├── instructions/               ← System instruction manuals & modular skills
+│   ├── readme.md               ← Instruction manual index
+│   ├── coding.md               ← Coding guidelines and architecture rules
+│   ├── communication.md        ← User tone, style, and formatting rules
+│   ├── decision_making.md     ← Task prioritization and decision logic
+│   ├── environment_and_tools.md← Termux API and tool execution principles
+│   ├── memory_and_context.md   ← Memory management and context window rules
+│   ├── orchestration_workflows.md ← Delegated task workflows & IPC patterns
+│   ├── reasoning.md            ← Problem solving and diagnostic workflows
+│   ├── release_and_maintenance.md ← Code updating and versioning standards
+│   ├── security_and_privacy.md ← Credential protection and safe execution
+│   ├── skills_manifest.json    ← Manifest listing installed skills
+│   ├── tool_efficiency.md      ← Optimal tool choice and call minimisation
+│   ├── troubleshooting.md      ← System diagnosis and issue resolution
+│   ├── verification.md         ← Plan verification and outcome testing
+│   ├── whatsapp_and_notifications.md ← Auto-reply and messaging behavior
+│   └── skills/                 ← Modular skill extensions
+│       ├── INDEX.md            ← Skill repository index
+│       ├── core/               ← Native platform skills
+│       └── imported/           ← Specialist capabilities (docx, pptx, pdf, artifacts, design, etc.)
 │
-├── workspace/                  ← Scratch space for agent-generated files (gitignored)
-│   └── morning_report.py       ← Example agent-generated utility script
+├── Termux-WP/                  ← WhatsApp bot bridge (Node.js whatsapp-web.js client)
+│   ├── main.py                 ← WhatsApp bridge interface python runner
+│   ├── bot.js                  ← Headless Chrome / WebJS client handler
+│   └── package.json            ← Node dependencies for WhatsApp client
 │
-└── docs/
-    └── patches/                ← Historical patch files and reasoning artifacts
+├── Termux-STT/                 ← Speech-to-Text integration (whisper.cpp engine)
+│   ├── main.py                 ← Local STT audio recorder & whisper handler
+│   ├── download_model.sh       ← Helper script to fetch whisper models
+│   └── whisper.cpp/            ← Embedded whisper C++ inference codebase
+│
+├── workspace/                  ← Scratch space for agent execution & generated artifacts
+└── docs/                       ← Documentation and historical patches
 ```
 
 ---
@@ -119,7 +154,7 @@ interface.py
   → cm.maybe_summarize_async()   ← background thread, post-reply only
 ```
 
-### Agent step  (/agent trigger)
+### Agent step (/agent trigger)
 ```
 interface.py → llm_client.run_agent_step()
   Supervisor: state_manager  →  resolve next task (active_task_id → cursor → first pending)
@@ -143,16 +178,6 @@ reflection.attempt_correction()
       → ReflectionLoop.record(plan, new_result, ...)
 ```
 
-### Orchestrated multi-task run
-```
-orchestration.Manager.load_tasks([...])
-orchestration.Manager.run_all()
-  for each task:
-    → spawn multiprocessing.Process(target=Worker.execute_task)
-    → IPCProtocol.receive_status(timeout=30)
-    → record result, abort on failure
-```
-
 ---
 
 ## Agent Mode Commands
@@ -163,21 +188,4 @@ orchestration.Manager.run_all()
 | `/agent auto` | Run agent steps in a loop until no pending tasks or failure |
 
 Agent state lives in `data/state.json`. Initialize a project and add subtasks via
-the `initialize_project` and `add_subtask` LLM tools (available to the model during chat).
-
----
-
-## Adding a New Tool
-
-1. Write the Python function in `core/tools.py`.
-2. Add the JSON schema entry to `TOOLS_DESCRIPTION` in `core/llm_client.py`.
-3. Add the dispatch case to `_dispatch_tool()` in `core/llm_client.py`.
-4. If it needs a Termux hardware wrapper: add `tools/wrapper_<name>.py` and expose
-   via `tools/__init__.py`.
-
-## Adding a New Orchestration Capability
-
-1. Add the function/class entry to `config/capability_registry.json`.
-2. Implement any new worker logic in `orchestration/worker.py` under a new `task_type`.
-3. If a standalone worker script is needed, create it in `orchestration/` — it must
-   accept a JSON string as `sys.argv[1]` and write its result to the IPC queue.
+the `initialize_project` and `add_subtask` LLM tools.

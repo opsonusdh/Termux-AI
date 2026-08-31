@@ -15,9 +15,10 @@ if _ROOT not in sys.path:
 import paths
 from agent import state_manager
 from openai import OpenAI
-from renderer import RED, YELLOW, RESET
+from renderer import RED, YELLOW, RESET, GRAY
 from tools import *
 import context_manager as _cm
+import display_state
 
 with open(paths.PROMPT_FILE, encoding="utf-8") as file:
     SYSTEM_PROMPT = file.read()
@@ -137,7 +138,7 @@ _bad_keys: dict[str, set[str]] = {}
 _bad_models: set[tuple[str, str]] = set()
 _account_restricted_until: dict[str, float] = {}
 _rate_limited_until: dict[tuple[str, str, str], float] = {}
-_transient_until: dict[tuple[str, str, str], float] = {}
+_transient_until: dict[tuple[str, str], float] = {}
 
 _RATE_LIMIT_COOLDOWN = 30.0
 _TRANSIENT_COOLDOWN = 5.0
@@ -152,12 +153,13 @@ def _next_key(provider_id: str, model_name: str) -> str | None:
         return None
 
     now = time.monotonic()
+    if _transient_until.get((provider_id, model_name), 0.0) > now:
+        return None
     bad = _bad_keys.get(provider_id, set())
     available = [
         key for key in keys
         if key not in bad
         and _rate_limited_until.get((provider_id, key, model_name), 0.0) <= now
-        and _transient_until.get((provider_id, key, model_name), 0.0) <= now
     ]
     if not available:
         return None
@@ -177,6 +179,8 @@ def _available_key_count(provider_id: str, model_name: str) -> int:
         return 0
     if _account_restricted_until.get(provider_id, 0.0) > time.monotonic():
         return 0
+    if _transient_until.get((provider_id, model_name), 0.0) > time.monotonic():
+        return 0
     keys = API_KEYS.get(provider_id, [])
     bad = _bad_keys.get(provider_id, set())
     now = time.monotonic()
@@ -185,7 +189,6 @@ def _available_key_count(provider_id: str, model_name: str) -> int:
         for key in keys
         if key not in bad
         and _rate_limited_until.get((provider_id, key, model_name), 0.0) <= now
-        and _transient_until.get((provider_id, key, model_name), 0.0) <= now
     )
 
 
@@ -211,8 +214,11 @@ def _mark_rate_limited(provider_id: str, key: str, model_name: str) -> None:
     )
 
 
-def _mark_transient(provider_id: str, key: str, model_name: str) -> None:
-    _transient_until[(provider_id, key, model_name)] = (
+def _mark_transient(provider_id: str, model_name: str) -> None:
+    # 5xx/server overload is normally provider+model scoped, not credential
+    # scoped. Skip the remaining keys for this model instead of hammering the
+    # same failing endpoint with every credential.
+    _transient_until[(provider_id, model_name)] = (
         time.monotonic() + _TRANSIENT_COOLDOWN
     )
 
@@ -504,6 +510,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         args = {}
 
     g = args.get
+    started = time.monotonic()
     routes = {
         "run_code":        lambda: run_code(
                                 bash    = g("bash", ""),
@@ -675,23 +682,45 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
 
     fn = routes.get(name)
     if fn:
-        started = time.monotonic()
-        print(f"{GRAY}[TOOL] {name}{RESET}")
         try:
             res = fn()
         except Exception as exc:
             elapsed = time.monotonic() - started
-            print(f"{RED}[TOOL ERROR] {name} ({elapsed:.2f}s): {exc}{RESET}")
+            if display_state.is_expanded():
+                print(f"{RED}[{name.upper()} ERROR] ({elapsed:.2f}s): {exc}{RESET}")
+            else:
+                print(f"{RED}[{name.upper()} ERROR] ({elapsed:.2f}s){RESET}")
             return f"[TOOL ERROR] {name} raised an exception: {exc}"
+
         elapsed = time.monotonic() - started
-        print(f"{GRAY}[TOOL DONE] {name} ({elapsed:.2f}s){RESET}")
         if res is None:
-            return "Success"
-        if isinstance(res, str):
-            return res
-        if isinstance(res, (dict, list)):
-            return json.dumps(res, ensure_ascii=False)
-        return str(res)
+            normalized = "Success"
+        elif isinstance(res, str):
+            normalized = res
+        elif isinstance(res, (dict, list)):
+            normalized = json.dumps(res, ensure_ascii=False)
+        else:
+            normalized = str(res)
+
+        if display_state.is_expanded():
+            detail = ""
+            preferred = ("path", "bash", "query", "url", "to", "jid", "filename", "prompt")
+            for key in preferred:
+                value = args.get(key)
+                if value not in (None, ""):
+                    detail = str(value)
+                    break
+            suffix = f" {detail}" if detail else ""
+            print(f"{GRAY}[{name.upper()}]{suffix} ({elapsed:.2f}s){RESET}")
+            if normalized and normalized != "Success":
+                first_line = normalized.splitlines()[0]
+                if len(first_line) > 180:
+                    first_line = first_line[:177] + "..."
+                print(f"{GRAY}[{name.upper()}_DONE] {first_line}{RESET}")
+        else:
+            print(f"{GRAY}[{name.upper()}] ({elapsed:.2f}s){RESET}")
+
+        return normalized
     print(f"{RED}[ERROR] Unknown tool: {name}{RESET}")
     return f"[ERROR] Unknown tool: {name}"
 
@@ -733,25 +762,35 @@ def _display_reasoning(
     reasoning: object = None,
     reasoning_details: object = None,
 ) -> None:
-    """Display provider-supplied reasoning without mixing it into content."""
+    """Display provider reasoning, compactly or fully according to Ctrl+O."""
     if not reasoning and not reasoning_details:
         return
 
     print(f"\n{GRAY}[Reasoning | {provider_id}/{model_name}]{RESET}")
 
-    if reasoning:
-        print(str(reasoning).rstrip())
-    elif reasoning_details:
-        if isinstance(reasoning_details, list):
-            for item in reasoning_details:
-                if isinstance(item, dict) and item.get("text"):
-                    print(str(item["text"]).rstrip())
-                elif item:
-                    print(str(item).rstrip())
-        else:
-            print(str(reasoning_details).rstrip())
+    text = str(reasoning).strip() if reasoning else ""
+    if not text and isinstance(reasoning_details, list):
+        parts = []
+        for item in reasoning_details:
+            if isinstance(item, dict) and item.get("text"):
+                parts.append(str(item["text"]))
+            elif item:
+                parts.append(str(item))
+        text = "\n".join(parts).strip()
+    elif not text and reasoning_details:
+        text = str(reasoning_details).strip()
+
+    if display_state.is_expanded():
+        print(text)
+    else:
+        words = len(text.split()) if text else 0
+        print(
+            f"{GRAY}[reasoning details collapsed: {words} words] "
+            f"Press Ctrl+O to expand.{RESET}"
+        )
 
     print(f"{GRAY}[End reasoning]{RESET}\n")
+
 
 
 _AGENT_SYSTEM_PROMPT = """You are the direct coding and reasoning agent for Termux-AI.
@@ -783,29 +822,42 @@ def _ask_with_slots(
     last_slot = -1
     messages: list[dict] = []
     base_len = len(base_messages)
+    # A transient 5xx/rate-limit should not pin the request to one model
+    # until its cooldown expires. Track the set of slots already attempted in
+    # the current pass; once every eligible slot has failed transiently, move
+    # forward and only retry the full pool after a single bounded wait.
+    transient_pass_slots: set[tuple[str, str]] = set()
+    rate_limit_pass_slots: set[tuple[str, str]] = set()
 
     # Guard against an agent repeatedly issuing the exact same failing tool call.
     # The model gets an explicit recovery instruction after two identical failures,
     # and the third identical attempt ends the turn instead of burning the context.
     tool_failure_counts: dict[str, int] = {}
     reasoning_exhaustion_retries: dict[tuple[str, str, str], int] = {}
-    invalid_request_retries: set[tuple[str, str, str]] = set()
+    # Invalid request recovery is scoped to provider+model, not individual keys.
+    # A malformed request will fail the same way for every key in an account.
+    invalid_request_retries: set[tuple[str, str]] = set()
 
     while True:
         _clear_expired_state()
 
         if slot >= len(model_slots):
             delay = _temporary_retry_delay()
-            if delay is not None:
+            # Only recycle the full model pool once per request after every
+            # candidate has hit a transient/rate-limit condition. This prevents
+            # an endless 503 -> cooldown -> same model -> 503 loop.
+            if delay is not None and (transient_pass_slots or rate_limit_pass_slots):
                 wait_for = min(max(delay, 0.25), _RATE_LIMIT_COOLDOWN)
                 print(
-                    f"{YELLOW}[WARN] Temporary API capacity exhausted. "
-                    f"Retrying in {wait_for:.1f}s...{RESET}"
+                    f"{YELLOW}[WARN] Temporary API capacity exhausted across "
+                    f"the current model pass. Retrying once in {wait_for:.1f}s...{RESET}"
                 )
                 time.sleep(wait_for)
                 slot = 0
                 last_slot = -1
                 messages = []
+                transient_pass_slots.clear()
+                rate_limit_pass_slots.clear()
                 continue
 
             _last_response_metadata = {
@@ -1084,10 +1136,14 @@ def _ask_with_slots(
                     f"{RED}[{pid}/{model_name}] Rate-limited for this key. "
                     f"Usable keys for this model: {left}.{RESET}"
                 )
+                rate_limit_pass_slots.add((pid, model_name))
                 if left <= 0:
                     slot += 1
                 else:
-                    time.sleep(0.1)
+                    # A rate-limit is a key-local failure. Rotate to another
+                    # key if one is immediately available; never retry the same
+                    # key in place.
+                    time.sleep(0.05)
                 continue
 
             if _is_account_restriction(exc):
@@ -1117,7 +1173,7 @@ def _ask_with_slots(
                 continue
 
             if _is_invalid_request(exc):
-                recovery_key = (pid, model_name, api_key)
+                recovery_key = (pid, model_name)
                 if recovery_key not in invalid_request_retries:
                     invalid_request_retries.add(recovery_key)
                     print(
@@ -1129,9 +1185,11 @@ def _ask_with_slots(
                     )
                     last_slot = slot
                     continue
+                _mark_model_bad(pid, model_name)
                 print(
                     f"{RED}[{pid}/{model_name}] Request remained invalid after "
-                    f"provider-safe rebuild; trying the next model/key.{RESET}"
+                    f"provider-safe rebuild; disabling this model for the current "
+                    f"session and trying the next model.{RESET}"
                 )
                 slot += 1
                 last_slot = -1
@@ -1149,16 +1207,16 @@ def _ask_with_slots(
                 continue
 
             if _is_transient(exc):
-                _mark_transient(pid, api_key, model_name)
-                left = _available_key_count(pid, model_name)
+                _mark_transient(pid, model_name)
+                transient_pass_slots.add((pid, model_name))
                 print(
                     f"{RED}[{pid}/{model_name}] Server/transient error "
-                    f"({status or '5xx'}). {left} other key(s) available.{RESET}"
+                    f"({status or '5xx'}). Skipping remaining keys for this "
+                    f"model and moving to the next candidate.{RESET}"
                 )
-                if left <= 0:
-                    slot += 1
-                else:
-                    time.sleep(0.1)
+                slot += 1
+                last_slot = -1
+                messages = []
                 continue
 
             if _is_context_error(exc):

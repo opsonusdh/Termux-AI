@@ -102,7 +102,7 @@ READ_ONLY_COMMANDS = {
 
 # Commands that modify the filesystem.
 MUTATING_COMMANDS = {
-    "rm", "rmdir", "mv", "cp", "mkdir", "touch",
+    "rm", "rmdir", "mv", "cp", "mkdir", "touch", "dd", "wget",
     "truncate", "tee", "ln", "chmod", "chown",
     # Windows native file mutating commands:
     "del", "erase", "move", "copy", "xcopy", "robocopy", "md",
@@ -419,6 +419,26 @@ def _check_mutating(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
     elif cmd == "tee":
         targets = positional
 
+    elif cmd == "dd":
+        # dd commonly uses of=PATH rather than a positional output argument.
+        targets = [
+            tok.split("=", 1)[1]
+            for tok in tokens[1:]
+            if tok.startswith("of=") and tok.split("=", 1)[1]
+        ]
+        if not targets:
+            return True, "'dd' can write to an arbitrary target and needs permission"
+
+    elif cmd == "wget":
+        # wget normally writes downloaded content to disk. Only explicit
+        # stdout mode is treated as non-mutating.
+        stdout_mode = any(tok in {"-O-", "--output-document=-"} for tok in tokens[1:])
+        if "-O" in tokens[1:]:
+            idx = tokens.index("-O")
+            stdout_mode = idx + 1 < len(tokens) and tokens[idx + 1] == "-"
+        if not stdout_mode:
+            return True, "'wget' normally writes downloaded content to the filesystem"
+
     elif cmd in {"ln", "copy-item", "move-item", "cp", "mv"}:
         dest_dir = _target_directory_arg(tokens)
         if dest_dir:
@@ -488,6 +508,12 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
 
     cmd = _cmd_name(segment)
 
+    # A directory change alters the meaning of every following relative path
+    # in the shell chain. Require explicit approval instead of pretending we
+    # can safely infer arbitrary shell working-directory state here.
+    if cmd in {"cd", "pushd", "popd"}:
+        return True, f"working-directory change via '{cmd}' requires explicit permission"
+
     if cmd in FORBIDDEN_COMMANDS:
         return True, f"'{cmd}' is a forbidden system command"
 
@@ -532,40 +558,60 @@ def command_needs_permission(cmd: str) -> bool:
 
 
 def validate_command(cmd: str) -> Tuple[bool, str]:
-    for segment in _split_shell_chain(cmd):
+    """Validate a complete shell command and obtain explicit approval when needed.
+
+    The boolean result means *allowed to execute*. Every risky segment in a
+    shell chain is considered before returning, so approving one segment can
+    never accidentally approve uninspected later segments.
+    """
+    segments = _split_shell_chain(cmd)
+    requests: List[Tuple[str, str]] = []
+
+    for segment in segments:
         needs, reason = _segment_needs_permission(segment)
-
         if needs:
-            print(f"\n[PERMISSION] The AI wants to run:\n  {segment}")
-            print(f"  Reason: {reason}")
+            requests.append((segment, reason))
 
-            try:
-                if is_voice_available():
-                    text_alert = f"Permission required. Reason: {reason}"
-                    subprocess.Popen(
-                        (
-                            'edge-tts '
-                            '--voice "en-US-AndrewNeural" '
-                            f'--text "{text_alert}" '
-                            '--write-media - | mpv -'
-                        ),
-                        shell=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=(sys.platform != "win32"),
-                    )
-            except Exception:
-                pass
+    if not requests:
+        return True, "OK"
 
-            inp = input("  Allow? [y/n] ").strip().lower()
+    print("\n[PERMISSION] The AI wants to run:")
+    for segment, reason in requests:
+        print(f"  {segment}")
+        print(f"  Reason: {reason}")
 
-            if inp in {"y", "yes"}:
-                return True, "OK"
+    try:
+        if is_voice_available():
+            reasons = "; ".join(reason for _, reason in requests)
+            text_alert = f"Permission required. {reasons}"
+            subprocess.Popen(
+                (
+                    'edge-tts '
+                    '--voice "en-US-AndrewNeural" '
+                    f'--text "{text_alert}" '
+                    '--write-media - | mpv -'
+                ),
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=(sys.platform != "win32"),
+            )
+    except Exception:
+        pass
 
-            return False, f"Denied: {reason}"
+    while True:
+        try:
+            inp = input("  Allow all listed actions? [y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("  Permission request aborted; command was not executed.")
+            return False, "Permission request aborted"
 
-    return True, "OK"
+        if inp in {"y", "yes"}:
+            return True, "OK"
+        if inp in {"n", "no"}:
+            return False, "Denied: explicit user denial"
 
+        print("  Please answer 'y' or 'n'.")
 
 def temp_path(name: str, session_id: str | None = None) -> str:
     sid = session_id or os.environ.get("TERMUX_AI_SESSION_ID") or "default"

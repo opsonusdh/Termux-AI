@@ -18,7 +18,9 @@ import paths
 
 # Project imports
 from llm_client import ask_ai, ask_agent, get_last_response_metadata
-from renderer import render_markdown_terminal, GRAY, RESET, RED
+from core.renderer import render_markdown_terminal, GRAY, RESET, RED
+from core.input_handler import get_interactive_input
+import core.display_state as display_state
 from tools import *
 import context_manager as _cm
 
@@ -29,6 +31,7 @@ DEFAULT_CONFIG = {
     "stt_path":    os.path.join(BASE_DIR, "Termux-STT"),
     "tts_enabled": False,
     "use_groq":    False,
+    "show_details": False,
 }
 os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
 if not os.path.exists(CONFIG_PATH):
@@ -93,6 +96,10 @@ def _get_diag_history():
         pass
     return None
 
+# Shared display state is owned by display_state.py and toggled by
+# input_handler.py so the shortcut is attached to the real PromptSession.
+display_state.configure(CONFIG_PATH)
+
 
 def chat_loop():
     # Start WhatsApp Manager
@@ -107,6 +114,9 @@ def chat_loop():
     agent_history: list[dict] = []
     agent_mode = False
     _diag_injected = False
+
+    # Display initial status
+    print(f"{GRAY}[Info] Enter = send | Ctrl+N = new line | Ctrl+O (or /expand, /collapse) = toggle details. Current: {'EXPANDED' if display_state.is_expanded() else 'COLLAPSED'}{RESET}")
 
     print("Terminal AI ready. Type 'exit' to quit.")
     if HAS_STT:
@@ -146,7 +156,7 @@ def chat_loop():
             config = json.load(f)
         if not config.get("tts_enabled") or not HAS_STT:
             try:
-                user_input = input("\nYOU > ").strip()
+                user_input = get_interactive_input("\nYOU > ")
             except EOFError:
                 break
 
@@ -208,7 +218,6 @@ def chat_loop():
                 print(render_markdown_terminal(f"**Agent Status:** {result}"))
                 if "No pending" in result or "failed" in result.lower():
                     break
-                time.sleep(1)
             continue
 
         # Direct persistent agent mode.
@@ -248,6 +257,20 @@ def chat_loop():
             print(f"{GRAY}[Agent mode disabled. Returning to normal AI.]{RESET}")
             continue
 
+        # Text-command alternative to the Ctrl+O keybinding: some terminals
+        # never pass Ctrl+O through to the app at all, so this is a reliable
+        # fallback. Checked here (before the agent_mode split below) so it
+        # works identically in both /agent and normal chat.
+        if command_low in ("/expand", "/details on", "/view extended", "/view expanded"):
+            display_state.set_expanded(True)
+            print(f"{GRAY}[Tool/Reasoning details: EXPANDED]{RESET}")
+            continue
+
+        if command_low in ("/collapse", "/details off", "/view collapsed", "/view compact"):
+            display_state.set_expanded(False)
+            print(f"{GRAY}[Tool/Reasoning details: COLLAPSED]{RESET}")
+            continue
+
         if agent_mode:
             try:
                 print("\n[Agent Thinking]")
@@ -281,7 +304,7 @@ def chat_loop():
         log_write(f"\nUser > {user_input}")
         print("\n[Thinking]")
 
-        # Inject diagnosis on first user message if not already done at greeting
+        # Inject diagnosis on first user message if not already done
         call_history = list(history)
         if not _diag_injected:
             diag_msg = _get_diag_history()
@@ -328,7 +351,6 @@ def chat_loop():
         # Close the chunk with the final reply, then trigger background summarization.
         _cm.close_chunk(reply)
         _cm.maybe_summarize_async()
-
 
 if __name__ == "__main__":
     chat_loop()

@@ -1873,6 +1873,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
         if sys.platform == "win32":
             p = subprocess.Popen(
                 ["cmd.exe", "/c", bash],
+                cwd=AI_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1880,6 +1881,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
         else:
             p = subprocess.Popen(
                 ["bash", "-c", bash],
+                cwd=AI_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
