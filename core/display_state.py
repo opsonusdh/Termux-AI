@@ -43,7 +43,17 @@ def load_from_config(config_path: str) -> bool:
 
 
 def is_expanded() -> bool:
+    """Return the current display preference, synchronized with config when known."""
+    global _DETAILS_EXPANDED
     with _LOCK:
+        if _CONFIG_PATH:
+            try:
+                with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "show_details" in data:
+                    _DETAILS_EXPANDED = bool(data["show_details"])
+            except Exception:
+                pass
         return _DETAILS_EXPANDED
 
 

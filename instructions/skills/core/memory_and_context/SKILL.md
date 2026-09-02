@@ -190,4 +190,3 @@ The config uses concise WhatsApp replies.
 ```
 
 The first statement is about conversation history. The second is about current filesystem state. They are different claims and require different proof.
-

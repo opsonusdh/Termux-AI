@@ -15,10 +15,10 @@ if _ROOT not in sys.path:
 import paths
 from agent import state_manager
 from openai import OpenAI
-from renderer import RED, YELLOW, RESET, GRAY
+from core.renderer import RED, YELLOW, RESET, GRAY
 from tools import *
 import context_manager as _cm
-import display_state
+import core.display_state as display_state
 
 with open(paths.PROMPT_FILE, encoding="utf-8") as file:
     SYSTEM_PROMPT = file.read()
@@ -59,23 +59,33 @@ MODEL_SLOTS: list[dict] = [
     {"provider_id": "groq",       "name": "openai/gpt-oss-120b",           "max_tokens": 4096},
     {"provider_id": "nvidia",     "name": "deepseek-ai/deepseek-r1",       "max_tokens": 4096},
     {"provider_id": "nvidia",     "name": "nvidia/llama-3.1-nemotron-70b-instruct", "max_tokens": 4096},
+    # Nemotron 3 family, direct via NVIDIA's own API (not OpenRouter) — these
+    # gate output on extra_body.chat_template_kwargs.enable_thinking,
+    # per build.nvidia.com's own docs for each model; max_tokens matches NVIDIA's
+    # documented example for this family.
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 16384, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3-super-120b-a12b",     "max_tokens": 16384, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
+    # Poolside's own build.nvidia.com page shows a plain non-streaming call with
+    # no extra_body — no enable_thinking flag for this one.
+    {"provider_id": "nvidia", "name": "poolside/laguna-xs-2.1",               "max_tokens": 8192},
 
     # OpenRouter Top-Tier Reasoning & Coding Models (Ranked Smartest First)
-    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-ultra-550b-a55b:free",       "max_tokens": None},
     {"provider_id": "openrouter", "name": "google/gemma-4-31b-it:free",                   "max_tokens": None},
     {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                             "max_tokens": None},
     {"provider_id": "openrouter", "name": "minimax/minimax-m3:free",                       "max_tokens": None},
-    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-super-120b-a12b:free",       "max_tokens": None},
     {"provider_id": "openrouter", "name": "thinkingmachines/inkling:free",                 "max_tokens": None},
     {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",                    "max_tokens": None},
     {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",                  "max_tokens": None},
 ]
 
 AGENT_MODEL_SLOTS: list[dict] = [
-    {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                     "max_tokens": None},
+#    {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                     "max_tokens": None},
     {"provider_id": "groq",       "name": "qwen/qwen3.8-27b",                    "max_tokens": 4096},
     {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                   "max_tokens": 4096},
-    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-ultra-550b-a55b:free", "max_tokens": None},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 16384, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "poolside/laguna-xs-2.1",               "max_tokens": 8192},
     {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",           "max_tokens": None},
 ]
 def _load_api_keys() -> dict[str, list[str]]:
@@ -148,32 +158,26 @@ _TRANSIENT_COOLDOWN = 5.0
 _ACCOUNT_RESTRICTION_COOLDOWN = 300.0
 
 
-def _next_key(provider_id: str, model_name: str) -> str | None:
+def _next_key(
+    provider_id: str,
+    model_name: str,
+    excluded_keys: set[str] | None = None,
+) -> str | None:
     keys = API_KEYS.get(provider_id, [])
     if not keys or (provider_id, model_name) in _bad_models:
         return None
-    if _account_restricted_until.get(provider_id, 0.0) > time.monotonic():
-        return None
 
-    now = time.monotonic()
-    if _transient_until.get((provider_id, model_name), 0.0) > now:
-        return None
+    excluded_keys = excluded_keys or set()
     bad = _bad_keys.get(provider_id, set())
-    available = [
-        key for key in keys
-        if key not in bad
-        and _rate_limited_until.get((provider_id, key, model_name), 0.0) <= now
-    ]
-    if not available:
-        return None
 
     cursor_key = (provider_id, model_name)
     idx = _key_cursor.get(cursor_key, 0) % len(keys)
     for offset in range(len(keys)):
         key = keys[(idx + offset) % len(keys)]
-        if key in available:
-            _key_cursor[cursor_key] = (keys.index(key) + 1) % len(keys)
-            return key
+        if key in bad or key in excluded_keys:
+            continue
+        _key_cursor[cursor_key] = (keys.index(key) + 1) % len(keys)
+        return key
     return None
 
 
@@ -417,6 +421,7 @@ _GEMINI_PROVIDERS = {"google"}
 def _sanitize_messages_for_provider(
     messages: list[dict],
     pid: str,
+    model_name: str | None = None,
     preserve_native_reasoning: bool = True,
 ) -> list[dict]:
     going_to_gemini = pid in _GEMINI_PROVIDERS
@@ -443,11 +448,12 @@ def _sanitize_messages_for_provider(
 
         if (
             preserve_native_reasoning
-            and pid == "openrouter"
-            and m.get("_reasoning_provider") == "openrouter"
-            and "reasoning_details" in m
+            and m.get("_reasoning_provider") == pid
+            and m.get("_reasoning_model") == model_name
         ):
-            clean_m["reasoning_details"] = m["reasoning_details"]
+            for reasoning_key in ("reasoning", "reasoning_content", "reasoning_details"):
+                if reasoning_key in m:
+                    clean_m[reasoning_key] = m[reasoning_key]
 
         if "tool_calls" in m and m["tool_calls"]:
             new_tcs = []
@@ -744,6 +750,49 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 timeout = int(g("timeout", 15)),
                              ),
         "get_datetime":      lambda: get_datetime(),
+        "get_contacts":      lambda: get_contacts(),
+        "get_contact_by_id": lambda: get_contact_by_id(
+                                contact_id = g("contact_id", ""),
+                             ),
+        "list_sensors":      lambda: list_sensors(),
+        "get_sensor_data":   lambda: get_sensor_data(
+                                sensor_type = g("sensor_type", "accelerometer"),
+                                samples     = int(g("samples", 1)),
+                                delay       = int(g("delay", 100)),
+                             ),
+        "set_wallpaper":     lambda: set_wallpaper(
+                                image_path = g("image_path", ""),
+                                lockscreen = _safe_bool(g("lockscreen", False)),
+                             ),
+        "take_photo":        lambda: take_photo(
+                                output_path = g("output_path", None),
+                                camera_id   = int(g("camera_id", 0)),
+                             ),
+        "record_video":      lambda: record_video(
+                                output_path = g("output_path", None),
+                                camera_id   = int(g("camera_id", 0)),
+                                limit       = int(g("limit", 0)),
+                             ),
+        "record_audio":      lambda: record_audio(
+                                output_path = g("output_path", None),
+                                format      = g("format", "aac"),
+                                bitrate     = int(g("bitrate", 128000)),
+                                duration    = int(g("duration", 10)),
+                             ),
+        "pick_file":         lambda: pick_file(
+                                multiple   = _safe_bool(g("multiple", False)),
+                                mime_type  = g("mime_type", "*/*"),
+                             ),
+        "share_file":        lambda: share_file(
+                                file_path  = g("file_path", ""),
+                                mime_type  = g("mime_type", None),
+                                subject    = g("subject", None),
+                                text       = g("text", None),
+                             ),
+        "share_text":        lambda: share_text(
+                                text    = g("text", ""),
+                                subject = g("subject", None),
+                             ),
     }
 
     fn = routes.get(name)
@@ -853,7 +902,7 @@ def _display_reasoning(
 
 
 
-_AGENT_SYSTEM_PROMPT = """You are the direct coding and reasoning agent for Termux-AI.
+_AGENT_SYSTEM_PROMPT = """You are the direct coding and reasoning agent version for Termux-AI.
 
 Solve the user's task, especially software engineering, debugging, code editing,
 project investigation, and multi-step reasoning.
@@ -882,18 +931,27 @@ def _ask_with_slots(
     last_slot = -1
     messages: list[dict] = []
     base_len = len(base_messages)
-    # A transient 5xx/rate-limit should not pin the request to one model
-    # until its cooldown expires. Track the set of slots already attempted in
-    # the current pass; once every eligible slot has failed transiently, move
-    # forward and only retry the full pool after a single bounded wait.
-    transient_pass_slots: set[tuple[str, str]] = set()
-    rate_limit_pass_slots: set[tuple[str, str]] = set()
+    # Generic API-error policy for this request:
+    # same key + same error -> retry up to five times; then change key.
+    # A success resets the counter. Keys exhausted by five identical errors
+    # are tracked locally, so ordinary server errors never permanently
+    # blacklist credentials.
+    consecutive_error_identity: tuple[str, str, str] | None = None
+    consecutive_error_signature: str | None = None
+    consecutive_error_count = 0
+    forced_retry_key: tuple[str, str, str] | None = None
+    exhausted_keys: dict[tuple[str, str], set[str]] = {}
+
+    # Track which model/provider the current in-memory history belongs to.
+    # Native reasoning is preserved only while continuing the same model.
+    history_model_identity: tuple[str, str] | None = None
 
     # Guard against an agent repeatedly issuing the exact same failing tool call.
     # The model gets an explicit recovery instruction after two identical failures,
     # and the third identical attempt ends the turn instead of burning the context.
     tool_failure_counts: dict[str, int] = {}
     reasoning_exhaustion_retries: dict[tuple[str, str, str], int] = {}
+
     # Invalid request recovery is scoped to provider+model, not individual keys.
     # A malformed request will fail the same way for every key in an account.
     invalid_request_retries: set[tuple[str, str]] = set()
@@ -902,31 +960,13 @@ def _ask_with_slots(
         _clear_expired_state()
 
         if slot >= len(model_slots):
-            delay = _temporary_retry_delay()
-            # Only recycle the full model pool once per request after every
-            # candidate has hit a transient/rate-limit condition. This prevents
-            # an endless 503 -> cooldown -> same model -> 503 loop.
-            if delay is not None and (transient_pass_slots or rate_limit_pass_slots):
-                wait_for = min(max(delay, 0.25), _RATE_LIMIT_COOLDOWN)
-                print(
-                    f"{YELLOW}[WARN] Temporary API capacity exhausted across "
-                    f"the current model pass. Retrying once in {wait_for:.1f}s...{RESET}"
-                )
-                time.sleep(wait_for)
-                slot = 0
-                last_slot = -1
-                messages = []
-                transient_pass_slots.clear()
-                rate_limit_pass_slots.clear()
-                continue
-
             _last_response_metadata = {
                 "state": "all_models_unavailable",
                 "reasoning_complete": False,
             }
             return (
                 "[ERROR] All configured models are currently unavailable. "
-                "No retryable key/model combination remains."
+                "No usable key/model combination remains."
             )
 
         slot_cfg = model_slots[slot]
@@ -942,14 +982,47 @@ def _ask_with_slots(
             slot += 1
             continue
 
-        api_key = _next_key(pid, model_name)
+        # During a consecutive identical error, retry the exact same key.
+        if forced_retry_key is not None:
+            retry_pid, retry_model, retry_key = forced_retry_key
+            if retry_pid == pid and retry_model == model_name:
+                api_key = retry_key
+            else:
+                forced_retry_key = None
+                api_key = _next_key(
+                    pid, model_name, exhausted_keys.get((pid, model_name), set())
+                )
+        else:
+            api_key = _next_key(
+                pid, model_name, exhausted_keys.get((pid, model_name), set())
+            )
+
         if api_key is None:
             slot += 1
             continue
 
         if slot != last_slot:
             source = messages if messages else list(base_messages)
-            messages = _sanitize_messages_for_provider(source, pid)
+            current_model_identity = (pid, model_name)
+            preserve_native_reasoning = (
+                history_model_identity == current_model_identity
+            )
+            if not preserve_native_reasoning:
+                for previous in reversed(source):
+                    if previous.get("role") != "assistant":
+                        continue
+                    preserve_native_reasoning = (
+                        previous.get("_reasoning_provider") == pid
+                        and previous.get("_reasoning_model") == model_name
+                    )
+                    break
+            messages = _sanitize_messages_for_provider(
+                source,
+                pid,
+                model_name=model_name,
+                preserve_native_reasoning=preserve_native_reasoning,
+            )
+            history_model_identity = current_model_identity
             last_slot = slot
             carried = max(0, len(messages) - len(base_messages))
             if carried > 0:
@@ -983,9 +1056,13 @@ def _ask_with_slots(
                     kwargs["extra_body"] = {
                         "reasoning": {"enabled": True}
                     }
+                elif pid == "nvidia" and slot_cfg.get("enable_thinking"):
+                    kwargs["extra_body"] = {
+                        "chat_template_kwargs": {"enable_thinking": True}
+                    }
 
                 _dbg(
-                    f"→ API call [{pid}/{model_name}] | "
+                    f"\u2192 API call [{pid}/{model_name}] | "
                     f"messages: {len(messages)} | max_tokens: {max_tok}"
                 )
 
@@ -996,12 +1073,19 @@ def _ask_with_slots(
                 finish_reason = choice.finish_reason
                 msg_dict = _msg_to_dict(choice.message)
 
+                # Any successful model response resets the generic API-error streak.
+                consecutive_error_identity = None
+                consecutive_error_signature = None
+                consecutive_error_count = 0
+                forced_retry_key = None
+
                 reasoning = msg_dict.get("reasoning") or msg_dict.get(
                     "reasoning_content"
                 )
                 reasoning_details = msg_dict.get("reasoning_details")
                 if reasoning or reasoning_details:
                     msg_dict["_reasoning_provider"] = pid
+                    msg_dict["_reasoning_model"] = model_name
 
                 _last_response_metadata = {
                     "provider": pid,
@@ -1189,112 +1273,63 @@ def _ask_with_slots(
             message = str(exc)
             s_lower = message.lower()
 
-            if _is_rate_limit(exc):
-                _mark_rate_limited(pid, api_key, model_name)
-                left = _available_key_count(pid, model_name)
+            if _is_context_error(exc) and max_tok and max_tok > 512:
+                slot_cfg["max_tokens"] = max_tok // 2
                 print(
-                    f"{RED}[{pid}/{model_name}] Rate-limited for this key. "
-                    f"Usable keys for this model: {left}.{RESET}"
+                    f"{YELLOW}[{pid}/{model_name}] Context/token limit hit. "
+                    f"Reducing max_tokens to {slot_cfg['max_tokens']} and retrying.{RESET}"
                 )
-                rate_limit_pass_slots.add((pid, model_name))
-                if left <= 0:
-                    slot += 1
-                else:
-                    # A rate-limit is a key-local failure. Rotate to another
-                    # key if one is immediately available; never retry the same
-                    # key in place.
-                    time.sleep(0.05)
                 continue
 
-            if _is_account_restriction(exc):
-                _mark_account_restricted(pid)
-                print(
-                    f"{RED}[{pid}/{model_name}] Account/organization restricted "
-                    f"for this provider (400). Skipping its remaining keys for "
-                    f"the cooldown and moving to another provider/model.{RESET}"
-                )
-                slot += 1
-                last_slot = -1
-                continue
+            # All API/runtime errors use the same consecutive-error rule.
+            # No 429/500/400-specific branch skips a key or model early.
+            current_identity = (pid, model_name, api_key)
+            error_signature = (
+                f"status={status!r}|{type(exc).__name__}|{message.strip()}"
+            )
 
-            if status in {401, 403} or any(
-                x in s_lower
-                for x in ("api_key_invalid", "permission_denied", "denied access", "invalid api key")
+            if (
+                consecutive_error_identity == current_identity
+                and consecutive_error_signature == error_signature
             ):
-                _mark_bad(pid, api_key)
-                left = _available_key_count(pid, model_name)
-                print(
-                    f"{RED}[{pid}/{model_name}] Credential rejected for this key; "
-                    f"{left} key(s) remain for this model.{RESET}"
-                )
-                # Stay on the same model when another key can still serve it.
-                if left <= 0:
-                    slot += 1
-                continue
-
-            if _is_invalid_request(exc):
-                recovery_key = (pid, model_name)
-                if recovery_key not in invalid_request_retries:
-                    invalid_request_retries.add(recovery_key)
-                    print(
-                        f"{YELLOW}[{pid}/{model_name}] Recoverable invalid request. "
-                        f"Rebuilding provider-safe history and retrying once.{RESET}"
-                    )
-                    messages = _sanitize_messages_for_provider(
-                        messages, pid, preserve_native_reasoning=False
-                    )
-                    last_slot = slot
-                    continue
-                _mark_model_bad(pid, model_name)
-                print(
-                    f"{RED}[{pid}/{model_name}] Request remained invalid after "
-                    f"provider-safe rebuild; disabling this model for the current "
-                    f"session and trying the next model.{RESET}"
-                )
-                slot += 1
-                last_slot = -1
-                continue
-
-            if status == 404 or any(
-                x in s_lower for x in ("model not found", "unknown model")
-            ):
-                _mark_model_bad(pid, model_name)
-                print(
-                    f"{RED}[{pid}/{model_name}] Model unavailable "
-                    f"(404/not found). Disabling only this model and continuing.{RESET}"
-                )
-                slot += 1
-                continue
-
-            if _is_transient(exc):
-                _mark_transient(pid, model_name)
-                transient_pass_slots.add((pid, model_name))
-                print(
-                    f"{RED}[{pid}/{model_name}] Server/transient error "
-                    f"({status or '5xx'}). Skipping remaining keys for this "
-                    f"model and moving to the next candidate.{RESET}"
-                )
-                slot += 1
-                last_slot = -1
-                messages = []
-                continue
-
-            if _is_context_error(exc):
-                if max_tok and max_tok > 512:
-                    slot_cfg["max_tokens"] = max_tok // 2
-                    print(
-                        f"{YELLOW}[{pid}/{model_name}] Context/token limit hit. "
-                        f"Reducing max_tokens to {slot_cfg['max_tokens']} and retrying.{RESET}"
-                    )
-                    continue
-                slot += 1
-                continue
+                consecutive_error_count += 1
+            else:
+                consecutive_error_identity = current_identity
+                consecutive_error_signature = error_signature
+                consecutive_error_count = 1
 
             print(
-                f"{RED}[{pid}/{model_name}] API error: {message[:180]} "
-                f"— falling back to the next model.{RESET}"
+                f"{RED}[{pid}/{model_name}] API error "
+                f"(status {status or 'unknown'}), attempt "
+                f"{consecutive_error_count}/5 on current key.{RESET}"
             )
-            slot += 1
+
+            if consecutive_error_count < 5:
+                forced_retry_key = current_identity
+                time.sleep(1)
+                continue
+
+            exhausted_keys.setdefault((pid, model_name), set()).add(api_key)
+            remaining = len(API_KEYS.get(pid, [])) - len(
+                exhausted_keys.get((pid, model_name), set())
+            )
+            print(
+                f"{RED}[{pid}/{model_name}] Same error reached 5 consecutive "
+                f"times. Changing API key; {max(remaining, 0)} key(s) remain "
+                f"for this model.{RESET}"
+            )
+
+            consecutive_error_identity = None
+            consecutive_error_signature = None
+            consecutive_error_count = 0
+            forced_retry_key = None
+            last_slot = -1
+
+            # Stay on this model while another key is available. Once every
+            # key has reached five identical failures, move to the next model.
+            continue
+
+
 
 
 def ask_ai(
@@ -1319,7 +1354,7 @@ def ask_agent(
 ) -> str:
     """Execute one turn of the persistent direct coding/reasoning agent."""
     memory_block = build_memory_block(prompt)
-    system_content = _AGENT_SYSTEM_PROMPT
+    system_content = SYSTEM_PROMPT+"\n---\n"+_AGENT_SYSTEM_PROMPT
     if memory_block:
         system_content = memory_block + "\n\n" + system_content
     return _ask_with_slots(

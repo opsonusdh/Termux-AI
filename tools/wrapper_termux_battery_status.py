@@ -8,6 +8,9 @@ GRAY  = "\033[90m"
 RED   = "\033[31m"
 RESET = "\033[0m"
 
+# Default timeout for battery status
+BATTERY_TIMEOUT = 10
+
 def get_battery_status() -> dict:
     """Retrieve battery information as JSON dict."""
     if sys.platform == "win32":
@@ -20,7 +23,7 @@ def get_battery_status() -> dict:
             )
             res = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=10
             )
             if res.returncode == 0 and res.stdout.strip():
                 data = json.loads(res.stdout)
@@ -44,6 +47,15 @@ def get_battery_status() -> dict:
                 "status": "CHARGING (Desktop/AC)",
                 "temperature": 25.0
             }
+        except subprocess.TimeoutExpired:
+            print(f"{RED}[ERR] Windows battery status timed out{RESET}")
+            return {
+                "health": "GOOD",
+                "percentage": 100,
+                "plugged": "PLUGGED_AC",
+                "status": "FULL",
+                "temperature": 25.0
+            }
         except Exception as e:
             print(f"{RED}[ERR] Failed to get Windows battery status: {e}{RESET}")
             return {
@@ -56,10 +68,13 @@ def get_battery_status() -> dict:
 
     try:
         print(f"{GRAY}[EXECUTING] termux-battery-status{RESET}")
-        result = subprocess.check_output(['termux-battery-status'], text=True)
+        result = subprocess.check_output(['termux-battery-status'], text=True, timeout=BATTERY_TIMEOUT)
         if result.strip():
             print(f"{GRAY}[OUT]\n{result.strip()}{RESET}")
         return json.loads(result)
+    except subprocess.TimeoutExpired:
+        print(f"{RED}[ERR] termux-battery-status timed out after {BATTERY_TIMEOUT}s{RESET}")
+        raise RuntimeError(f"termux-battery-status timed out after {BATTERY_TIMEOUT}s")
     except Exception as e:
         print(f"{RED}[ERR] Failed to get battery status: {e}{RESET}")
         raise RuntimeError(f"Failed to get battery status: {e}")

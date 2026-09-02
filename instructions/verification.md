@@ -33,7 +33,7 @@ Run this immediately after every write. Do not proceed to the next step until it
 
 ```python
 # Python files
-python3 -c "import ast; ast.parse(open('core/tools.py').read()); print('OK')"
+python3 -m py_compile <path_to_file>
 
 # JavaScript files
 node --check Termux-WP/bot.js && echo "OK"

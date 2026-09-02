@@ -48,7 +48,7 @@ Orchestration is a tool for parallelism and isolation, not a default for all mul
                ┌────────▼───┐    ┌─────▼──────┐
                │  Worker    │    │   Critic   │
                │  ask_ai()  │    │  ask_ai()  │
-               └────────┬───┘    └─────┬──────┘
+               └────────┬───┘    └─────▬──────┘
                         │              │
                ┌────────▼──────────────▼──────┐
                │      agent/state_manager     │
@@ -129,7 +129,7 @@ Supported types:
 
 | Type | Behaviour |
 |---|---|
-| `shell` | Runs via `bash -c <command>` |
+| `shell` | Runs via `bash -c <command>` (Termux shell) |
 | `python` | Runs as `python3 <file>` or `python3 -c <code>` |
 | `mock` | Returns `mock_response` dict immediately, no subprocess |
 
@@ -164,7 +164,7 @@ Strict sequence — do not deviate:
    - If status is not `success`/`completed`, abort remaining tasks.
 3. `Manager.run_all()` returns `{"status": "success"|"failed", "tasks": [...], "history": [...]}`.
 
-Never use FIFOs or shared memory.
+Never use FIFOs or shared memory — Android sandbox restrictions apply.
 
 ---
 

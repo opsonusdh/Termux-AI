@@ -5,14 +5,13 @@ Features:
   - Arrow key navigation (Left/Right/Home/End/Ctrl+A/Ctrl+E).
   - Multiline input: Enter (or Ctrl+J) submits, Ctrl+N inserts a newline.
   - Persistent command history (stored in data/cli_history).
-  - Automatic detection and persistence of long pasted content into
-    workspace/pasted_content_DDMMYYHHMMSS.txt format.
+  - History search with Ctrl+R.
+  - Tab completion for commands.
   - Seamless fallback between prompt_toolkit and readline.
 """
 import os
 import sys
 import time
-from datetime import datetime
 
 _CORE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_CORE)
@@ -28,8 +27,6 @@ os.makedirs(paths.DATA_DIR, exist_ok=True)
 os.makedirs(paths.WORKSPACE_DIR, exist_ok=True)
 
 HISTORY_FILE = os.path.join(paths.DATA_DIR, "cli_history")
-LONG_PASTE_CHAR_THRESHOLD = 300
-LONG_PASTE_LINE_THRESHOLD = 4
 
 # Check for prompt_toolkit
 _HAS_PROMPT_TOOLKIT = False
@@ -86,28 +83,60 @@ try:
         event.app.output.write(f"\r\n[{state} Tool/Reasoning Details]\n")
         event.app.output.flush()
 
-    # Large pastes: intercept the terminal's own bracketed-paste event (the
-    # block a terminal sends when you paste, wrapped in ESC[200~/ESC[201~)
-    # BEFORE it ever reaches the input buffer, so a large paste never shows
-    # up raw in the input line at all — it's saved and replaced with the
-    # same short reference handle_long_paste() below already produces for
-    # the post-submit path. Small pastes are inserted unchanged. This is
-    # also what keeps Enter-submits safe for multiline pastes: bracketed
-    # paste content is inserted as literal text, never dispatched through
-    # the "enter" binding, so embedded newlines in a paste can't trigger a
-    # premature submit either way.
-    try:
-        @_bindings.add(Keys.BracketedPaste, eager=True)
-        def _handle_bracketed_paste(event):
-            data = event.data.replace("\r\n", "\n").replace("\r", "\n")
+    # History search with Ctrl+R
+    @_bindings.add("c-r", eager=True)
+    def _history_search(event):
+        """Ctrl+R for reverse incremental history search."""
+        event.current_buffer.start_history_lines_search()
 
-            def _process():
-                processed, _ = handle_long_paste(data)
-                event.current_buffer.insert_text(processed)
-
-            run_in_terminal(_process)
-    except Exception:
-        pass
+    # Tab completion for commands
+    @_bindings.add("tab", eager=True)
+    def _tab_complete(event):
+        """Tab completion for commands and paths."""
+        buffer = event.current_buffer
+        text = buffer.text
+        cursor_pos = buffer.cursor_position
+        
+        # Get the word before cursor
+        before_cursor = text[:cursor_pos]
+        word_start = before_cursor.rfind(' ') + 1
+        if word_start > 0 and before_cursor[word_start-1] in ' \t':
+            word_start = before_cursor.rfind(' ', 0, word_start-1) + 1
+        current_word = before_cursor[word_start:]
+        
+        # Command completions
+        commands = [
+            '/delegate', '/agent', '/autonomous', '/chunks', '/clear', '/collapse',
+            '/config', '/diagnosis', '/exit', '/expand', '/help', '/index',
+            '/recall', '/save_mem', '/project_add', '/project_init', '/project_update',
+            '/palette', '/sleep', '/wa_busy', '/wa_chats', '/wa_history',
+            '/wa_report', '/wa_search', '/wa_send', '/wa_silence', '/wa_status',
+            '/web', '/session_save', '/session_load', '/session_list', '/session_delete',
+        ]
+        
+        # Filter commands that start with current word
+        matches = [cmd for cmd in commands if cmd.startswith(current_word)]
+        
+        if matches:
+            if len(matches) == 1:
+                # Single match - complete it
+                completion = matches[0][len(current_word):]
+                buffer.insert_text(completion)
+            else:
+                # Multiple matches - show common prefix or cycle
+                common_prefix = os.path.commonprefix(matches)
+                if len(common_prefix) > len(current_word):
+                    buffer.insert_text(common_prefix[len(current_word):])
+                else:
+                    # Cycle through matches
+                    if not hasattr(_tab_complete, '_cycle_index'):
+                        _tab_complete._cycle_index = 0
+                    _tab_complete._cycle_index = (_tab_complete._cycle_index + 1) % len(matches)
+                    match = matches[_tab_complete._cycle_index]
+                    # Delete current word and insert match
+                    buffer.delete_before_cursor(count=len(current_word))
+                    buffer.insert_text(match)
+        return
 
     _pt_session = PromptSession(
         history=FileHistory(HISTORY_FILE),
@@ -135,6 +164,8 @@ if not _HAS_PROMPT_TOOLKIT:
         readline.parse_and_bind(r'"\e[B": next-history')
         readline.parse_and_bind(r'"\e[C": forward-char')
         readline.parse_and_bind(r'"\e[D": backward-char')
+        # History search with Ctrl+R
+        readline.parse_and_bind(r'"\C-r": reverse-search-history')
         import atexit
         atexit.register(lambda: readline.write_history_file(HISTORY_FILE))
     except Exception:
@@ -234,51 +265,10 @@ def _fallback_posix_input(prompt_str: str) -> str:
     return "\n".join(lines)
 
 
-def handle_long_paste(text: str) -> tuple[str, str | None]:
-    """
-    Detect if text is a large paste (by length or line count).
-    If so, save to workspace/pasted_content_DDMMYYHHMMSS.txt and return file info.
-    Also handles the case where text contains multiple newlines that came from
-    a single paste event, ensuring they're treated as one cohesive unit.
-    
-    IMPORTANT: This function is called AFTER paste completion, so we can safely
-    process multiline content without triggering premature submission.
-    """
-    if not text:
-        return text, None
-
-    line_count = text.count("\n") + 1
-    char_count = len(text)
-
-    if char_count >= LONG_PASTE_CHAR_THRESHOLD or line_count >= LONG_PASTE_LINE_THRESHOLD:
-        ts = datetime.now().strftime("%d%m%y-%H%M%S")
-        filename = f"pasted_content_{ts}.txt"
-        filepath = os.path.join(paths.WORKSPACE_DIR, filename)
-
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(text)
-
-            print(
-                f"{GRAY}[Auto-saved pasted content ({char_count} chars, {line_count} lines) "
-                f"→ {CYAN}workspace/{filename}{GRAY}]{RESET}"
-            )
-            annotated_text = (
-                f"[Pasted content saved to workspace/{filename} "
-                f"({char_count} chars, {line_count} lines)]"
-            )
-            return annotated_text, filepath
-        except Exception as e:
-            print(f"{YELLOW}[WARN] Could not save pasted content to file: {e}{RESET}")
-            return text, None
-
-    return text, None
-
-
 def get_interactive_input(prompt_str: str = "\nYOU > ") -> str:
     """
     Get interactive input from the user with full arrow-key editing,
-    multiline support, persistent history, and automatic paste saving.
+    multiline support, persistent history, and tab completion.
     """
     raw_input = ""
 
@@ -298,5 +288,4 @@ def get_interactive_input(prompt_str: str = "\nYOU > ") -> str:
     if not cleaned:
         return ""
 
-    processed, _ = handle_long_paste(cleaned)
-    return processed
+    return cleaned

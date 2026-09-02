@@ -16,7 +16,6 @@ This document defines the coding standards, architectural rules, and safety guid
 
 ---
 
-
 ## 0. Instruction-Read Gate
 
 This manual is executable policy for coding tasks, not background documentation.
@@ -30,6 +29,8 @@ Before any source-changing action:
 If `coding.md` has not been read in the current session, do not write, delete, or run a mutating command.
 
 This gate is intentionally redundant with the system prompt: the prompt selects the policy, while this manual states the policy itself so the rule remains available if the task is resumed or the prompt is compressed.
+
+---
 
 ## Before Touching Any File
 
@@ -62,12 +63,12 @@ Before writing a single line, identify whether this is:
 
 ## 1. Environment Constraints
 
-The system runs cross-platform across Termux/Android, Linux, macOS, and Windows:
+The system runs **primarily in Termux/Android** with cross-platform compatibility for Linux, macOS, and Windows:
 
-- **No global writable paths.** `/tmp`, `/var`, `/usr/local` are not reliably writable across all platforms. All paths must resolve through `paths.py` under the project root.
+- **No global writable paths.** `/tmp`, `/var`, `/usr/local` are not reliably writable across all platforms. All paths must resolve through `paths.py` under the project root (`~/Termux-AI`).
 - **IPC limitations.** Named pipes (FIFOs) and POSIX shared memory are restricted on Android. Use `multiprocessing.Queue` exclusively.
 - **Resource pressure.** Keep threads minimal, always join subprocesses, and close file handles in `finally` blocks.
-- **Cross-Platform Compatibility.** Never hardcode OS-specific commands without a platform check (`sys.platform == 'win32'`).
+- **Cross-Platform Compatibility.** Never hardcode OS-specific commands without a platform check (`sys.platform == 'win32'`). For Termux, prefer `termux-*` commands via wrappers.
 
 ---
 
@@ -81,7 +82,7 @@ Every package has a strict responsibility. Crossing these boundaries causes regr
 | `agent/` | Task state, planning, execution, validation | `from agent import state_manager` |
 | `orchestration/` | Multi-process delegation, IPC | `from orchestration import Manager, Worker` |
 | `reflection/` | Execution logging, failure analysis, auto-retry | `from reflection import ReflectionLoop, attempt_correction` |
-| `tools/` | Platform hardware API wrappers only | `from tools import wrapper_termux_battery_status` |
+| `tools/` | Platform hardware API wrappers only (Termux API) | `from tools import wrapper_termux_battery_status` |
 | `config/` | Secrets and runtime settings — no logic | read via `paths.API_KEYS_FILE`, `paths.CONFIG_FILE` |
 | `data/` | Persistent state and schemas — no logic | read/write via `agent/state_manager.py` only |
 
@@ -148,7 +149,7 @@ logs_dir      = paths.LOGS_DIR
 1. Write the implementation function in `core/tools.py`
 2. Add the JSON schema to `TOOLS_DESCRIPTION` in `core/llm_client.py`
 3. Add the dispatch `lambda` to `_dispatch_tool()` in `core/llm_client.py`
-4. If the tool wraps a platform API: create wrapper first, call it from `core/tools.py`
+4. If the tool wraps a platform API: create wrapper first in `tools/`, call it from `core/tools.py`
 5. Run syntax check on all modified files
 6. Write a minimal dispatch test that calls `_dispatch_tool()` and asserts the return value
 

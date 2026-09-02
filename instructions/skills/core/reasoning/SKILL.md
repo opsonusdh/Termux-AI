@@ -62,8 +62,8 @@ Orion's reasoning process follows a rigorous, multi-stage Chain of Thought frame
 
 1. **Instruction gate:** Read the required manuals and applicable skill `SKILL.md` files before acting.
 2. **Ordered Steps:** List steps in logical, dependency-aware order.
-2. **Working Scratch Space:** Utilize `workspace/reasoning_tmp.txt` as a dedicated working area.
-3. **Incremental Execution:** Work step-by-step, re-reading affected files to confirm edits.
+3. **Working Scratch Space:** Utilize `workspace/reasoning_tmp.txt` as a dedicated working area.
+4. **Incremental Execution:** Work step-by-step, re-reading affected files to confirm edits.
 
 ---
 

@@ -109,7 +109,7 @@ Minimum docs-only verification:
 
 ```bash
 find instructions -maxdepth 1 -type f -name '*.md' | sort
-grep -n 'new_file_name.md' instructions/readme.md
+grep -n 'new_file_name.md' instructions/skills/INDEX.md
 ```
 
 Minimum Python code verification:
@@ -163,4 +163,3 @@ A good final maintenance report contains:
 - Any follow-up that is required for the system to use the change
 
 Keep it short. The report should prove the work is done, not narrate every step.
-

@@ -175,4 +175,3 @@ A good final maintenance report contains:
 - Any follow-up that is required for the system to use the change
 
 Keep it short. The report should prove the work is done, not narrate every step.
-

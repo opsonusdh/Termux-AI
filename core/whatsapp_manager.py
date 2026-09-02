@@ -732,7 +732,7 @@ class WhatsAppManager:
                         ack_msg = "Got it! I will stop replying now. Let me know if you need any assistance later (just ask for Orion)."
                         self.send_message(sender, ack_msg)
                         try:
-                            from tools import wa_log_write
+                            from tools_core import wa_log_write
                             wa_log_write("SENT (auto-reply)", profile_name, sender, ack_msg)
                         except Exception:
                             pass
@@ -763,7 +763,7 @@ class WhatsAppManager:
                         })
 
                 try:
-                    from tools import wa_log_write
+                    from tools_core import wa_log_write
                     log_text = text or f"[{media.get('type', 'media')}]"
                     wa_log_write("RECEIVED", profile_name, sender, log_text)
                 except Exception:
@@ -880,7 +880,7 @@ class WhatsAppManager:
         )
 
         try:
-            from tools import ask_ai_simple
+            from tools_core import ask_ai_simple
             reply_text = ask_ai_simple(prompt, "gemini-2.5-flash-lite", system_prompt)
 
             if reply_text and not reply_text.startswith("[EMPTY"):
@@ -915,7 +915,7 @@ class WhatsAppManager:
                     self.save_filters()
 
                     try:
-                        from tools import wa_log_write
+                        from tools_core import wa_log_write
                         wa_log_write("SENT (auto-reply)", profile_name, sender, reply_text)
                     except Exception:
                         pass

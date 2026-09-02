@@ -79,6 +79,131 @@ _TEXT_FENCE_LABELS = {"text", "txt", ""}
 
 
 # ============================================================
+# Syntax Highlighting (Pygments)
+# ============================================================
+
+# Cache pygments imports and formatters for performance
+_pygments_available = None
+_pygments_lexers = {}
+_pygments_formatters = {}
+
+def _get_pygments():
+    """Lazy-load pygments modules."""
+    global _pygments_available
+    if _pygments_available is not None:
+        return _pygments_available
+    
+    try:
+        from pygments import highlight
+        from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
+        from pygments.formatters import Terminal256Formatter
+        from pygments.styles import get_style_by_name
+        from pygments.util import ClassNotFound
+        
+        _pygments_available = {
+            'highlight': highlight,
+            'get_lexer_by_name': get_lexer_by_name,
+            'guess_lexer': guess_lexer,
+            'TextLexer': TextLexer,
+            'Terminal256Formatter': Terminal256Formatter,
+            'get_style_by_name': get_style_by_name,
+            'ClassNotFound': ClassNotFound,
+        }
+        return _pygments_available
+    except ImportError:
+        _pygments_available = False
+        return False
+
+
+def _get_lexer(lang: str):
+    """Get pygments lexer for language, with fallback."""
+    pyg = _get_pygments()
+    if not pyg:
+        return None
+    
+    lang = (lang or "").strip().lower()
+    if not lang:
+        return pyg['TextLexer']()
+    
+    # Check cache
+    if lang in _pygments_lexers:
+        return _pygments_lexers[lang]
+    
+    # Common language aliases
+    aliases = {
+        'py': 'python',
+        'py3': 'python',
+        'js': 'javascript',
+        'ts': 'typescript',
+        'sh': 'bash',
+        'shell': 'bash',
+        'yml': 'yaml',
+        'md': 'markdown',
+        'rs': 'rust',
+        'go': 'golang',
+        'cpp': 'cpp',
+        'c++': 'cpp',
+        'cs': 'csharp',
+        'rb': 'ruby',
+        'pl': 'perl',
+        'pm': 'perl',
+    }
+    
+    lexer_name = aliases.get(lang, lang)
+    
+    try:
+        lexer = pyg['get_lexer_by_name'](lexer_name)
+        _pygments_lexers[lang] = lexer
+        return lexer
+    except pyg['ClassNotFound']:
+        try:
+            # Try guessing
+            lexer = pyg['guess_lexer'](f"# {lexer_name}\n")
+            _pygments_lexers[lang] = lexer
+            return lexer
+        except Exception:
+            pass
+    
+    # Fallback to text lexer
+    return pyg['TextLexer']()
+
+
+def _get_formatter(style: str = 'monokai'):
+    """Get cached Terminal256Formatter."""
+    if style not in _pygments_formatters:
+        pyg = _get_pygments()
+        if not pyg:
+            return None
+        try:
+            _pygments_formatters[style] = pyg['Terminal256Formatter'](style=style)
+        except Exception:
+            _pygments_formatters[style] = pyg['Terminal256Formatter'](style='monokai')
+    return _pygments_formatters[style]
+
+
+def highlight_code(code: str, lang: str = '', style: str = 'monokai') -> str:
+    """
+    Highlight code using pygments.
+    Returns ANSI-colored code string.
+    """
+    pyg = _get_pygments()
+    if not pyg:
+        return code
+    
+    try:
+        lexer = _get_lexer(lang)
+        formatter = _get_formatter(style)
+        if not formatter:
+            return code
+        
+        highlighted = pyg['highlight'](code, lexer, formatter)
+        # Strip trailing newline added by formatter
+        return highlighted.rstrip('\n')
+    except Exception:
+        return code
+
+
+# ============================================================
 # Width helpers
 # ============================================================
 
@@ -149,6 +274,7 @@ def _plain_for_measurement(text: str) -> str:
 
 def _visible_measure(text: str) -> int:
     return display_width(text)
+
 
 def make_divider(term_width: int) -> str:
     term_width = max(1, term_width)
@@ -490,13 +616,25 @@ def fit_column_widths(max_widths: Sequence[int], term_width: int, min_col_width:
             i += 1
 
     return widths
-def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int) -> List[str]:
+
+
+def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int, highlight: bool = True) -> List[str]:
     """
     Render a fenced code block using a modern CLI open-right gutter style.
     Anchored with top (╭── lang ──) and bottom (╰──) borders with a left accent bar (│ ),
     allowing clean line rendering without rigid right-border clipping or double-box distortion.
+    
+    Now supports syntax highlighting via pygments when available.
     """
     clean_lang = (lang_str or "").strip()
+    code_text = "\n".join(code_lines)
+    
+    # Apply syntax highlighting if enabled and pygments available
+    if highlight:
+        highlighted = highlight_code(code_text, clean_lang)
+        if highlighted != code_text:
+            code_lines = highlighted.split('\n')
+    
     max_line_width = max((display_width(x) for x in code_lines), default=20)
 
     # Compute header/footer width bounded by terminal size
@@ -514,6 +652,8 @@ def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int
         rendered.append(f"{GRAY}│{RESET} {code_line}")
     rendered.append(bottom)
     return rendered
+
+
 def render_table(raw_rows: List[List[str]], term_width: int, header_color: str = BOLD + CYAN, border_color: str = GRAY) -> str:
     """Render a markdown table cleanly in the terminal."""
     if not raw_rows:
@@ -700,7 +840,7 @@ def _render_list_line(indent: str, marker: str, body: str, ordered: bool = False
 
 
 def _render_thinking_block(block_text: str, term_width: int) -> List[str]:
-    """Render an explicit XML thinking block (<thought> or <think>) as a styled terminal blob."""
+    """Render an explicit XML thinking block (<thought) as a styled terminal blob."""
     lines = block_text.strip().splitlines()
     if not lines:
         return []
@@ -713,11 +853,16 @@ def _render_thinking_block(block_text: str, term_width: int) -> List[str]:
     return rendered
 
 
-def render_markdown_terminal(text: str) -> str:
-    """Transform markdown into ANSI-coloured terminal output, rendering <thought> blobs distinctly."""
+def render_markdown_terminal(text: str, highlight_code_blocks: bool = True) -> str:
+    """Transform markdown into ANSI-coloured terminal output, rendering <thought> blobs distinctly.
+    
+    Args:
+        text: Markdown text to render
+        highlight_code_blocks: Whether to apply syntax highlighting to code blocks (default: True)
+    """
     term_width, _ = _term_size()
 
-    # Pre-process <thought> or <think> XML tags into distinct rendered blocks
+    # Pre-process <thought> XML tags into distinct rendered blocks
     def _repl_think(m):
         content = m.group(1) or m.group(2) or ""
         rendered_lines = _render_thinking_block(content, term_width)
@@ -742,7 +887,7 @@ def render_markdown_terminal(text: str) -> str:
         fence = FENCE_RE.match(line)
         if fence:
             if in_code:
-                rendered.extend(_render_code_block(code_lines, code_lang, term_width))
+                rendered.extend(_render_code_block(code_lines, code_lang, term_width, highlight=highlight_code_blocks))
                 code_lines = []
                 in_code = False
                 code_lang = "code"
@@ -852,10 +997,9 @@ def render_markdown_terminal(text: str) -> str:
 
     # Unclosed code block safety net
     if in_code and code_lines:
-        rendered.extend(_render_code_block(code_lines, code_lang, term_width))
+        rendered.extend(_render_code_block(code_lines, code_lang, term_width, highlight=highlight_code_blocks))
 
     return "\n".join(rendered)
-
 
 
 render_for_printing = render_markdown_terminal

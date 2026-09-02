@@ -59,3 +59,5 @@ Before sending generated content, check:
 
 Use notifications for user-visible completion, failures, reminders, or alerts.
 Use a concise title and content without leaking sensitive secrets.
+
+Use `termux-notification` for persistent notifications, `termux-toast` for brief messages, `termux-vibrate` for haptic feedback.

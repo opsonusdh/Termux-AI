@@ -1019,6 +1019,70 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_user",
+            "description": (
+                "Ask the user a question with optional multiple-choice options. "
+                "Returns the user\'s answer as a string. If options are provided, "
+                "the user can select by number (1, 2, 3...) or type a custom answer. "
+                "Use this when you need clarification, confirmation, or a decision from the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "Optional list of answer options. User can select by number.",
+                        "items": {
+                            "type": "string"
+                        },
+                    },
+                    "default": {
+                        "type": ["integer", "string"],
+                        "description": "Optional default value (index starting from 1, or string value).",
+                    },
+                    "allow_custom": {
+                        "type": "boolean",
+                        "description": "If true (default), user can type a custom answer instead of selecting an option.",
+                        "default": True,
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm",
+            "description": (
+                "Ask for yes/no confirmation from the user. "
+                "Returns true for yes, false for no."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The confirmation question.",
+                    },
+                    "default": {
+                        "type": "boolean",
+                        "description": "Default value if user just presses Enter.",
+                        "default": True,
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
 ]
 
 # ── LOGGING HELPERS ────────────────────────────────────────────────────────────
@@ -1347,6 +1411,8 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         "delete_file": delete_file,
         "http_request": http_request,
         "get_datetime": get_datetime,
+        "ask_user": ask_user,
+        "confirm": confirm,
     }
 
     if name in local_funcs:
@@ -2657,4 +2723,98 @@ def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_p
         return ""
     except Exception as e:
         return ""
+
+# ── USER INTERACTION TOOLS ────────────────────────────────────────────────────
+
+def ask_user(
+    question: str,
+    options: list = None,
+    default=None,
+    allow_custom: bool = True,
+    timeout: int = 0
+) -> str:
+    """
+    Ask the user a question with optional multiple-choice options.
+    
+    Args:
+        question: The question to ask the user.
+        options: Optional list of answer options. If provided, user can select by number (1, 2, 3...).
+        default: Optional default value (index starting from 1, or string value).
+        allow_custom: If True (default), user can type a custom answer instead of selecting an option.
+        timeout: Timeout in seconds (0 = no timeout). Not implemented for input().
+    
+    Returns:
+        The user's answer as a string. If options provided and user selects by number,
+        returns the corresponding option text. Otherwise returns raw input.
+    """
+    # Build the prompt
+    prompt_parts = [question]
+    
+    if options:
+        prompt_parts.append("\nOptions:")
+        for i, opt in enumerate(options, 1):
+            prompt_parts.append(f"  {i}) {opt}")
+        
+        if allow_custom:
+            prompt_parts.append("\nEnter number, or type your own answer:")
+        else:
+            prompt_parts.append(f"\nEnter number (1-{len(options)}):")
+    else:
+        if default is not None:
+            prompt_parts.append(f" [{default}]")
+        prompt_parts.append(": ")
+    
+    prompt = "\n".join(prompt_parts) + " "
+    
+    # Get user input
+    try:
+        user_input = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return "[USER CANCELLED]"
+    
+    # Handle empty input with default
+    if not user_input and default is not None:
+        if isinstance(default, int) and options and 1 <= default <= len(options):
+            return options[default - 1]
+        return str(default)
+    
+    # If options provided, try to parse as number
+    if options:
+        try:
+            choice = int(user_input)
+            if 1 <= choice <= len(options):
+                return options[choice - 1]
+        except ValueError:
+            pass  # Not a number, treat as custom input
+        
+        # If not a valid number and custom not allowed, ask again
+        if not allow_custom:
+            print(f"Please enter a number between 1 and {len(options)}.")
+            return ask_user(question, options, default, allow_custom, timeout)
+    
+    return user_input
+
+
+def confirm(question: str, default: bool = True) -> bool:
+    """
+    Ask for yes/no confirmation.
+    
+    Args:
+        question: The confirmation question.
+        default: Default value if user just presses Enter.
+    
+    Returns:
+        True for yes, False for no.
+    """
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    
+    try:
+        response = input(question + suffix).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return default
+    
+    if not response:
+        return default
+    
+    return response in ('y', 'yes', 'true', '1')
 

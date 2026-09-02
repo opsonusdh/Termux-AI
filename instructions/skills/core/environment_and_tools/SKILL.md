@@ -73,8 +73,14 @@ A one-pass script is faster, more consistent, and does not consume multiple read
 | `termux-wifi-scaninfo` | Nearby network scan |
 | `termux-vibrate` | Haptic alert on task completion or failure |
 | `termux-notification` | System notification |
+| `termux-toast` | Brief on-screen toast message |
+| `termux-clipboard-get` / `termux-clipboard-set` | Clipboard access |
+| `termux-contact-list` | Contact access (with permission) |
+| `termux-sms-list` / `termux-sms-send` | SMS access (with permission) |
+| `termux-location` | GPS/network location (with permission) |
+| `termux-sensor` | Sensor data (accelerometer, gyroscope, etc.) |
 
-Wrappers: `tools/wrapper_termux_battery_status.py`, `tools/wrapper_termux_wifi_scaninfo.py`
+Wrappers: `tools/wrapper_termux_battery_status.py`, `tools/wrapper_termux_wifi_scaninfo.py`, `tools/wrapper_termux_*.py`
 
 ### Verify Before Reporting Unavailability
 Before reporting that a command or API is unavailable, verify:
@@ -151,5 +157,6 @@ Always load via `paths` constants — never hardcode paths.
 
 1. **Check first.** Run `pip list | grep <package>` or `import <package>` before installing.
 2. **Standard library first.** Prefer `json`, `subprocess`, `multiprocessing`, `pathlib`, `sqlite3`, and `threading`.
-3. **Required packages** (installed by `setup.sh`): `openai`, `requests`, `beautifulsoup4`, `jsonschema`
+3. **Required packages** (installed by `setup.sh`): `openai`, `requests`, `beautifulsoup4`, `jsonschema`, `tiktoken`
 4. **Termux system packages** — install via `pkg install <package>`, not `apt`. Never run `pkg remove` or system-level changes without explicit user authorization.
+5. **Python packages** — use `pip install`, not `pkg install python-<package>` unless explicitly needed for binary wheels.

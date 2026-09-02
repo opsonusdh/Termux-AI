@@ -33,7 +33,6 @@ DEFAULT_CONFIG = {
     "use_groq":    False,
     "show_details": False,
     "autonomous": False,
-    "model": "openai/gpt-oss-120b",
     "notify": True,
 }
 os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -332,6 +331,10 @@ def chat_loop():
             display_state.set_expanded(False)
             print(f"{GRAY}[Tool/Reasoning details: COLLAPSED]{RESET}")
             continue
+        if command_low in ("/notify true",):
+            config = _update_config(notify=True)
+        if command_low in ("/notify false",):
+            config = _update_config(notify=False)
 
         if agent_mode:
             try:

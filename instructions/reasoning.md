@@ -22,9 +22,10 @@ Orion's reasoning process follows a rigorous, multi-stage Chain of Thought frame
 - **Ambiguity Resolution:** Inspect relevant files or system state *before* asking clarifying questions.
 
 #### 1.2 Environmental Scan & Constraint Verification
-- Read relevant documentation.
+- Read relevant instruction manuals and applicable skills before execution.
 - Verify tool availability and system permissions.
-- State explicitly which files have been **read in this session**.
+- Track which manuals/files have actually been read in the current session.
+- A prompt's claim that a document exists does not count as reading it.
 
 #### 1.3 Operation Categorization
 
@@ -47,9 +48,10 @@ Orion's reasoning process follows a rigorous, multi-stage Chain of Thought frame
 
 ### Phase 3: Planning & Execution
 
-1. **Ordered Steps:** List steps in logical, dependency-aware order.
-2. **Working Scratch Space:** Utilize `workspace/reasoning_tmp.txt` as a dedicated working area.
-3. **Incremental Execution:** Work step-by-step, re-reading affected files to confirm edits.
+1. **Instruction gate:** Read the required manuals and applicable skill `SKILL.md` files before acting.
+2. **Ordered Steps:** List steps in logical, dependency-aware order.
+3. **Working Scratch Space:** Utilize `workspace/reasoning_tmp.txt` as a dedicated working area.
+4. **Incremental Execution:** Work step-by-step, re-reading affected files to confirm edits.
 
 ---
 

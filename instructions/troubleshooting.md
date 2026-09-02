@@ -164,7 +164,7 @@ Before changing bridge code, run `node --check Termux-WP/bot.js` if the file exi
 Check before installing:
 
 ```bash
-python3 -c "import requests, bs4, jsonschema; print('python deps OK')"
+python3 -c "import requests, bs4, jsonschema, tiktoken; print('python deps OK')"
 pkg list-installed | grep -E 'python|nodejs|clang|cmake|rust'
 ```
 
@@ -189,4 +189,3 @@ A troubleshooting task is complete when:
 - The final report includes the symptom, root cause, fix, and proof.
 
 If the root cause cannot be fixed in the current constraints, leave the system in a stable state and report the exact blocker.
-

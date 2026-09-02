@@ -83,83 +83,91 @@ nano config/api.keys
 python core
 ```
 
-Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console](https://console.groq.com/) · [NVIDIA NIM](https://build.nvidia.com/)
+Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console](https://console.groq.com/) · [NVIDIA NIM](https://build.nvidia.com/) · [OPENROUTER](https://openrouter.ai/)
 
 ---
 
 ## Directory Structure
 
 ```
-~/Termux-AI/
-│
-├── paths.py                        ← Single source of truth for all file paths
-├── setup.sh                        ← Dependency installer
-├── PROJECT_STRUCTURE.md            ← Full architecture reference
-│
-├── core/                           ← Main runtime engine
-│   ├── __main__.py                 ← Entry point  (python core)
-│   ├── interface.py                ← Chat loop, /agent trigger, voice I/O
-│   ├── llm_client.py               ← Multi-provider LLM client, tool dispatch,
-│   │                                  run_agent_step()
-│   ├── context_manager.py          ← Chunk-based two-layer memory system
-│   ├── tools.py                    ← All LLM-callable tool implementations
-│   ├── prompt.py                   ← System prompt
-│   ├── renderer.py                 ← Terminal markdown renderer, ANSI colours
-│   ├── permissions.py              ← Shell command safety validator
-│   ├── whatsapp_manager.py         ← WhatsApp bridge
-│   └── input_handler.py            ← Enhanced CLI input with arrow navigation,
-│                                      multiline support, and persistent history
-│
-├── agent/                          ← Planning, execution, validation, state
-│   ├── state_manager.py            ← Task CRUD, cursor, crash recovery,
-│   │                                  checkpoint writing, persona management
-│   ├── planner.py                  ← create_plan() / commit_plan()
-│   ├── executor.py                 ← Post-execution wrapper (validates + logs)
-│   └── validator.py                ← JSON-schema validation of results
-│
-├── orchestration/                  ← Multi-process task delegation
-│   ├── orchestrator.py             ← Subprocess delegator
-│   ├── manager.py                  ← Sequential multi-worker task manager
-│   ├── worker.py                   ← Task execution: shell / python / mock
-│   └── protocol.py                 ← multiprocessing.Queue IPC wrapper
-│
-├── reflection/                     ← Self-diagnosis and correction
-│   ├── __init__.py                 ← ReflectionLoop, attempt_correction
-│   ├── reflector.py                ← Failure analyser
-│   └── self_correction.py          ← Auto-retry on validation failure
-│
-├── tools/                          ← Termux hardware API wrappers
-│   ├── tool_wrappers.py
-│   ├── wrapper_termux_battery_status.py
-│   └── wrapper_termux_wifi_scaninfo.py
-│
-├── instructions/                   ← Agent-facing operational manuals
-│   ├── readme.md                   ← Manual index
-│   ├── coding.md                   ← Standards, paths.py, error handling
-│   ├── reasoning.md                ← Task decomposition, troubleshooting
-│   ├── orchestration_workflows.md  ← Worker lifecycle, IPC protocol
-│   └── environment_and_tools.md    ← Termux API, security, wrapper pattern
-│
-├── config/                         ← Secrets and runtime config (gitignored)
-│   ├── api.keys                    ← {"google":[...], "openrouter":[...], "groq":[...], "nvidia":[...]}
-│   ├── config.json                 ← {"stt_path":"...", "tts_enabled":false, "notify":true}
-│   └── capability_registry.json    ← Registered module/function capabilities
-│
-├── data/                           ← Persistent state and schemas
-│   ├── state.json                  ← Live agent state (gitignored)
-│   └── validator_schema.json       ← JSON schema for execution results
-│
-├── logs/                           ← All log files (gitignored)
-│   ├── chunks.jsonl                ← Raw conversation chunk store (append-only)
-│   ├── chunk_summaries.json        ← Progressive summaries by chunk ID
-│   ├── reflection.jsonl            ← Execution outcome log
-│   └── history.jsonl               ← Legacy turn log
-│
-├── workspace/                      ← Scratch space for agent tasks (gitignored)
-│   └── morning_report.py
-│
-└── docs/
-    └── patches/                    ← Historical patch files
+~/Termux-AI
+.
+├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── LICENSE.md
+├── PROJECT_STRUCTURE.md
+├── README.md
+├── SECURITY.md
+├── agent
+│   ├── __init__.py
+│   ├── executor.py
+│   ├── planner.py
+│   ├── state_manager.py
+│   └── validator.py
+├── config
+│   ├── api.keys
+│   ├── api.keys.template
+│   ├── capability_registry.json
+│   ├── config.json
+│   └── whatsapp_filters.json
+├── core
+│   ├── PROMPT.md
+│   ├── __main__.py
+│   ├── context_manager.py
+│   ├── display_state.py
+│   ├── input_handler.py
+│   ├── interface.py
+│   ├── llm_client.py
+│   ├── permissions.py
+│   ├── renderer.py
+│   ├── tools.py
+│   └── whatsapp_manager.py
+├── data
+│   ├── cli_history
+│   ├── sessions
+│   ├── state.json
+│   └── validator_schema.json
+├── indexed_memory.txt
+├── logs
+│   ├── chunk_summaries.json
+│   ├── chunks.jsonl
+│   ├── history.jsonl
+│   ├── log.txt
+│   ├── problem.txt
+│   └── whatsapp_log.jsonl
+├── memories.txt
+├── orchestration
+│   ├── __init__.py
+│   ├── manager.py
+│   ├── orchestrator.py
+│   ├── protocol.py
+│   └── worker.py
+├── paths.py
+├── reflection
+│   ├── __init__.py
+│   ├── reflector.py
+│   └── self_correction.py
+├── setup.sh
+└── tools
+    ├── __init__.py
+    ├── tool_wrappers.py
+    ├── wrapper_termux_audio.py
+    ├── wrapper_termux_battery_status.py
+    ├── wrapper_termux_brightness.py
+    ├── wrapper_termux_camera.py
+    ├── wrapper_termux_clipboard.py
+    ├── wrapper_termux_contacts.py
+    ├── wrapper_termux_filepicker.py
+    ├── wrapper_termux_location.py
+    ├── wrapper_termux_sensors.py
+    ├── wrapper_termux_sms.py
+    ├── wrapper_termux_telephony.py
+    ├── wrapper_termux_torch.py
+    ├── wrapper_termux_vibrate.py
+    ├── wrapper_termux_volume.py
+    ├── wrapper_termux_wallpaper.py
+    └── wrapper_termux_wifi_scaninfo.py
 ```
 
 ---
@@ -175,7 +183,6 @@ The following options are available in `config/config.json`:
 | `use_groq` | boolean | `false` | Use Groq TTS (faster, requires internet) |
 | `show_details` | boolean | `false` | Show expanded tool output by default |
 | `autonomous` | boolean | `false` | Bypass permission layer (opt-in) |
-| `model` | string | `openai/gpt-oss-120b` | Default model for chat |
 | `notify` | boolean | `true` | Send system notification after agent tasks complete |
 
 Example `config.json`:
@@ -186,7 +193,6 @@ Example `config.json`:
     "use_groq": false,
     "show_details": false,
     "autonomous": false,
-    "model": "openai/gpt-oss-120b",
     "notify": true
 }
 ```
@@ -285,7 +291,6 @@ Every other tool follows the same shape — `[TOOL_NAME]` collapsed, `[TOOL_NAME
 | `Enter` | Send the message |
 | `Ctrl+N` | Insert a newline, for multiline messages |
 | `Ctrl+J` | Also sends (compatibility alias) |
-| `Ctrl+Enter` | Also sends, on terminals that can signal it distinctly from plain Enter |
 | `Ctrl+O` | Toggle collapsed ↔ expanded tool/reasoning detail |
 
 If a terminal doesn't pass a key combo through, the same toggle is available as a command, in both `/agent` and normal chat:
@@ -294,8 +299,6 @@ If a terminal doesn't pass a key combo through, the same toggle is available as 
 YOU > /expand      # aliases: /details on, /view extended
 YOU > /collapse    # aliases: /details off, /view collapsed
 ```
-
-Pasting 300+ characters or 4+ lines saves the content to `workspace/pasted_content_DDMMYY-HHMMSS.txt` instead of dropping it into the input line — the model sees only a short reference and can read the file itself if it needs the full text.
 
 ---
 

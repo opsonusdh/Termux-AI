@@ -17,6 +17,12 @@ Use diagnosis, not repeated guessing.
 ## Python/import failures
 Check the active working directory, `sys.path`, module resolution, and the exact import traceback. Confirm the intended file is the one being imported.
 
+**Common Termux-AI import hazard:** `tools/` package and `core/tools.py` share the same import name.
+```bash
+python3 -c "import sys; sys.path.insert(0,'core'); import tools; print(tools.__file__)"
+```
+Expected: `.../Termux-AI/core/tools.py` — if it resolves to `tools/__init__.py`, fix bootstrap order: `core/` must be inserted before root.
+
 ## Tool failures
 Identify whether the failure is permission, argument/schema, provider, timeout, or implementation. Inspect the tool result before retrying.
 

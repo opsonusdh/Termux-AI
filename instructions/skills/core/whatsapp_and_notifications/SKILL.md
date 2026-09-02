@@ -25,3 +25,6 @@ Do not expose full phone numbers, message histories, authentication data, QR pay
 
 ## Failures
 Inspect the actual bridge status and error. Do not claim delivery, connection, or availability without verification.
+
+## Termux Notifications
+Use `termux-notification` for persistent notifications, `termux-toast` for brief messages, `termux-vibrate` for haptic feedback.

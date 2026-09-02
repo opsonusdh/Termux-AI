@@ -180,7 +180,7 @@ def open_chunk(user_input: str) -> None:
         }
 
 
-def close_chunk(assistant_reply: str) -> int:
+def close_chunk(assistant_reply: str, reasoning_meta: dict | None = None) -> int:
     """
     Call AFTER ask_ai() returns.  Finalises the chunk, injects tool context
     captured by set_tool_context(), checks size, splits into subchunks if
@@ -200,7 +200,18 @@ def close_chunk(assistant_reply: str) -> int:
 
     # Assemble the full message sequence for this turn:
     #   user message → tool exchanges → final assistant reply
-    msgs = user_msgs + tool_msgs + [{"role": "assistant", "content": assistant_reply}]
+    assistant_msg = {"role": "assistant", "content": assistant_reply}
+    if reasoning_meta:
+        if reasoning_meta.get("reasoning"):
+            assistant_msg["reasoning"] = reasoning_meta["reasoning"]
+        if reasoning_meta.get("reasoning_details"):
+            assistant_msg["reasoning_details"] = reasoning_meta["reasoning_details"]
+        if reasoning_meta.get("reasoning_provider"):
+            assistant_msg["_reasoning_provider"] = reasoning_meta["reasoning_provider"]
+        if reasoning_meta.get("model"):
+            assistant_msg["_reasoning_model"] = reasoning_meta["model"]
+
+    msgs = user_msgs + tool_msgs + [assistant_msg]
 
     # Size check (in serialised JSON chars, as a proxy for token weight)
     total_chars = sum(len(json.dumps(m, ensure_ascii=False)) for m in msgs)
@@ -617,7 +628,7 @@ def _call_summarizer(parent_id: int, stage: str, existing: dict) -> str:
         "No preamble, no labels, no markdown."
     )
     try:
-        from tools import ask_ai_simple
+        from tools_core import ask_ai_simple
         return ask_ai_simple(prompt, SUMMARIZER_MODEL, sys_prompt)
     except Exception:
         return ""
