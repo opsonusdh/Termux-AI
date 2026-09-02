@@ -1,0 +1,9 @@
+{
+    "stt_path": "/data/data/com.termux/files/home/Termux-AI/Termux-STT",
+    "tts_enabled": false,
+    "use_groq": false,
+    "show_details": true,
+    "autonomous": true,
+    "model": "openai/gpt-oss-120b",
+    "notify": true
+}

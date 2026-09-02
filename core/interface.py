@@ -33,6 +33,8 @@ DEFAULT_CONFIG = {
     "use_groq":    False,
     "show_details": False,
     "autonomous": False,
+    "model": "openai/gpt-oss-120b",
+    "notify": True,
 }
 os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
 if not os.path.exists(CONFIG_PATH):
@@ -45,9 +47,26 @@ try:
 except:
     config = DEFAULT_CONFIG
 
+# Ensure all required config keys exist
+for key, value in DEFAULT_CONFIG.items():
+    if key not in config:
+        config[key] = value
+
 STT_PATH = os.path.expanduser(config["stt_path"])
 if STT_PATH not in sys.path:
     sys.path.append(STT_PATH)
+
+
+def _send_notification(title: str, message: str) -> None:
+    """Send a system notification using termux-notification."""
+    try:
+        subprocess.run(
+            ["termux-notification", "--title", title, "--content", message],
+            capture_output=True,
+            timeout=5
+        )
+    except Exception:
+        pass  # Silently fail if notification fails
 
 
 def _update_config(**kwargs) -> dict:
@@ -255,6 +274,9 @@ def chat_loop():
                 print(render_markdown_terminal(f"**Agent Status:** {result}"))
                 if "No pending" in result or "failed" in result.lower():
                     break
+            # Send notification when agent auto work is done
+            if config.get("notify", True):
+                _send_notification("Termux-AI Agent", "Agent auto task completed")
             continue
 
         # Direct persistent agent mode.
@@ -283,6 +305,9 @@ def chat_loop():
                         {"role": "user", "content": inline_prompt},
                         assistant_msg,
                     ])
+                    # Send notification when agent inline task is done
+                    if config.get("notify", True):
+                        _send_notification("Termux-AI Agent", "Agent task completed")
                 except KeyboardInterrupt:
                     print("\nInterrupted.")
                 except Exception as e:
@@ -336,6 +361,9 @@ def chat_loop():
                 {"role": "user", "content": user_input},
                 assistant_msg,
             ])
+            # Send notification when agent mode task is done
+            if config.get("notify", True):
+                _send_notification("Termux-AI Agent", "Agent task completed")
             continue
 
         log_write(f"\nUser > {user_input}")

@@ -29,6 +29,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 - **Safe execution** — `permissions.py` validates every shell command before dispatch.
 - **Autonomous mode (opt-in)** — `/autonomous on` bypasses the permission layer entirely; off by default. See [Autonomous Mode](#autonomous-mode).
 - **Advanced LLM Client** — Enhanced model slot organization with agent-specific slots, advanced error handling for API failures, reasoning budget exhaustion management, native reasoning metadata preservation, and tool execution timeout tracking.
+- **Notifications (opt-in)** — When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification` after agent tasks complete (both inline `/agent [prompt]` and persistent agent mode).
 
 ---
 
@@ -141,7 +142,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 │
 ├── config/                         ← Secrets and runtime config (gitignored)
 │   ├── api.keys                    ← {"google":[...], "openrouter":[...], "groq":[...], "nvidia":[...]}
-│   ├── config.json                 ← {"stt_path":"...", "tts_enabled":false}
+│   ├── config.json                 ← {"stt_path":"...", "tts_enabled":false, "notify":true}
 │   └── capability_registry.json    ← Registered module/function capabilities
 │
 ├── data/                           ← Persistent state and schemas
@@ -163,6 +164,35 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 
 ---
 
+## Configuration (config/config.json)
+
+The following options are available in `config/config.json`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `stt_path` | string | `~/Termux-AI/Termux-STT` | Path to Termux-STT module |
+| `tts_enabled` | boolean | `false` | Start with voice mode enabled |
+| `use_groq` | boolean | `false` | Use Groq TTS (faster, requires internet) |
+| `show_details` | boolean | `false` | Show expanded tool output by default |
+| `autonomous` | boolean | `false` | Bypass permission layer (opt-in) |
+| `model` | string | `openai/gpt-oss-120b` | Default model for chat |
+| `notify` | boolean | `true` | Send system notification after agent tasks complete |
+
+Example `config.json`:
+```json
+{
+    "stt_path": "/data/data/com.termux/files/home/Termux-AI/Termux-STT",
+    "tts_enabled": false,
+    "use_groq": false,
+    "show_details": false,
+    "autonomous": false,
+    "model": "openai/gpt-oss-120b",
+    "notify": true
+}
+```
+
+---
+
 ## Agent Mode
 
 ```
@@ -174,6 +204,17 @@ YOU > /chat           # switch to conversational mode
 ```
 
 Initialize a project and add tasks through normal chat — Orion uses the `initialize_project` and `add_subtask` tools. State persists in `data/state.json` and survives restarts.
+
+### Agent Notifications
+
+When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification` after:
+- `/agent auto` completes its loop
+- `/agent [prompt]` finishes an inline agent task
+- Persistent agent mode (`/agent` mode) completes a task
+
+The notification appears in the Android notification shade with title "Termux-AI Agent" and message "Agent task completed" (or "Agent auto task completed").
+
+To disable: set `"notify": false` in `config/config.json`.
 
 ---
 
