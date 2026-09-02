@@ -80,13 +80,13 @@ MODEL_SLOTS: list[dict] = [
 ]
 
 AGENT_MODEL_SLOTS: list[dict] = [
-#    {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                     "max_tokens": None},
-    {"provider_id": "groq",       "name": "qwen/qwen3.8-27b",                    "max_tokens": 4096},
-    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                   "max_tokens": 4096},
+    {"provider_id": "openrouter", "name": "z-ai/glm-5.2:free",                     "max_tokens": None},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "poolside/laguna-xs-2.1",               "max_tokens": 8192},
     {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",           "max_tokens": None},
+    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                   "max_tokens": 4096},
+    {"provider_id": "groq",       "name": "qwen/qwen3.8-27b",                    "max_tokens": 4096},
 ]
 def _load_api_keys() -> dict[str, list[str]]:
     path = paths.API_KEYS_FILE
@@ -511,9 +511,10 @@ def _stitch_assistant_turns(messages: list[dict], last_chunk: str) -> str:
 
 
 _TOOL_TAGS = {
-    "run_code":   "EXEC",
-    "write_file": "EDITING FILE",
-    "read_file":  "READING FILE",
+    "run_code":    "EXEC",
+    "write_file":  "EDITING FILE",
+    "read_file":   "READING FILE",
+    "find_replace": "FIND REPLACE",
 }
 
 # Individual lines longer than this in a *collapsed* command preview get cut
@@ -558,6 +559,16 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
             mode = args.get("mode", "overwrite")
             return [f"[{tag}] {path} | mode: {mode} | {unit}: {span}"]
         return [f"[{tag}] {path} | {unit}: {span}"]
+
+    if name == "find_replace":
+        if not expanded:
+            return [f"[{tag}]"]
+        path = args.get("path", "")
+        find_text = args.get("find", "")
+        # Show truncated find text in header
+        find_preview = find_text[:80] + ('...' if len(find_text) > 80 else '')
+        find_preview = find_preview.replace(chr(10), '\n')
+        return [f"[{tag}] {path} | find: {find_preview}"]
 
     # Every other tool: unchanged detail-picking, restructured into the same
     # tag(+detail)-then-OUTPUT-then-TOOL DONE shape as EXEC/EDITING FILE.
@@ -611,6 +622,12 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 segment_start = g("segment_start"),
                                 segment_end   = g("segment_end"),
                                 unit          = g("unit", "lines"),
+                           ),
+        "find_replace":    lambda: find_replace(
+                                path           = g("path", ""),
+                                find           = g("find", ""),
+                                replace        = g("replace", ""),
+                                case_sensitive = g("case_sensitive", True),
                            ),
         "index_files":     lambda: index_files(
                                 path             = g("path", ""),

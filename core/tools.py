@@ -271,6 +271,41 @@ TOOLS_DESCRIPTION = [
     },
     {
         "type": "function",
+        "type": "function",
+        "function": {
+            "name": "find_replace",
+            "description": (
+                "Find and replace all occurrences of a string in a file. "
+                "Supports both single-line and multi-line find/replace patterns. "
+                "Returns the number of replacements made."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or ~ path to the file."
+                    },
+                    "find": {
+                        "type": "string",
+                        "description": "Text to find (can be multi-line)."
+                    },
+                    "replace": {
+                        "type": "string",
+                        "description": "Text to replace with (can be multi-line)."
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Whether the search is case-sensitive. Default: true.",
+                        "default": True
+                    }
+                },
+                "required": ["path", "find", "replace"]
+            }
+        }
+    },
+    {
+        "type": "function",
         "function": {
             "name": "index_files",
             "description": (
@@ -1212,13 +1247,22 @@ def read_file(path: str, segment_start: int | None = None, segment_end: int | No
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
             if segment_start is None and segment_end is None:
-                return f.read()
+                lines = f.readlines()
+                # Add line numbers to each line
+                numbered_lines = []
+                for i, line in enumerate(lines, 1):
+                    numbered_lines.append(f"{i}| {line.rstrip()}")
+                return "\n".join(numbered_lines)
 
             if unit == "lines":
                 lines = f.readlines()
                 start = (segment_start - 1) if segment_start and segment_start > 0 else 0
                 end = segment_end if segment_end and segment_end <= len(lines) else len(lines)
-                return "".join(lines[start:end])
+                # Add line numbers to the selected segment
+                numbered_lines = []
+                for i, line in enumerate(lines[start:end], start + 1):
+                    numbered_lines.append(f"{i}| {line.rstrip()}")
+                return "\n".join(numbered_lines)
             else: # bytes
                 f.seek(segment_start or 0)
                 length = (segment_end - segment_start + 1) if (segment_start and segment_end) else None
@@ -1228,10 +1272,48 @@ def read_file(path: str, segment_start: int | None = None, segment_end: int | No
         return f"[ERROR] Failed to read file: {e}"
 
 
-def write_file(path: str, content: str, mode: str = "overwrite", segment_start: int | None = None, segment_end: int | None = None, unit: str = "lines") -> str:
+
+def write_file(
+    path: str,
+    content: str,
+    mode: str = "overwrite",
+    segment_start: int | None = None,
+    segment_end: int | None = None,
+    unit: str = "lines",
+) -> str:
+    """
+    Write content to a file without using the shell.
+    Supports four modes:
+    'overwrite' replaces the entire file (default).
+    'append' adds content to the end.
+    'prepend' inserts content at the start.
+    'segment' replaces only the specified line range or byte range.
+    NOTE: Line numbers are 1-indexed (the first line of the file is line 1, not 0).
+    """
+    # Import permissions here to avoid circular imports
+    from core import permissions
+
     p = os.path.expanduser(path)
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
+
+    # Protected directory check - prevent silent modification of core/ and Termux-STT/
+    if permissions._is_protected(p):
+        rel = os.path.relpath(os.path.normpath(os.path.realpath(p)), permissions.AI_ROOT)
+        return f"[ERROR] Permission denied: '{rel}' is inside a protected directory. Use shell command with explicit permission."
+
+    # Outside project root check
+    if permissions._is_outside_root(p):
+        return f"[ERROR] Permission denied: path '{path}' is outside project directory {permissions.AI_ROOT}"
+
+    # Validate segment mode parameters
+    if mode == "segment":
+        if segment_start is None or segment_end is None:
+            return "[ERROR] segment_start and segment_end are required for segment mode"
+        if segment_start < 1:
+            return "[ERROR] segment_start must be >= 1 (1-indexed)"
+        if segment_end < segment_start:
+            return "[ERROR] segment_end must be >= segment_start"
 
     os.makedirs(os.path.dirname(p), exist_ok=True)
 
@@ -1251,7 +1333,7 @@ def write_file(path: str, content: str, mode: str = "overwrite", segment_start: 
             if os.path.exists(p):
                 with open(p, "r", encoding="utf-8", errors="replace") as f:
                     existing = f.read()
-            with open(p, "w", encoding="utf-8") as f:
+            with open(p, "w", encoding="utf-8", errors="replace") as f:
                 f.write(content + existing)
             return f"Successfully prepended to {path}."
 
@@ -1262,23 +1344,117 @@ def write_file(path: str, content: str, mode: str = "overwrite", segment_start: 
                 with open(p, "r", encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
 
-            start = (segment_start - 1) if segment_start and segment_start > 0 else 0
-            end = segment_end if segment_end else len(lines)
+            start = segment_start - 1  # Convert to 0-indexed (validated >= 1 above)
+            original_len = len(lines)
+            end = min(segment_end, original_len)  # Cap at file length
+
+            # Validate range
+            if start > end:
+                return f"[ERROR] segment_start ({segment_start}) exceeds file length ({original_len})"
 
             new_lines = content.splitlines(keepends=True)
-            if new_lines and not new_lines[-1].endswith("\n"):
-                new_lines[-1] += "\n"
+
+            # Determine what kind of operation this is
+            is_insert_at_end = (start == original_len) and (end == original_len)
+            is_replace_through_end = (start < original_len) and (end >= original_len)
+            is_middle_replace = (end < original_len)
+
+            if is_replace_through_end and original_len > 0:
+                # Replacing from middle through end (includes last line)
+                if not lines[-1].endswith("\n"):
+                    # Original last line had no trailing newline
+                    if new_lines and new_lines[-1].endswith("\n"):
+                        new_lines[-1] = new_lines[-1].rstrip("\n")
+                elif new_lines and not new_lines[-1].endswith("\n"):
+                    # Original had trailing newline, ensure new content does too
+                    new_lines[-1] += "\n"
+            elif is_insert_at_end:
+                # Inserting after last line
+                if original_len > 0 and not lines[-1].endswith("\n"):
+                    # File does not end with newline - add one to last line first
+                    lines[-1] += "\n"
+                # New line should have newline
+                if new_lines and not new_lines[-1].endswith("\n"):
+                    new_lines[-1] += "\n"
+            elif is_middle_replace:
+                # Replacing middle lines only - ensure all new lines have newlines
+                for i in range(len(new_lines)):
+                    if not new_lines[i].endswith("\n"):
+                        new_lines[i] += "\n"
 
             lines[start:end] = new_lines
             with open(p, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-            return f"Successfully updated lines {start+1}..{end} in {path}."
+            # Report the intended range (segment_start..segment_end)
+            return f"Successfully updated lines {segment_start}..{segment_end} in {path}."
 
         else:
             return f"[ERROR] Invalid write mode: {mode}"
 
     except Exception as e:
         return f"[ERROR] Failed to write file: {e}"
+
+
+
+def find_replace(
+    path: str,
+    find: str,
+    replace: str,
+    case_sensitive: bool = True,
+) -> str:
+    """
+    Find and replace all occurrences of a string in a file.
+    Supports both single-line and multi-line find/replace patterns.
+    Returns the number of replacements made.
+    """
+    from core import permissions
+
+    p = os.path.expanduser(path)
+    if not os.path.isabs(p):
+        p = os.path.join(paths.ROOT, p)
+
+    # Protected directory check
+    if permissions._is_protected(p):
+        rel = os.path.relpath(os.path.normpath(os.path.realpath(p)), permissions.AI_ROOT)
+        return f"[ERROR] Permission denied: '{rel}' is inside a protected directory. Use shell command with explicit permission."
+
+    # Outside project root check
+    if permissions._is_outside_root(p):
+        return f"[ERROR] Permission denied: path '{path}' is outside project directory {permissions.AI_ROOT}"
+
+    if not os.path.exists(p):
+        return f"[ERROR] File not found: {path}"
+
+    if not find:
+        return "[ERROR] 'find' parameter cannot be empty."
+
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        if case_sensitive:
+            count = content.count(find)
+            if count == 0:
+                return f"No occurrences of the search text found in {path}."
+            new_content = content.replace(find, replace)
+        else:
+            # Case-insensitive replacement using regex
+            import re
+            pattern = re.compile(re.escape(find), re.IGNORECASE)
+            matches = pattern.findall(content)
+            count = len(matches)
+            if count == 0:
+                return f"No occurrences of the search text found in {path}."
+            new_content = pattern.sub(replace, content)
+
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {path}."
+
+    except Exception as e:
+        return f"[ERROR] Failed to find and replace: {e}"
+
 
 
 def index_files(path: str, extension_filter: str = "") -> str:
