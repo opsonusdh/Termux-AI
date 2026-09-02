@@ -565,9 +565,15 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
             return [f"[{tag}]"]
         path = args.get("path", "")
         find_text = args.get("find", "")
+        segment_start = args.get("segment_start")
+        segment_end = args.get("segment_end")
         # Show truncated find text in header
-        find_preview = find_text[:80] + ('...' if len(find_text) > 80 else '')
-        find_preview = find_preview.replace(chr(10), '\n')
+        find_preview = find_text[:80] + ("..." if len(find_text) > 80 else "")
+        find_preview = find_preview.replace(chr(10), "\n")
+        if segment_start is not None or segment_end is not None:
+            seg_desc = f" lines {segment_start or 1}..{segment_end or "end"}"
+            return [f"[{tag}] {path}{seg_desc} | find: {find_preview}"]
+        return [f"[{tag}] {path} | find: {find_preview}"]
         return [f"[{tag}] {path} | find: {find_preview}"]
 
     # Every other tool: unchanged detail-picking, restructured into the same

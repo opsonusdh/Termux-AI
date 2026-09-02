@@ -277,6 +277,7 @@ TOOLS_DESCRIPTION = [
             "description": (
                 "Find and replace all occurrences of a string in a file. "
                 "Supports both single-line and multi-line find/replace patterns. "
+                "Optionally restrict replacements to a specific line range (1-indexed). "
                 "Returns the number of replacements made."
             ),
             "parameters": {
@@ -298,6 +299,16 @@ TOOLS_DESCRIPTION = [
                         "type": "boolean",
                         "description": "Whether the search is case-sensitive. Default: true.",
                         "default": True
+                    },
+                    "segment_start": {
+                        "type": "integer",
+                        "description": "Start line number (1-indexed) for the segment to search within. Omit to search from the beginning.",
+                        "minimum": 1
+                    },
+                    "segment_end": {
+                        "type": "integer",
+                        "description": "End line number (1-indexed, inclusive) for the segment to search within. Omit to search to the end of file.",
+                        "minimum": 1
                     }
                 },
                 "required": ["path", "find", "replace"]
@@ -1401,10 +1412,13 @@ def find_replace(
     find: str,
     replace: str,
     case_sensitive: bool = True,
+    segment_start: int | None = None,
+    segment_end: int | None = None,
 ) -> str:
     """
     Find and replace all occurrences of a string in a file.
     Supports both single-line and multi-line find/replace patterns.
+    Optionally restrict replacements to a specific line range (1-indexed).
     Returns the number of replacements made.
     """
     from core import permissions
@@ -1428,29 +1442,87 @@ def find_replace(
     if not find:
         return "[ERROR] 'find' parameter cannot be empty."
 
+    # Validate segment parameters
+    if segment_start is not None and segment_start < 1:
+        return "[ERROR] segment_start must be >= 1 (1-indexed)"
+    if segment_end is not None and segment_end < 1:
+        return "[ERROR] segment_end must be >= 1 (1-indexed)"
+    if segment_start is not None and segment_end is not None and segment_end < segment_start:
+        return "[ERROR] segment_end must be >= segment_start"
+
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
+            lines = f.readlines()
 
+        # If no segment specified, operate on entire file
+        if segment_start is None and segment_end is None:
+            content = "".join(lines)
+            if case_sensitive:
+                count = content.count(find)
+                if count == 0:
+                    return f"No occurrences of the search text found in {path}."
+                new_content = content.replace(find, replace)
+            else:
+                import re
+                pattern = re.compile(re.escape(find), re.IGNORECASE)
+                matches = pattern.findall(content)
+                count = len(matches)
+                if count == 0:
+                    return f"No occurrences of the search text found in {path}."
+                new_content = pattern.sub(replace, content)
+
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {path}."
+
+        # Segment specified: operate only on the specified line range
+        total_lines = len(lines)
+        start_idx = (segment_start - 1) if segment_start else 0
+        end_idx = segment_end if segment_end else total_lines
+        
+        # Cap at file length
+        start_idx = min(max(0, start_idx), total_lines)
+        end_idx = min(max(0, end_idx), total_lines)
+        
+        if start_idx >= end_idx:
+            return f"[ERROR] Invalid segment range: lines {segment_start}..{segment_end} (file has {total_lines} lines)"
+
+        # Extract the segment content
+        segment_lines = lines[start_idx:end_idx]
+        segment_content = "".join(segment_lines)
+
+        # Perform find/replace on segment only
         if case_sensitive:
-            count = content.count(find)
+            count = segment_content.count(find)
             if count == 0:
-                return f"No occurrences of the search text found in {path}."
-            new_content = content.replace(find, replace)
+                return f"No occurrences of the search text found in lines {segment_start or 1}..{segment_end or total_lines} of {path}."
+            new_segment_content = segment_content.replace(find, replace)
         else:
-            # Case-insensitive replacement using regex
             import re
             pattern = re.compile(re.escape(find), re.IGNORECASE)
-            matches = pattern.findall(content)
+            matches = pattern.findall(segment_content)
             count = len(matches)
             if count == 0:
-                return f"No occurrences of the search text found in {path}."
-            new_content = pattern.sub(replace, content)
+                return f"No occurrences of the search text found in lines {segment_start or 1}..{segment_end or total_lines} of {path}."
+            new_segment_content = pattern.sub(replace, segment_content)
+
+        # Reconstruct the file with the modified segment
+        new_segment_lines = new_segment_content.splitlines(keepends=True)
+        
+        # Handle trailing newline consistency
+        if segment_content.endswith("\n") and new_segment_lines and not new_segment_lines[-1].endswith("\n"):
+            new_segment_lines[-1] += "\n"
+        elif not segment_content.endswith("\n") and new_segment_lines and new_segment_lines[-1].endswith("\n"):
+            new_segment_lines[-1] = new_segment_lines[-1].rstrip("\n")
+
+        lines[start_idx:end_idx] = new_segment_lines
 
         with open(p, "w", encoding="utf-8") as f:
-            f.write(new_content)
+            f.writelines(lines)
 
-        return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {path}."
+        seg_desc = f"lines {segment_start or 1}..{segment_end or total_lines}"
+        return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {seg_desc} of {path}."
 
     except Exception as e:
         return f"[ERROR] Failed to find and replace: {e}"
