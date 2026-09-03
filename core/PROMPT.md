@@ -135,6 +135,7 @@ For source changes:
 - Keep concurrency limited to the project's approved architecture.
 - For repeated mechanical changes, use a script or bulk transformation instead of many fragile edits.
 - Do not rewrite a whole subsystem when a targeted fix is sufficient.
+- Use timeout with the commands which can lag. For example: pip, termux native commands, curl etc.
 
 When adding an LLM-callable tool:
 
