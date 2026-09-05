@@ -515,6 +515,7 @@ _TOOL_TAGS = {
     "write_file":  "EDITING FILE",
     "read_file":   "READING FILE",
     "find_replace": "FIND REPLACE",
+    "manage_todos": "TODO",
 }
 
 # Individual lines longer than this in a *collapsed* command preview get cut
@@ -815,6 +816,13 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "share_text":        lambda: share_text(
                                 text    = g("text", ""),
                                 subject = g("subject", None),
+                             ),
+        "manage_todos":      lambda: manage_todos(
+                                action  = g("action", ""),
+                                title   = g("title", None),
+                                tasks   = g("tasks", None),
+                                task_id = g("task_id"),
+                                text    = g("text", None),
                              ),
     }
 

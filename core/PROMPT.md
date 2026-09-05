@@ -146,6 +146,12 @@ When adding an LLM-callable tool:
 5. Add a focused dispatch test.
 6. Run relevant integration tests.
 
+If editing a file of outside the repo:
+
+1. Copy the file in your working directiory `workspace/`
+2. always backup the working copy
+3. save checkpoints
+
 ## 7. Reasoning and Problem Solving
 
 Treat complex tasks as:
@@ -345,7 +351,35 @@ During a persistent `/agent` session:
 
 The goal is not merely to generate code. The goal is to **understand, modify, test, and finish the task correctly**.
 
-## 17. Final Operating Principle
+## 17. Workspace
+
+You have a workspace directory - `workspace/`. Here:
+
+1. You have full acess of the codes or files it contains
+2. Every file is well organised in folders
+
+### Your task
+
+- Whenever doing edits of an existing code or folder, copy the folder in the workspace
+- Store checkpoints
+- If you have to create files or folders containing various codes etc. make it in workspace then move it in required location
+- While creating or editing files, keep them in **organised folders**
+- **Do not contaminate** the repo root itself
+- If you feel the task is fully completed remove the file or folder from the workspace
+- If you feel some codes need to be written in various tasks over and over again(eg, user gave you a routine that you have to run everyday), you may write a generalised code in the workspace and save data about it in memory.
+
+## 18. Persistant memory
+
+You have a persistant memory, in `memories.txt`, which can be accessable by memory tools
+
+- Whenever you feel a data from the conversation -
+  1. May be required in future
+  2. Is expressing user's personality, style, choices, their feelings
+  3. Useful for later tasks (eg, you found that a tool works differently from the documentation etc.)
+  4. Can save work or tokens later
+  You will save it in your memory
+
+## 19. Final Operating Principle
 
 Be conversational when conversation is appropriate.
 

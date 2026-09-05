@@ -1129,6 +1129,54 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_todos",
+            "description": (
+                "Manage a persistent todo/task checklist saved in logs/todos.json. "
+                "Break large tasks into smaller subtasks, track progress by checking/unchecking, "
+                "list all tasks at once, delete or clear tasks. Data persists across sessions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "add", "list", "check", "uncheck", "delete", "clear"],
+                        "description": (
+                            "Action to perform: "
+                            "'create' = start a new list (replaces existing), optionally with tasks; "
+                            "'add' = append task(s) to existing list; "
+                            "'list' = show all tasks with status; "
+                            "'check' = mark a task done by ID; "
+                            "'uncheck' = mark a task not-done by ID; "
+                            "'delete' = remove a task by ID; "
+                            "'clear' = wipe all tasks."
+                        ),
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Title for the todo list (used with 'create', optionally 'add').",
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of task descriptions (used with 'create' and 'add').",
+                    },
+                    "task_id": {
+                        "type": "integer",
+                        "description": "ID of the task to check, uncheck, or delete.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Single task text (alternative to 'tasks' for 'add' action).",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
 ]
 
 # ── LOGGING HELPERS ────────────────────────────────────────────────────────────
@@ -1661,6 +1709,7 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         "get_datetime": get_datetime,
         "ask_user": ask_user,
         "confirm": confirm,
+        "manage_todos": manage_todos,
     }
 
     if name in local_funcs:
@@ -3066,3 +3115,141 @@ def confirm(question: str, default: bool = True) -> bool:
     
     return response in ('y', 'yes', 'true', '1')
 
+
+
+# ── TODO MANAGER ───────────────────────────────────────────────────────────────
+
+_TODO_FILE = os.path.join(paths.LOGS_DIR, "todos.json")
+
+
+def _load_todos() -> dict:
+    """Load the todo data from logs/todos.json."""
+    if not os.path.exists(_TODO_FILE):
+        return {"title": "My Tasks", "tasks": [], "next_id": 1}
+    try:
+        with open(_TODO_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"title": "My Tasks", "tasks": [], "next_id": 1}
+        data.setdefault("title", "My Tasks")
+        data.setdefault("tasks", [])
+        data.setdefault("next_id", max((t.get("id", 0) for t in data["tasks"]), default=0) + 1)
+        return data
+    except (json.JSONDecodeError, Exception):
+        return {"title": "My Tasks", "tasks": [], "next_id": 1}
+
+
+def _save_todos(data: dict) -> None:
+    """Save todo data to logs/todos.json."""
+    os.makedirs(os.path.dirname(_TODO_FILE), exist_ok=True)
+    with open(_TODO_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _format_todos(data: dict) -> str:
+    """Pretty-print the todo list."""
+    title = data.get("title", "My Tasks")
+    tasks = data.get("tasks", [])
+    if not tasks:
+        return f"📋 {title}\n{'─' * 40}\n  (no tasks yet)\n"
+    total = len(tasks)
+    done = sum(1 for t in tasks if t.get("done"))
+    lines = [
+        f"📋 {title}",
+        f"   Progress: {done}/{total} completed ({round(done / total * 100)}%)",
+        f"{'─' * 40}",
+    ]
+    for t in tasks:
+        box = "✅" if t.get("done") else "⬜"
+        lines.append(f"  [{t['id']}] {box} {t['text']}")
+    return "\n".join(lines) + "\n"
+
+
+def manage_todos(
+    action: str,
+    title: str | None = None,
+    tasks: list | None = None,
+    task_id: int | None = None,
+    text: str | None = None,
+) -> str:
+    """
+    Manage a persistent todo/task checklist stored in logs/todos.json.
+
+    Actions:
+      create  — start a new list, optionally with initial tasks; replaces existing list.
+      add     — append one or more tasks to the existing list.
+      list    — show all tasks with their status.
+      check   — mark a task as done by ID.
+      uncheck — mark a task as not-done by ID.
+      delete  — remove a task by ID.
+      clear   — wipe all tasks.
+    """
+    log_write(f"[manage_todos] action:{action} title:{title} task_id:{task_id}")
+
+    if action == "clear":
+        _save_todos({"title": "My Tasks", "tasks": [], "next_id": 1})
+        return "🧹 All tasks cleared. The todo list is now empty."
+
+    if action == "list":
+        data = _load_todos()
+        return _format_todos(data)
+
+    if action == "create":
+        new_title = title or "My Tasks"
+        new_tasks = []
+        task_texts = tasks if tasks else ([text] if text else [])
+        next_id = 1
+        for desc in task_texts:
+            if desc and desc.strip():
+                new_tasks.append({"id": next_id, "text": desc.strip(), "done": False})
+                next_id += 1
+        data = {"title": new_title, "tasks": new_tasks, "next_id": next_id}
+        _save_todos(data)
+        return f"✅ Created new todo list '{new_title}' with {len(new_tasks)} task(s).\n" + _format_todos(data)
+
+    if action == "add":
+        data = _load_todos()
+        task_texts = tasks if tasks else ([text] if text else [])
+        added = 0
+        for desc in task_texts:
+            if desc and desc.strip():
+                tid = data["next_id"]
+                data["tasks"].append({"id": tid, "text": desc.strip(), "done": False})
+                data["next_id"] = tid + 1
+                added += 1
+        if title:
+            data["title"] = title
+        _save_todos(data)
+        msg = f"Added {added} task(s) to '{data['title']}'."
+        if added == 0:
+            msg = "No task text provided. Nothing was added."
+        return msg + "\n" + _format_todos(data)
+
+    if action in ("check", "uncheck"):
+        if task_id is None:
+            return f"[ERROR] task_id is required for '{action}' action."
+        data = _load_todos()
+        target = next((t for t in data["tasks"] if t["id"] == task_id), None)
+        if target is None:
+            return f"[ERROR] No task found with ID {task_id}."
+        if action == "check":
+            target["done"] = True
+            _save_todos(data)
+            return f"✅ Checked task {task_id}: {target['text']}\n" + _format_todos(data)
+        else:
+            target["done"] = False
+            _save_todos(data)
+            return f"⬜ Unchecked task {task_id}: {target['text']}\n" + _format_todos(data)
+
+    if action == "delete":
+        if task_id is None:
+            return "[ERROR] task_id is required for 'delete' action."
+        data = _load_todos()
+        target = next((t for t in data["tasks"] if t["id"] == task_id), None)
+        if target is None:
+            return f"[ERROR] No task found with ID {task_id}."
+        data["tasks"] = [t for t in data["tasks"] if t["id"] != task_id]
+        _save_todos(data)
+        return f"🗑️ Deleted task {task_id}: {target['text']}\n" + _format_todos(data)
+
+    return f"[ERROR] Unknown action '{action}'. Valid: create, add, list, check, uncheck, delete, clear."
