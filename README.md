@@ -120,6 +120,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console
 │   ├── interface.py
 │   ├── llm_client.py
 │   ├── permissions.py
+│   ├── models.py
 │   ├── renderer.py
 │   ├── tools.py
 │   └── whatsapp_manager.py

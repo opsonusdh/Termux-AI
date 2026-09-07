@@ -28,7 +28,7 @@ This directory defines how Orion thinks, works, and makes decisions. The documen
 
 ```
 ~/Termux-AI/
-├── core/              Runtime engine (interface, llm_client, context_manager, tools)
+├── core/              Runtime engine (interface, llm_client, models, context_manager, tools)
 ├── agent/             Planning, execution, validation, state management
 ├── orchestration/     Multi-process task delegation
 ├── reflection/        Execution logging and self-correction
