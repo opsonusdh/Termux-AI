@@ -58,6 +58,12 @@ MODEL_SLOTS: list[dict] = [
 
 
 AGENT_MODEL_SLOTS: list[dict] = [
+    {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",                    "max_tokens": None},
+    {"provider_id": "openrouter", "name": "dots-studio/dots-3-note-preview:free",          "max_tokens": None},
+    {"provider_id": "openrouter", "name": "inclusionai/ling-3.0-flash-vl:free",          "max_tokens": None},
+    {"provider_id": "openrouter", "name": "inclusionai/ling-3.0-flash-fin:free",         "max_tokens": None},
+    {"provider_id": "openrouter", "name": "nex-agi/nex-n2.5-pro:free",                    "max_tokens": None},
+    {"provider_id": "nvidia", "name": "z-ai/glm-5.3",           "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "poolside/laguna-xs-2.1",               "max_tokens": 8192},

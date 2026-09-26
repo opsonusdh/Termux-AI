@@ -7,6 +7,7 @@ import time
 import shlex
 import shutil
 import signal
+import socket
 import fnmatch
 import heapq
 import requests
@@ -343,12 +344,13 @@ TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
-            "name": "web_scrape",
+            "name": "browse_web",
             "description": (
                 "Fetch a URL and convert readable content into structured markdown. "
-                "Supports HTML pages, plain text, JSON, tables, ordered/unordered lists, "
-                "links, images, and media URLs. Optionally target one or more elements "
-                "with a CSS selector."
+                "Uses a headless Chromium browser (via Chrome DevTools Protocol) to "
+                "properly render JavaScript-heavy pages, single-page applications, and "
+                "dynamically loaded content. Supports CSS selectors to target specific "
+                "elements. Falls back to requests+BeautifulSoup if Chromium is unavailable."
             ),
             "parameters": {
                 "type": "object",
@@ -367,6 +369,40 @@ TOOLS_DESCRIPTION = [
                         "default": 12000,
                         "minimum": 1000,
                         "maximum": 50000,
+                    },
+                    "actions": {
+                        "type": "array",
+                        "description": (
+                            "Optional list of actions to perform on the page before extraction. "
+                            "Each action is a dict with a 'type' field ('click', 'input', or 'wait'), "
+                            "a 'selector' field (CSS selector, required for click/input), "
+                            "a 'wait_after' field (seconds to wait after the action, default 1.0), "
+                            "and a 'text' field (text to type, required for input actions). "
+                            "Actions are best-effort; the fallback scraper may not support all action types."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["click", "input", "wait"],
+                                    "description": "The action type: click, input, or wait.",
+                                },
+                                "selector": {
+                                    "type": "string",
+                                    "description": "CSS selector for the target element (required for click and input).",
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Text to type into the element (required for input actions).",
+                                },
+                                "wait_after": {
+                                    "type": "number",
+                                    "description": "Seconds to wait after the action (default 1.0).",
+                                    "default": 1.0,
+                                },
+                            },
+                        },
                     },
                 },
                 "required": ["url"],
@@ -1177,6 +1213,165 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    # ── Termux API wrappers (advertised to LLM so it knows these exist) ──
+    {
+        "type": "function",
+        "function": {
+            "name": "get_contacts",
+            "description": "Retrieve all contacts on the device as a list of dicts.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_contact_by_id",
+            "description": "Retrieve a specific contact by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "string", "description": "The contact ID to look up."},
+                },
+                "required": ["contact_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sensors",
+            "description": "List all available device sensors (accelerometer, gyroscope, etc.).",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_sensor_data",
+            "description": "Get sensor data for a specific sensor type.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sensor_type": {"type": "string", "description": "Type of sensor (accelerometer, gyroscope, magnetometer, light, proximity, pressure, temperature, humidity, step_counter, step_detector)."},
+                    "samples":     {"type": "integer", "description": "Number of samples to collect.", "default": 1},
+                    "delay":       {"type": "integer", "description": "Delay between samples in milliseconds.", "default": 100},
+                },
+                "required": ["sensor_type"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_wallpaper",
+            "description": "Set the device wallpaper from an image file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "Path to the image file to set as wallpaper."},
+                    "lockscreen": {"type": "boolean", "description": "If true, set lockscreen wallpaper instead of home screen.", "default": False},
+                },
+                "required": ["image_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_photo",
+            "description": "Take a photo using the device camera.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_path": {"type": "string", "description": "Path to save the photo (auto-generated if not provided).", "default": None},
+                    "camera_id":   {"type": "integer", "description": "Camera ID (0 = back, 1 = front).", "default": 0},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_video",
+            "description": "Record a video using the device camera.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_path": {"type": "string", "description": "Path to save the video (auto-generated if not provided).", "default": None},
+                    "camera_id":   {"type": "integer", "description": "Camera ID (0 = back, 1 = front).", "default": 0},
+                    "limit":       {"type": "integer", "description": "Maximum duration in seconds (0 = no limit).", "default": 0},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "record_audio",
+            "description": "Record audio for a specific duration.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "output_path": {"type": "string", "description": "Path to save the recording (auto-generated if not provided).", "default": None},
+                    "format":      {"type": "string", "description": "Audio format (aac, amr, 3gp, etc.).", "default": "aac"},
+                    "bitrate":     {"type": "integer", "description": "Bitrate in bits per second.", "default": 128000},
+                    "duration":    {"type": "integer", "description": "Recording duration in seconds.", "default": 10},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pick_file",
+            "description": "Open a file picker to select file(s).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "multiple":   {"type": "boolean", "description": "Allow multiple file selection.", "default": False},
+                    "mime_type":  {"type": "string", "description": "MIME type filter (e.g., 'image/*', 'application/pdf').", "default": "*/*"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "share_file",
+            "description": "Share a file using the Android share sheet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to the file to share."},
+                    "mime_type": {"type": "string", "description": "MIME type of the file.", "default": None},
+                    "subject":   {"type": "string", "description": "Subject line for the share.", "default": None},
+                    "text":      {"type": "string", "description": "Additional text to share.", "default": None},
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "share_text",
+            "description": "Share text using the Android share sheet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text":    {"type": "string", "description": "The text to share."},
+                    "subject": {"type": "string", "description": "Subject line for the share.", "default": None},
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 # ── LOGGING HELPERS ────────────────────────────────────────────────────────────
@@ -1616,11 +1811,410 @@ def index_files(path: str, extension_filter: str = "") -> str:
     return f"Successfully indexed {indexed_count} file(s) into indexed_memory.txt."
 
 
-def web_scrape(url: str, selector: str | None = None, max_chars: int = 12000) -> str:
+# ── CHROME PATH & PORT HELPERS ────────────────────────────────────────────────────
+
+def _find_chrome() -> str | None:
+    """Locate a Chrome/Chromium executable on the system."""
+    candidates = [
+        os.environ.get('CHROME_PATH', ''),
+        '/data/data/com.termux/files/usr/lib/chromium/chrome',
+        '/data/data/com.termux/files/usr/bin/chromium-browser',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    for name in ('chromium-browser', 'chromium', 'google-chrome', 'google-chrome-stable'):
+        try:
+            result = subprocess.run(['which', name], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                path = result.stdout.strip()
+                if path and os.path.isfile(path):
+                    return path
+        except Exception:
+            pass
+    return None
+
+
+def _find_free_port() -> int | None:
+    """Find a free TCP port on 127.0.0.1."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        resp = requests.get(url, headers=headers, timeout=12)
-        resp.raise_for_status()
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+    except Exception:
+        return None
+    finally:
+        s.close()
+
+
+def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
+    """Wait until a TCP connection to 127.0.0.1:port succeeds."""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(('127.0.0.1', port))
+            s.close()
+            return True
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            time.sleep(0.3)
+    return False
+
+
+# ── CDP (Chrome DevTools Protocol) WEBSOCKET HELPERS ──────────────────────────────
+
+def _send_cdp(ws, method: str, params: dict | None = None, msg_id: int = 1, timeout: float = 10) -> dict:
+    """
+    Send a Chrome DevTools Protocol command over a WebSocket connection
+    and return the matching response.
+
+    CDP sends both command responses (with matching 'id') and event
+    notifications (no 'id'). We read until we get the response we want.
+    """
+    msg: dict = {"id": msg_id, "method": method}
+    if params:
+        msg["params"] = params
+    ws.send(json.dumps(msg))
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            raw = ws.recv()
+        except Exception:
+            time.sleep(0.05)
+            continue
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict) and "id" in data and data["id"] == msg_id:
+            return data
+    return {"error": {"message": "timeout waiting for CDP response"}}
+
+
+def _wait_for_load(ws, timeout: float = 12.0, msg_id: int = 4) -> bool:
+    """
+    Poll document.readyState until 'complete' or timeout.
+
+    When the page is *already* 'complete' (typical after a click action where
+    navigation hasn't been detected yet), the function briefly waits and re-checks
+    so that a navigation triggered by the click is properly caught.
+    """
+    deadline = time.time() + timeout
+    was_complete = False
+    recheck_deadline = time.time() + 2.0  # give a navigation 2s to start
+    while time.time() < deadline:
+        resp = _send_cdp(ws, "Runtime.evaluate", {
+            "expression": "document.readyState",
+            "returnByValue": True
+        }, msg_id)
+        result = resp.get("result", {}).get("result", {})
+        val = result.get("value", "loading")
+        if val == "complete":
+            if was_complete:
+                # Stayed complete throughout — page is stable
+                return True
+            # First time seeing complete. Give a brief window for navigation
+            # to start (click may have triggered a delayed navigation).
+            was_complete = True
+            if time.time() > recheck_deadline:
+                return True
+            time.sleep(0.2)
+            continue
+        else:
+            was_complete = False
+            recheck_deadline = time.time() + 2.0
+        time.sleep(0.3)
+    return False
+
+
+def _evaluate_js(ws, js: str, msg_id: int = 6, timeout: float = 10) -> tuple:
+    """Evaluate JavaScript in the page context and return (value, error)."""
+    resp = _send_cdp(ws, "Runtime.evaluate", {
+        "expression": js,
+        "returnByValue": True,
+        "awaitPromise": True
+    }, msg_id, timeout=timeout)
+
+    if "error" in resp:
+        return None, resp["error"].get("message", "CDP error")
+
+    result_wrapper = resp.get("result", {})
+    result = result_wrapper.get("result", {})
+
+    if result_wrapper.get("exceptionDetails"):
+        exc = result_wrapper.get("exceptionDetails", {})
+        return None, f"JS exception: {exc.get('text', 'unknown')}"
+
+    if result.get("type") == "string":
+        return result.get("value", ""), None
+    elif result.get("type") == "object" and "value" in result:
+        return json.dumps(result["value"], ensure_ascii=False), None
+    return result.get("value", ""), None
+
+
+
+def _get_element_bounds(ws, selector: str, msg_id: int) -> tuple:
+    """
+    Get the bounding box of an element via CDP.
+    Returns (x, y, width, height) or (None, None, None, None) if not found.
+    """
+    safe_selector = selector.replace("'", "\\'")
+    js = (
+        "(function() {"
+        "var el = document.querySelector('" + safe_selector + "');"
+        "if (!el) return null;"
+        "var rect = el.getBoundingClientRect();"
+        "return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};"
+        "})()"
+    )
+    result, err = _evaluate_js(ws, js, msg_id=msg_id)
+    if err or result is None:
+        return (None, None, None, None)
+    try:
+        # _evaluate_js returns JSON string for objects, parse it
+        if isinstance(result, str):
+            import json
+            result = json.loads(result)
+        return (float(result.get("x", 0)), float(result.get("y", 0)),
+                float(result.get("width", 0)), float(result.get("height", 0)))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return (None, None, None, None)
+
+
+
+def _click_element(ws, x: float, y: float, msg_id: int) -> bool:
+    """Click at specific coordinates using CDP Input.dispatchMouseEvent."""
+    # Mouse pressed
+    _send_cdp(ws, "Input.dispatchMouseEvent", {
+        "type": "mousePressed",
+        "x": x, "y": y,
+        "button": "left",
+        "clickCount": 1
+    }, msg_id)
+    # Mouse released
+    result = _send_cdp(ws, "Input.dispatchMouseEvent", {
+        "type": "mouseReleased",
+        "x": x, "y": y,
+        "button": "left",
+        "clickCount": 1
+    }, msg_id + 1)
+    return "error" not in result
+
+
+def _type_text(ws, text: str, msg_id: int) -> bool:
+    """Type text using CDP Input.dispatchKeyEvent."""
+    for i, char in enumerate(text):
+        _send_cdp(ws, "Input.dispatchKeyEvent", {
+            "type": "char",
+            "text": char,
+            "unmodifiedText": char
+        }, msg_id + i)
+    return True
+
+
+def _perform_actions(ws, actions: list, start_msg_id: int) -> tuple:
+    """
+    Perform a sequence of actions (click, wait, input).
+    Returns (success: bool, error_msg: str, final_msg_id: int).
+    """
+    msg_id = start_msg_id
+    for i, action in enumerate(actions):
+        action_type = action.get("type", "click")
+        selector = action.get("selector", "")
+        wait_after = float(action.get("wait_after", 1.0))
+        
+        if action_type == "click":
+            if not selector:
+                return (False, "Click action requires a selector", msg_id)
+            x, y, w, h = _get_element_bounds(ws, selector, msg_id)
+            if x is None or y is None:
+                return (False, f"Element not found for selector: {selector}", msg_id)
+            # Click at center of element
+            cx, cy = x + w / 2, y + h / 2
+            if not _click_element(ws, cx, cy, msg_id + 1):
+                return (False, f"Failed to click element: {selector}", msg_id)
+            msg_id += 2
+            # After clicking, give the browser a brief moment to start any
+            # navigation before polling readyState, so _wait_for_load can
+            # catch the loading->complete transition.
+            
+        elif action_type == "input":
+            if not selector:
+                return (False, "Input action requires a selector", msg_id)
+            # First click to focus
+            x, y, w, h = _get_element_bounds(ws, selector, msg_id)
+            if x is None or y is None:
+                return (False, f"Input element not found: {selector}", msg_id)
+            cx, cy = x + w / 2, y + h / 2
+            _click_element(ws, cx, cy, msg_id + 1)
+            # Type the text
+            text = action.get("text", "")
+            _type_text(ws, text, msg_id + 2)
+            msg_id += 2 + len(text)
+            
+        elif action_type == "wait":
+            # Just wait
+            pass
+        
+        else:
+            return (False, f"Unknown action type: {action_type}", msg_id)
+        
+        if wait_after > 0:
+            time.sleep(wait_after)
+            # Wait for any navigation/load triggered by the action
+            _wait_for_load(ws, timeout=10)
+    
+    return (True, "", msg_id)
+
+
+def _cleanup_chrome(proc) -> None:
+    """Terminate Chrome subprocess and all its children, then clean up user data."""
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+
+
+def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000, actions: list = None) -> str:
+    """
+    Fallback scraper using requests + BeautifulSoup.
+    Used when Chrome/Chromium is not available.
+
+    Best-effort handling of actions:
+      - input: fills the form field and submits the enclosing form (POST or GET).
+      - click: if the element is an <a> link, follows its href to fetch the target URL.
+      - wait:  no-op (pass-through).
+    Actions that cannot be fulfilled are noted in the output, and text extraction
+    proceeds on whatever page state is available.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"}
+        action_notes = []
+
+        # Process actions before fetching the final page
+        if actions:
+            for i, action in enumerate(actions):
+                atype = action.get("type", "click")
+                aselect = action.get("selector", "")
+                atext = action.get("text", "")
+                aw = float(action.get("wait_after", 1.0))
+
+                if atype == "wait":
+                    # Best-effort: just sleep
+                    time.sleep(min(aw, 3.0))
+                    continue
+
+                # Fetch the page so we can find the element
+                resp = requests.get(url, headers=headers, timeout=12)
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                if atype == "input":
+                    # Find the input element and submit its enclosing form
+                    el = soup.select_one(aselect)
+                    if el is None:
+                        action_notes.append(f"[WARNING] Input element not found: {aselect}")
+                        continue
+                    # Look for an enclosing <form>
+                    form = el.find_parent("form") if el else None
+                    if form is None:
+                        action_notes.append(f"[WARNING] Input element has no enclosing form: {aselect}")
+                        continue
+
+                    # Build form data from all inputs in the form
+                    form_data = {}
+                    form_inputs = form.select("input, textarea, select")
+                    for inp in form_inputs:
+                        name = inp.get("name", "")
+                        if not name:
+                            continue
+                        if inp == el:
+                            form_data[name] = atext
+                        else:
+                            # Use existing value or empty
+                            form_data[name] = inp.get("value", "")
+
+                    # Determine action method and target
+                    method = form.get("method", "GET").upper()
+                    action_url = form.get("action") or url
+                    if not action_url:
+                        action_url = url
+                    # Resolve relative URLs
+                    from urllib.parse import urljoin
+                    action_url = urljoin(url, action_url)
+
+                    if method == "POST":
+                        resp = requests.post(action_url, headers=headers, data=form_data, timeout=12)
+                        url = action_url  # Update URL for subsequent actions
+                    else:
+                        resp = requests.get(action_url, headers=headers, params=form_data, timeout=12)
+                        url = action_url
+
+                    resp.raise_for_status()
+                    # Update soup for subsequent actions
+                    soup = BeautifulSoup(resp.text, "html.parser")
+
+                    if aw > 0:
+                        time.sleep(min(aw, 3.0))
+                    continue
+
+                if atype == "click":
+                    # Try to follow links
+                    el = soup.select_one(aselect)
+                    if el is None:
+                        action_notes.append(f"[WARNING] Click target not found: {aselect}")
+                        continue
+
+                    # Check if it's a link or a button
+                    if el.name == "a" or el.get("href"):
+                        href = el.get("href")
+                        if href:
+                            from urllib.parse import urljoin
+                            new_url = urljoin(url, href)
+                            url = new_url
+                            resp = requests.get(url, headers=headers, timeout=12)
+                            resp.raise_for_status()
+                            soup = BeautifulSoup(resp.text, "html.parser")
+                        else:
+                            action_notes.append(f"[WARNING] Click element has no href: {aselect}")
+                    elif el.name == "button" and el.get("onclick"):
+                        # Can't execute JS in fallback - note limitation
+                        action_notes.append(f"[WARNING] Button with onclick handler cannot be executed in fallback mode: {aselect}")
+                    else:
+                        action_notes.append(f"[NOTE] Click action on non-link element in fallback mode: {aselect}")
+
+                    if aw > 0:
+                        time.sleep(min(aw, 3.0))
+                    continue
+
+                if atype not in ("click", "input", "wait"):
+                    action_notes.append(f"[WARNING] Unknown action type: {atype}")
+
+        # Final fetch and extraction — use the last response from the actions loop
+        # if available, otherwise do a fresh GET.
+        if actions and 'resp' in dir() and resp is not None:
+            # Use the last response from the actions loop
+            pass
+        else:
+            resp = requests.get(url, headers=headers, timeout=12)
+            resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
@@ -1633,9 +2227,158 @@ def web_scrape(url: str, selector: str | None = None, max_chars: int = 12000) ->
         else:
             text = soup.get_text(separator="\n", strip=True)
 
+        # Prepend action notes if any
+        if action_notes:
+            notes_str = "\n".join(action_notes)
+            text = notes_str + "\n" + text
+
         return text[:max_chars] if len(text) > max_chars else text
     except Exception as e:
         return f"[ERROR] Web scrape failed: {e}"
+
+
+def browse_web(url: str, selector: str = "", max_chars: int = 12000, actions: list = None) -> str:
+    """
+    Fetch a URL and convert readable content into structured text.
+
+    Uses a headless Chromium browser via the Chrome DevTools Protocol to
+    properly render JavaScript-heavy pages, single-page applications, and
+    dynamically loaded content. Supports CSS selectors to target specific
+    elements and a sequence of actions (click, wait, input) for interaction.
+    Falls back to requests+BeautifulSoup if Chromium is unavailable.
+
+    Args:
+        url:       The URL to fetch.
+        selector:  Optional CSS selector to target specific element(s) for extraction.
+        max_chars: Maximum characters of extracted text (default 12000, max 50000).
+        actions:   Optional list of actions to perform before extraction.
+                   Each action is a dict with:
+                   - type: "click" | "wait" | "input"
+                   - selector: CSS selector (required for click/input)
+                   - wait_after: seconds to wait after action (default 1.0)
+                   - text: text to type (required for input)
+    """
+    max_chars = max(1000, min(50000, int(max_chars)))
+
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        return _web_scrape_fallback(url, selector, max_chars, actions)
+
+    port = _find_free_port()
+    if not port:
+        return _web_scrape_fallback(url, selector, max_chars, actions)
+
+    user_data_dir = f'/tmp/orion_chrome_{port}_{os.getpid()}'
+    chrome_args = [
+        chrome_path,
+        '--headless=new',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-extensions',
+        '--disable-sync',
+        '--disable-translate',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--mute-audio',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--hide-scrollbars',
+        '--disable-features=PrivacySandboxSettings4',
+        f'--remote-debugging-port={port}',
+        '--remote-allow-origins=*',
+        f'--user-data-dir={user_data_dir}',
+        'about:blank',
+    ]
+
+    proc = None
+    ws = None
+
+    try:
+        proc = subprocess.Popen(
+            chrome_args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        if not _wait_for_port(port, timeout=15):
+            if proc.poll() is not None:
+                return _web_scrape_fallback(url, selector, max_chars, actions)
+            return f"[ERROR] Chrome did not start listening on port {port} within 15s"
+
+        tabs_json = requests.get(f'http://127.0.0.1:{port}/json', timeout=5).json()
+        if not tabs_json:
+            return "[ERROR] Chrome started but has no tabs"
+        tab_ws_url = tabs_json[0]['webSocketDebuggerUrl']
+
+        try:
+            import websocket as _ws_module
+            ws = _ws_module.create_connection(tab_ws_url, timeout=30)
+        except ImportError:
+            return _web_scrape_fallback(url, selector, max_chars, actions)
+
+        _send_cdp(ws, "Runtime.enable", {}, 1)
+        _send_cdp(ws, "Page.enable", {}, 2)
+
+        nav = _send_cdp(ws, "Page.navigate", {"url": url}, 3)
+        if "error" in nav:
+            err = nav.get("error", {})
+            err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+            return f"[ERROR] Navigation to {url} failed: {err_msg}"
+
+        _wait_for_load(ws, timeout=12)
+
+        time.sleep(1.0)
+
+        # Perform actions if provided
+        if actions:
+            success, err_msg, msg_id = _perform_actions(ws, actions, 10)
+            if not success:
+                return f"[ERROR] Action failed: {err_msg}"
+        else:
+            msg_id = 10
+
+        if selector:
+            safe_selector = selector.replace("'", "\\'")
+            js = (
+                f"(function() {{ var els = document.querySelectorAll('{safe_selector}');"
+                f"if (!els || els.length === 0) {{ return '[WARNING] Selector \"{safe_selector}\" matched no elements'; }}"
+                f"var texts = [];"
+                f"for (var i = 0; i < els.length; i++) {{ texts.push(els[i].innerText || els[i].textContent || ''); }}"
+                f"return texts.join('\\n'); }})()"
+            )
+        else:
+            js = (
+                "(function() { var body = document.body;"
+                "if (!body) { return document.documentElement.innerText || document.documentElement.textContent || ''; }"
+                "return body.innerText || body.textContent || ''; }())"
+            )
+
+        text, err = _evaluate_js(ws, js, msg_id=msg_id)
+
+        if err:
+            return f"[ERROR] JS extraction failed: {err}"
+
+        if not isinstance(text, str):
+            text = str(text) if text else ""
+
+        if len(text) > max_chars:
+            text = text[:max_chars]
+
+        return text
+
+    except Exception as e:
+        return f"[ERROR] Browse web failed: {e}"
+    finally:
+        if ws:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        _cleanup_chrome(proc)
+        if os.path.exists(user_data_dir):
+            shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
 # ── SUB-AI DELEGATION ──────────────────────────────────────────────────────────
@@ -1652,17 +2395,29 @@ Rules:
 - Do not pad your response with pleasantries or meta-commentary.
 """
 
-_DELEGATE_MODELS = [
-    {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",                  "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "google/gemma-4-26b-a4b-it:free",               "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "poolside/laguna-xs-2.1:free",                  "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "minimax/minimax-m2.7:free",                    "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "thinkingmachines/inkling-small:free",          "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "inclusionai/ling-3.0-flash-fin:free",          "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "openrouter", "name": "liquid/lfm-2.5-2.6b:free",                     "base_url": "https://openrouter.ai/api/v1"},
-    {"provider_id": "groq",       "name": "openai/gpt-oss-120b",                         "base_url": "https://api.groq.com/openai/v1/"},
-]
+# Fallback model list for delegate_subtask.  Populated lazily from
+# core.models.AGENT_MODEL_SLOTS so it stays in sync with the canonical
+# model registry.  ``base_url`` is resolved from ``PROVIDERS``.
+_DELEGATE_MODELS: list[dict] = []
+
+
+def _ensure_delegate_models() -> None:
+    """Lazily populate ``_DELEGATE_MODELS`` from core.models."""
+    if _DELEGATE_MODELS:
+        return
+    try:
+        from core.models import PROVIDERS, AGENT_MODEL_SLOTS
+    except Exception:
+        from llm_client import PROVIDERS, AGENT_MODEL_SLOTS
+    _DELEGATE_MODELS.extend(
+        {
+            "provider_id": slot["provider_id"],
+            "name": slot["name"],
+            "base_url": PROVIDERS[slot["provider_id"]]["base_url"],
+            "max_tokens": slot.get("max_tokens"),
+        }
+        for slot in AGENT_MODEL_SLOTS
+    )
 
 
 def _dispatch_sub_tool(name: str, args_raw: str) -> str:
@@ -1679,7 +2434,7 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         "save_memory": save_memory,
         "retrieve_memory": retrieve_memory,
         "index_files": index_files,
-        "web_scrape": web_scrape,
+        "browse_web": browse_web,
         "generate_image": generate_image,
         "send_whatsapp_message": send_whatsapp_message,
         "get_whatsapp_status": get_whatsapp_status,
@@ -1731,6 +2486,13 @@ def delegate_subtask(
     max_tokens: int = 2048,
     system_prompt: str | None = None,
 ) -> str:
+    """Delegate a subtask to a sub-AI, with reasoning-preserving failover.
+
+    When an OpenRouter model produces reasoning (chain-of-thought) but the
+    response is truncated or the call fails, the reasoning is carried to the
+    next OpenRouter model via ``reasoning_details`` in the assistant message —
+    the same pattern OpenRouter documents for multi-model reasoning continuity.
+    """
     log_write(f"[delegate_subtask] model:{model} max_tokens:{max_tokens} task:{task[:80]}")
     print(f"{GRAY}[DELEGATE] → {model} | {task[:72]}{'...' if len(task) > 72 else ''}{RESET}")
 
@@ -1765,7 +2527,9 @@ def delegate_subtask(
             return "nvidia", "https://integrate.api.nvidia.com/v1"
         return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-    from llm_client import API_KEYS
+    primary_pid, primary_url = _infer_provider(model)
+    from llm_client import API_KEYS, _sanitize_messages_for_provider
+    _ensure_delegate_models()
     rotation: list[dict] = []
     for k in API_KEYS.get(primary_pid, []):
         rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
@@ -1784,30 +2548,131 @@ def delegate_subtask(
     max_attempts = len(rotation) * 2
 
     sys_p = system_prompt if system_prompt is not None else _DELEGATE_SYS_PROMPT
+
+    # Persistent message list across fallback attempts so reasoning can carry
+    # forward when switching between OpenRouter models.
+    messages: list[dict] = [
+        {"role": "system", "content": sys_p},
+        {"role": "user",   "content": user_message},
+    ]
+
+    # Track reasoning from a prior attempt for cross-model carry within
+    # OpenRouter.  Stored as a dict with provider/model/reasoning fields.
+    carried_reasoning: dict | None = None
+
     while attempts < max_attempts:
         cfg = rotation[ind]
         headers = {"HTTP-Referer": "https://github.com/opsonusdh/Termux-AI", "X-Title": "Termux-AI"} if cfg["pid"] == "openrouter" else None
         client = OpenAI(api_key=cfg["key"], base_url=cfg["base_url"], default_headers=headers)
-        messages = [
-            {"role": "system", "content": sys_p},
-            {"role": "user",   "content": user_message},
-        ]
-        
+
+        # Inject carried reasoning from a prior OpenRouter model as a synthetic
+        # assistant message so the new model can continue the chain-of-thought.
+        if (
+            carried_reasoning is not None
+            and cfg["pid"] == "openrouter"
+            and carried_reasoning.get("provider") == "openrouter"
+            and carried_reasoning.get("model") != cfg["model"]
+        ):
+            carry_msg: dict = {
+                "role": "assistant",
+                "content": None,
+                "_reasoning_provider": "openrouter",
+                "_reasoning_model": carried_reasoning["model"],
+            }
+            if carried_reasoning.get("reasoning"):
+                carry_msg["reasoning"] = carried_reasoning["reasoning"]
+            if carried_reasoning.get("reasoning_details"):
+                carry_msg["reasoning_details"] = carried_reasoning["reasoning_details"]
+            if carry_msg not in messages:
+                messages.append(carry_msg)
+            messages.append({
+                "role": "user",
+                "content": (
+                    "The previous model began reasoning but was cut off "
+                    "before producing a final answer. Continue from that "
+                    "reasoning and provide the complete final answer."
+                ),
+            })
+
+        # Sanitize for the target provider, carrying reasoning across
+        # OpenRouter models.
+        same_model = (
+            carried_reasoning is not None
+            and carried_reasoning.get("model") == cfg["model"]
+            and carried_reasoning.get("provider") == cfg["pid"]
+        )
+        clean_messages = _sanitize_messages_for_provider(
+            messages,
+            cfg["pid"],
+            model_name=cfg["model"],
+            preserve_native_reasoning=same_model,
+            reasoning_carry_provider="openrouter" if cfg["pid"] == "openrouter" else None,
+        )
+
         try:
-            resp = client.chat.completions.create(
-                model=cfg["model"],
-                messages=messages,
-                max_tokens=max_tokens,
+            create_kwargs: dict = {
+                "model": cfg["model"],
+                "messages": clean_messages,
+                "max_tokens": max_tokens,
+            }
+            if cfg["pid"] == "openrouter":
+                create_kwargs["extra_body"] = {"reasoning": {"enabled": True}}
+
+            resp = client.chat.completions.with_raw_response.create(**create_kwargs)
+            response = resp.parse()
+            raw_json = json.loads(resp.text)
+            msg = response.choices[0].message
+            content = msg.content
+
+            # Extract reasoning for potential carry to the next model.
+            reasoning = getattr(msg, "reasoning", None) or getattr(
+                msg, "reasoning_content", None
             )
-            content = resp.choices[0].message.content
-            if content:
+            reasoning_details = getattr(msg, "reasoning_details", None)
+            if not reasoning_details:
+                raw_message = (
+                    raw_json.get("choices", [{}])[0].get("message", {})
+                )
+                reasoning_details = raw_message.get("reasoning_details")
+
+            if reasoning or reasoning_details:
+                carried_reasoning = {
+                    "provider": cfg["pid"],
+                    "model": cfg["model"],
+                    "reasoning": reasoning,
+                    "reasoning_details": reasoning_details,
+                }
+
+            finish_reason = response.choices[0].finish_reason
+
+            if content and finish_reason != "length":
                 header = (
                     f"[Sub-AI Report | model={cfg['model']} | "
                     f"task={task[:60].strip()}{'...' if len(task) > 60 else ''}]\n"
                     f"{'-' * 60}\n"
                 )
                 return header + content.strip()
-            return "[delegate_subtask] Sub-AI returned an empty response."
+
+            # Response was truncated or had no content but reasoning exists —
+            # carry the reasoning and try the next model in the rotation.
+            if not content or finish_reason == "length":
+                if content:
+                    messages.append({"role": "assistant", "content": content})
+                if not carried_reasoning:
+                    anchor = content[-80:].strip() if content else ""
+                    if anchor:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Continue exactly from where you left off. "
+                                f"Do not repeat anything. Last words: '...{anchor}'"
+                            ),
+                        })
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": "Continue.",
+                        })
 
         except Exception as e:
             err = str(e).upper()
@@ -1817,8 +2682,19 @@ def delegate_subtask(
                 time.sleep(2)
             else:
                 print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] Error: {str(e)[:120]}{RESET}")
+
+            # When switching away from OpenRouter to a different provider,
+            # reasoning carry from OpenRouter no longer applies.
+            if cfg["pid"] != "openrouter" and carried_reasoning:
+                carried_reasoning = None
+
             ind = (ind + 1) % len(rotation)
             attempts += 1
+            continue
+
+        # Truncated but no exception — move to the next model.
+        ind = (ind + 1) % len(rotation)
+        attempts += 1
 
     return "[ERROR] All sub-AI providers and keys failed after multiple attempts."
 

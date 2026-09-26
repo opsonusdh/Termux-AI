@@ -360,7 +360,18 @@ def _sanitize_messages_for_provider(
     pid: str,
     model_name: str | None = None,
     preserve_native_reasoning: bool = True,
+    reasoning_carry_provider: str | None = None,
 ) -> list[dict]:
+    """Sanitise a message list for the target provider.
+
+    ``reasoning_carry_provider`` enables cross-model reasoning carry within the
+    same provider (e.g. OpenRouter).  When set to ``"openrouter"``, any
+    assistant message whose ``_reasoning_provider`` equals that value will
+    have its ``reasoning`` / ``reasoning_details`` preserved even though the
+    model name differs -- OpenRouter accepts ``reasoning_details`` in the
+    assistant role so a fresh model can continue the prior model's chain-of-
+    thought.
+    """
     going_to_gemini = pid in _GEMINI_PROVIDERS
     result = []
 
@@ -383,14 +394,27 @@ def _sanitize_messages_for_provider(
         if "name" in m:
             clean_m["name"] = m["name"]
 
-        if (
+        # Native reasoning is preserved when the provider+model match exactly,
+        # OR when a reasoning-carry provider is specified and the message came
+        # from that provider (enables cross-model carry within OpenRouter).
+        same_provider_model = (
             preserve_native_reasoning
             and m.get("_reasoning_provider") == pid
             and m.get("_reasoning_model") == model_name
-        ):
+        )
+        cross_model_carry = (
+            reasoning_carry_provider is not None
+            and m.get("_reasoning_provider") == reasoning_carry_provider
+        )
+        if same_provider_model or cross_model_carry:
             for reasoning_key in ("reasoning", "reasoning_content", "reasoning_details"):
                 if reasoning_key in m:
                     clean_m[reasoning_key] = m[reasoning_key]
+            # Preserve reasoning provenance so downstream code can identify
+            # which provider/model produced the carried chain-of-thought.
+            for prov_key in ("_reasoning_provider", "_reasoning_model"):
+                if prov_key in m:
+                    clean_m[prov_key] = m[prov_key]
 
         if "tool_calls" in m and m["tool_calls"]:
             new_tcs = []
@@ -577,10 +601,11 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 path             = g("path", ""),
                                 extension_filter = g("extension_filter", ""),
                            ),
-        "web_scrape":      lambda: web_scrape(
+        "browse_web":      lambda: browse_web(
                                 url      = g("url", ""),
                                 selector = g("selector", None),
                                 max_chars = int(g("max_chars", 12000)),
+                                actions  = g("actions", None),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
         "intermediate_print": lambda: intermediate_print(
@@ -760,6 +785,16 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 tasks   = g("tasks", None),
                                 task_id = g("task_id"),
                                 text    = g("text", None),
+                             ),
+        "ask_user":          lambda: ask_user(
+                                question     = g("question", ""),
+                                options      = g("options", None),
+                                default      = g("default"),
+                                allow_custom = _safe_bool(g("allow_custom", True)),
+                             ),
+        "confirm":           lambda: confirm(
+                                question = g("question", ""),
+                                default  = _safe_bool(g("default", True)),
                              ),
     }
 
@@ -984,11 +1019,30 @@ def _ask_with_slots(
                         and previous.get("_reasoning_model") == model_name
                     )
                     break
+            # Cross-model reasoning carry within OpenRouter: when switching
+            # between OpenRouter models, preserve the prior model's
+            # reasoning_details so the new model can continue the chain-of-
+            # thought (OpenRouter accepts reasoning_details in the assistant
+            # role across different model IDs).
+            reasoning_carry_provider = None
+            if pid == "openrouter" and not preserve_native_reasoning:
+                if any(
+                    m.get("role") == "assistant"
+                    and m.get("_reasoning_provider") == "openrouter"
+                    and any(
+                        m.get(k)
+                        for k in ("reasoning", "reasoning_content",
+                                  "reasoning_details")
+                    )
+                    for m in source
+                ):
+                    reasoning_carry_provider = "openrouter"
             messages = _sanitize_messages_for_provider(
                 source,
                 pid,
                 model_name=model_name,
                 preserve_native_reasoning=preserve_native_reasoning,
+                reasoning_carry_provider=reasoning_carry_provider,
             )
             history_model_identity = current_model_identity
             last_slot = slot
@@ -1206,9 +1260,33 @@ def _ask_with_slots(
 
                     # No second reasoning-only retry for this exact
                     # key/model. Move to another key/model combination.
+                    # Carry the prior model's reasoning so the new model
+                    # (if also OpenRouter) can continue the chain-of-thought
+                    # instead of starting from scratch.
+                    if reasoning or reasoning_details:
+                        carry_msg: dict = {
+                            "role": "assistant",
+                            "content": partial if partial.strip() else None,
+                            "_reasoning_provider": pid,
+                            "_reasoning_model": model_name,
+                        }
+                        if reasoning:
+                            carry_msg["reasoning"] = reasoning
+                        if reasoning_details:
+                            carry_msg["reasoning_details"] = reasoning_details
+                        if carry_msg not in messages:
+                            messages.append(carry_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "The previous model began reasoning but was "
+                                "cut off before producing a final answer. "
+                                "Continue from that reasoning and provide "
+                                "the complete final answer."
+                            ),
+                        })
                     slot += 1
                     last_slot = -1
-                    messages = []
                     continue
 
                 if finish_reason == "length":
@@ -1217,7 +1295,15 @@ def _ask_with_slots(
                         f"{RED}[{pid}/{model_name}] Token limit hit. "
                         f"Continuing from: '...{anchor}'{RESET}"
                     )
-                    messages.append({"role": "assistant", "content": partial})
+                    carry = {"role": "assistant", "content": partial}
+                    if reasoning or reasoning_details:
+                        carry["_reasoning_provider"] = pid
+                        carry["_reasoning_model"] = model_name
+                        if reasoning:
+                            carry["reasoning"] = reasoning
+                        if reasoning_details:
+                            carry["reasoning_details"] = reasoning_details
+                    messages.append(carry)
                     messages.append({
                         "role": "user",
                         "content": (

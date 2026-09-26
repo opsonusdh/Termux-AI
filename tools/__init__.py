@@ -40,7 +40,7 @@ retrieve_memory = _core_tools.retrieve_memory
 read_file = _core_tools.read_file
 write_file = _core_tools.write_file
 index_files = _core_tools.index_files
-web_scrape = _core_tools.web_scrape
+browse_web = _core_tools.browse_web
 sleep_mode = _core_tools.sleep_mode
 intermediate_print = _core_tools.intermediate_print
 send_whatsapp_message = _core_tools.send_whatsapp_message
@@ -119,7 +119,7 @@ __all__ = [
     'read_file',
     'write_file',
     'index_files',
-    'web_scrape',
+    'browse_web',
     'sleep_mode',
     'intermediate_print',
     'send_whatsapp_message',
