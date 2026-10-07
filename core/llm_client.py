@@ -1244,6 +1244,7 @@ def _ask_with_slots(
                 ) or "[EMPTY RESPONSE]"
 
         except Exception as exc:
+            status = _error_status(exc)
             message = str(exc)
             s_lower = message.lower()
 
@@ -1256,47 +1257,8 @@ def _ask_with_slots(
                 )
                 continue
 
-            # Rate limit (429): Google's quota is per-model, not per-key.
-            # Retrying with different keys for the same model is pointless.
-            # Skip the model entirely after the first 429.
-            status = _error_status(exc)
-            if status == 429:
-                s_lower = message.lower()
-                is_quota = any(
-                    x in s_lower for x in (
-                        "resource_exhausted", "quota", "rate limit",
-                        "rate-limit", "too many requests",
-                    )
-                )
-                if is_quota:
-                    print(
-                        f"{RED}[{pid}/{model_name}] Rate-limited/quota exhausted. "
-                        f"Skipping model (all keys share the same quota).{RESET}"
-                    )
-                    slot += 1
-                    last_slot = -1
-                    consecutive_error_identity = None
-                    consecutive_error_signature = None
-                    consecutive_error_count = 0
-                    forced_retry_key = None
-                    continue
-
-            # Model not found (404): permanently disable this model, move to next
-            if status == 404:
-                _mark_model_bad(pid, model_name)
-                print(
-                    f"{RED}[{pid}/{model_name}] Model not found (404). "
-                    f"Marking model as unavailable; moving to next model.{RESET}"
-                )
-                slot += 1
-                last_slot = -1
-                consecutive_error_identity = None
-                consecutive_error_signature = None
-                consecutive_error_count = 0
-                forced_retry_key = None
-                continue
-
-            # All other errors: consecutive-error rule (retry up to 5 times on same key)
+            # All API/runtime errors use the same consecutive-error rule.
+            # No 429/500/400-specific branch skips a key or model early.
             current_identity = (pid, model_name, api_key)
             error_signature = (
                 f"status={status!r}|{type(exc).__name__}|{message.strip()}"

@@ -15,25 +15,20 @@ PROVIDERS: dict[str, dict] = {
 
 
 MODEL_SLOTS: list[dict] = [
-    # Google models — ordered by reliability: working models first,
-    # rate-limited models at the end so they don't block fallback.
-    {"provider_id": "google", "name": "gemini-2.5-flash",                   "max_tokens": None},
+    # Google models
     {"provider_id": "google", "name": "gemini-3.7-flash",                   "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.6-flash",                   "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.5-flash",                   "max_tokens": None},
-    {"provider_id": "google", "name": "gemini-flash-lite-latest",              "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.1-flash-lite",              "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.1-flash-lite-preview",      "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3-flash-preview",             "max_tokens": None},
-    {"provider_id": "google", "name": "gemini-2.5-flash-lite",              "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.1-pro-preview",             "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-3.1-pro-preview-customtools", "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-flash-latest",                "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-flash-lite-latest",           "max_tokens": None},
+    {"provider_id": "google", "name": "gemini-pro-latest",                  "max_tokens": None},
     {"provider_id": "google", "name": "gemma-4-31b-it",                     "max_tokens": None},
     {"provider_id": "google", "name": "gemma-4-26b-a4b-it",                 "max_tokens": None},
-    # Rate-limited models (quota exhausted) — kept at the end as fallback.
-    # These resolve to Google models whose free-tier quota (20 req/day) is
-    # shared across all API keys, so retrying different keys is pointless.
-    # The 429 detector in llm_client.py skips them on first failure.
-    {"provider_id": "google", "name": "gemini-flash-latest",                "max_tokens": None},
-    {"provider_id": "google", "name": "gemini-3.8-flash",                   "max_tokens": None},
 
     # Groq & Nvidia models
     {"provider_id": "groq",       "name": "deepseek-r1-distill-llama-70b", "max_tokens": 4096},
