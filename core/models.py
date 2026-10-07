@@ -15,10 +15,11 @@ PROVIDERS: dict[str, dict] = {
     "ollama-local": {
         "base_url": "http://127.0.0.1:11434/v1/",
     },
-    # Ollama Cloud — hosted API with a monthly free tier (50K tokens).
-    # Requires an API key from the Ollama Cloud dashboard.
+    # Ollama Cloud — hosted OpenAI-compatible API with starter credits,
+    # then pay-as-you-go. Requires an API key from the Ollama Cloud dashboard.
+    # Cloud models use the `-cloud` suffix (e.g., gpt-oss:20b-cloud).
     "ollama": {
-        "base_url": "https://api.ollama.com/v1/",
+        "base_url": "https://ollama.com/v1",
     },
 }
 
@@ -33,11 +34,14 @@ MODEL_SLOTS: list[dict] = [
     {"provider_id": "ollama-local", "name": "qwen3:30b",           "max_tokens": None, "reasoning_effort": "high"},
     {"provider_id": "ollama-local", "name": "deepseek-r1:8b",      "max_tokens": None, "reasoning_effort": "high"},
 
-    # Ollama Cloud models — hosted API with a monthly free tier (50K tokens).
-    # Ordered smartest/newest first. Same max-context + thinking settings.
-    {"provider_id": "ollama", "name": "nemotron3:4.2b",            "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "gpt-oss:20b",               "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "deepseek-r1:8b",            "max_tokens": None, "reasoning_effort": "high"},
+    # Ollama Cloud models — hosted API with starter credits, then pay-as-you-go.
+    # Cloud models use the `-cloud` suffix (e.g., gpt-oss:20b-cloud).
+    # Ordered by capability. Same max-context + thinking settings.
+    {"provider_id": "ollama", "name": "nemotron3:33b-cloud",            "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "gpt-oss:120b-cloud",              "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "gpt-oss:20b-cloud",               "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "gemma4:31b",                      "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "deepseek-r1:8b-cloud",            "max_tokens": None, "reasoning_effort": "high"},
 
     # Google models
     {"provider_id": "google", "name": "gemini-3.7-flash",                   "max_tokens": None},
@@ -88,8 +92,11 @@ AGENT_MODEL_SLOTS: list[dict] = [
     {"provider_id": "ollama-local", "name": "deepseek-r1:8b",      "max_tokens": None, "reasoning_effort": "high"},
     {"provider_id": "ollama-local", "name": "gpt-oss:20b",         "max_tokens": None, "reasoning_effort": "high"},
 
-    # Ollama Cloud models for agentic coding — free monthly tier (50K tokens).
-    {"provider_id": "ollama", "name": "nemotron3:4.2b",            "max_tokens": None, "reasoning_effort": "high"},
+    # Ollama Cloud models for agentic coding — starter credits, pay-as-you-go.
+    {"provider_id": "ollama", "name": "nemotron3:33b-cloud",            "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "gpt-oss:120b-cloud",              "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "gpt-oss:20b-cloud",               "max_tokens": None, "reasoning_effort": "high"},
+    {"provider_id": "ollama", "name": "gemma4:31b",                      "max_tokens": None, "reasoning_effort": "high"},
     {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",                    "max_tokens": None},
     {"provider_id": "openrouter", "name": "dots-studio/dots-3-note-preview:free",          "max_tokens": None},
     {"provider_id": "openrouter", "name": "inclusionai/ling-3.0-flash-vl:free",          "max_tokens": None},
