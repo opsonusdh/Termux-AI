@@ -15,6 +15,7 @@ if _ROOT not in sys.path:
 import paths
 from agent import state_manager
 from openai import OpenAI
+import httpx
 from core.renderer import RED, YELLOW, RESET, GRAY
 from tools import *
 import context_manager as _cm
@@ -49,6 +50,7 @@ def _load_api_keys() -> dict[str, list[str]]:
         "google":     ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "groq":       ["GROQ_API_KEY"],
         "nvidia":     ["NVIDIA_API_KEY"],
+        "ollama":     ["OLLAMA_API_KEY"],
     }
     for provider, env_vars in env_map.items():
         existing = res.get(provider, [])
@@ -311,11 +313,19 @@ def _make_client(provider_id: str, api_key: str | None) -> OpenAI:
             "HTTP-Referer": "https://github.com/opsonusdh/Termux-AI",
             "X-Title": "Termux-AI",
         }
-    return OpenAI(
-        api_key         = api_key or "no-key",
-        base_url        = PROVIDERS[provider_id]["base_url"],
-        default_headers = headers if headers else None,
-    )
+    # Ollama is a local server — if it's not running the connection attempt
+    # will hang until the OS gives up. A short timeout + max_retries=0 ensures
+    # we fail fast (≈6s) and hand off to the next provider's retry logic.
+    client_kwargs: dict = {
+        "api_key": api_key or "no-key",
+        "base_url": PROVIDERS[provider_id]["base_url"],
+    }
+    if headers:
+        client_kwargs["default_headers"] = headers
+    if provider_id == "ollama":
+        client_kwargs["timeout"] = httpx.Timeout(5.0, connect=2.0, read=5.0, write=5.0)
+        client_kwargs["max_retries"] = 0
+    return OpenAI(**client_kwargs)
 
 
 def _stitch_assistant_turns(messages: list[dict], last_chunk: str) -> str:
@@ -1003,6 +1013,9 @@ def _ask_with_slots(
                     kwargs["extra_body"] = {
                         "chat_template_kwargs": {"enable_thinking": True}
                     }
+                elif pid == "ollama":
+                    effort = slot_cfg.get("reasoning_effort", "high")
+                    kwargs["reasoning_effort"] = effort
 
                 _dbg(
                     f"\u2192 API call [{pid}/{model_name}] | "
