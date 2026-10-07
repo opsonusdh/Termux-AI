@@ -516,7 +516,7 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "react_to_whatsapp_message",
-            "description": "React to a specific WhatsApp message with an emoji (e.g. 👍 ❤️ 😂).",
+            "description": "React to a specific WhatsApp message with an emoji (e.g. thumbs-up heart smile).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -822,7 +822,9 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "delegate_subtask",
             "description": (
-                "Delegate a subtask to a sub-AI model and receive its structured report back."
+                "Delegate a subtask to a sub-AI model and receive its structured report back. "
+                "The sub-AI can use tools provided by the parent agent to gather information "
+                "and perform actions during task execution."
             ),
             "parameters": {
                 "type": "object",
@@ -847,6 +849,22 @@ TOOLS_DESCRIPTION = [
                         "default": 2048,
                         "minimum": 256,
                         "maximum": 8192,
+                    },
+                    "available_tools": {
+                        "type": "array",
+                        "description": "List of tool names the sub-AI is allowed to use. If omitted, all available tools are provided.",
+                        "items": {"type": "string"},
+                    },
+                    "tool_call_iterations": {
+                        "type": "integer",
+                        "description": "Maximum number of tool-calling rounds the sub-AI may perform (default 5). Set to 0 to disable tool access entirely.",
+                        "default": 5,
+                        "minimum": 0,
+                        "maximum": 20,
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": "Optional override for the system prompt sent to the sub-AI model. If omitted, a default delegation-focused system prompt is used.",
                     },
                 },
                 "required": ["task"],
@@ -1372,6 +1390,23 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "toggle_torch",
+            "description": "Toggle the device LED torch (flashlight) on or off.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "on": {
+                        "type": "boolean",
+                        "description": "True to turn on, False to turn off.",
+                        "default": True
+                    }
+                },
+            },
+        },
+    },
 ]
 
 # ── LOGGING HELPERS ────────────────────────────────────────────────────────────
@@ -1491,9 +1526,17 @@ def retrieve_memory(query: str, top_k: int = 5) -> str:
 
 
 def read_file(path: str, segment_start: int | None = None, segment_end: int | None = None, unit: str = "lines") -> str:
+    from core import permissions
+
     p = os.path.expanduser(path)
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
+
+    # Permission check - api.keys is always gated; protected/outside-root
+    # paths require permission.  Nothing is auto-rejected: the user is asked.
+    approved, reason = permissions.request_file_permission("read", p)
+    if not approved:
+        return reason
 
     if not os.path.exists(p):
         return f"[ERROR] File not found: {path}"
@@ -1551,14 +1594,11 @@ def write_file(
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
 
-    # Protected directory check - prevent silent modification of core/ and Termux-STT/
-    if permissions._is_protected(p):
-        rel = os.path.relpath(os.path.normpath(os.path.realpath(p)), permissions.AI_ROOT)
-        return f"[ERROR] Permission denied: '{rel}' is inside a protected directory. Use shell command with explicit permission."
-
-    # Outside project root check
-    if permissions._is_outside_root(p):
-        return f"[ERROR] Permission denied: path '{path}' is outside project directory {permissions.AI_ROOT}"
+    # Permission check - api.keys is always gated; protected/outside-root
+    # paths require permission.  Nothing is auto-rejected: the user is asked.
+    approved, reason = permissions.request_file_permission("write", p)
+    if not approved:
+        return reason
 
     # Validate segment mode parameters
     if mode == "segment":
@@ -1670,14 +1710,11 @@ def find_replace(
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
 
-    # Protected directory check
-    if permissions._is_protected(p):
-        rel = os.path.relpath(os.path.normpath(os.path.realpath(p)), permissions.AI_ROOT)
-        return f"[ERROR] Permission denied: '{rel}' is inside a protected directory. Use shell command with explicit permission."
-
-    # Outside project root check
-    if permissions._is_outside_root(p):
-        return f"[ERROR] Permission denied: path '{path}' is outside project directory {permissions.AI_ROOT}"
+    # Permission check - api.keys is always gated; protected/outside-root
+    # paths require permission.  Nothing is auto-rejected: the user is asked.
+    approved, reason = permissions.request_file_permission("write", p)
+    if not approved:
+        return reason
 
     if not os.path.exists(p):
         return f"[ERROR] File not found: {path}"
@@ -1800,6 +1837,10 @@ def index_files(path: str, extension_filter: str = "") -> str:
     with open(idx_file, "a", encoding="utf-8") as out:
         for filepath in files_to_index[:100]: # Cap at 100 files
             try:
+                # Never index the api.keys secrets file - it is gated in every mode.
+                # api.keys.template is allowed.
+                if os.path.basename(filepath) == "api.keys" and not filepath.endswith("api.keys.template"):
+                    continue
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
                     rel_p = os.path.relpath(filepath, paths.ROOT)
@@ -2466,6 +2507,17 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         "confirm": confirm,
         "manage_todos": manage_todos,
     }
+    # Lazy import to avoid circular dependency
+    try:
+        import importlib.util
+        import os
+        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_termux_torch.py')
+        spec = importlib.util.spec_from_file_location("wrapper_termux_torch", wrapper_path)
+        wrapper_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper_module)
+        local_funcs["toggle_torch"] = wrapper_module.toggle_torch
+    except Exception:
+        pass
 
     if name in local_funcs:
         try:
@@ -2484,6 +2536,8 @@ def delegate_subtask(
     context: str = "",
     model: str = "cohere/north-mini-code:free",
     max_tokens: int = 2048,
+    available_tools: list[str] | None = None,
+    tool_call_iterations: int = 5,
     system_prompt: str | None = None,
 ) -> str:
     """Delegate a subtask to a sub-AI, with reasoning-preserving failover.
@@ -2492,11 +2546,27 @@ def delegate_subtask(
     response is truncated or the call fails, the reasoning is carried to the
     next OpenRouter model via ``reasoning_details`` in the assistant message —
     the same pattern OpenRouter documents for multi-model reasoning continuity.
+
+    The sub-AI can also use tools provided by the parent agent. When the sub-AI
+    emits tool calls, they are executed locally via ``_dispatch_sub_tool`` and
+    the results are fed back into the conversation for the next iteration.
+
+    Args:
+        task: Task description (imperative instruction).
+        context: Optional background information.
+        model: Target model ID (e.g. "cohere/north-mini-code:free").
+        max_tokens: Max tokens for generation (256-8192).
+        available_tools: List of tool names the sub-AI is allowed to use.
+            If None, all tools from TOOLS_DESCRIPTION are provided.
+            If empty list, no tools are provided (text-only).
+        tool_call_iterations: Max tool-calling rounds (0 disables tools).
+        system_prompt: Override for the sub-AI system prompt.
     """
     log_write(f"[delegate_subtask] model:{model} max_tokens:{max_tokens} task:{task[:80]}")
     print(f"{GRAY}[DELEGATE] → {model} | {task[:72]}{'...' if len(task) > 72 else ''}{RESET}")
 
     max_tokens = max(256, min(8192, int(max_tokens)))
+    tool_call_iterations = max(0, int(tool_call_iterations))
 
     user_message = f"## Task\n{task.strip()}"
     if context and context.strip():
@@ -2560,6 +2630,17 @@ def delegate_subtask(
     # OpenRouter.  Stored as a dict with provider/model/reasoning fields.
     carried_reasoning: dict | None = None
 
+    # Determine which tools to expose to the sub-AI
+    sub_tools = None
+    if tool_call_iterations > 0:
+        if available_tools is None:
+            # All tools available
+            sub_tools = TOOLS_DESCRIPTION
+        elif len(available_tools) > 0:
+            # Filter to only the requested tools
+            sub_tool_names = set(available_tools)
+            sub_tools = [t for t in TOOLS_DESCRIPTION if t.get("function", {}).get("name") in sub_tool_names]
+
     while attempts < max_attempts:
         cfg = rotation[ind]
         headers = {"HTTP-Referer": "https://github.com/opsonusdh/Termux-AI", "X-Title": "Termux-AI"} if cfg["pid"] == "openrouter" else None
@@ -2615,6 +2696,9 @@ def delegate_subtask(
                 "messages": clean_messages,
                 "max_tokens": max_tokens,
             }
+            if sub_tools:
+                create_kwargs["tools"] = sub_tools
+                create_kwargs["tool_choice"] = "auto"
             if cfg["pid"] == "openrouter":
                 create_kwargs["extra_body"] = {"reasoning": {"enabled": True}}
 
@@ -2644,6 +2728,69 @@ def delegate_subtask(
                 }
 
             finish_reason = response.choices[0].finish_reason
+
+            # ── TOOL-CALLING LOOP ────────────────────────────────────────────
+            # If the sub-AI made tool calls, execute them via _dispatch_sub_tool
+            # and feed results back for continued reasoning.
+            subagent_tool_iterations = 0
+            while msg.tool_calls and subagent_tool_iterations < tool_call_iterations:
+                subagent_tool_iterations += 1
+
+                # Build assistant message with tool_calls
+                assistant_msg: dict = {
+                    "role": "assistant",
+                    "content": content or "",
+                }
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        }
+                    } for tc in msg.tool_calls
+                ]
+                messages.append(assistant_msg)
+
+                # Execute each tool call and collect results
+                for tc in msg.tool_calls:
+                    tool_name = tc.function.name
+                    tool_args = tc.function.arguments
+                    print(f"{GRAY}[DELEGATE TOOL] {tool_name}{RESET}")
+                    t_res = _dispatch_sub_tool(tool_name, tool_args)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": t_res,
+                    })
+
+                # Re-sanitize for provider and make next API call
+                clean_messages = _sanitize_messages_for_provider(
+                    messages,
+                    cfg["pid"],
+                    model_name=cfg["model"],
+                    preserve_native_reasoning=same_model,
+                    reasoning_carry_provider="openrouter" if cfg["pid"] == "openrouter" else None,
+                )
+
+                followup_kwargs = {
+                    "model": cfg["model"],
+                    "messages": clean_messages,
+                    "max_tokens": max_tokens,
+                }
+                if sub_tools:
+                    followup_kwargs["tools"] = sub_tools
+                    followup_kwargs["tool_choice"] = "auto"
+                if cfg["pid"] == "openrouter":
+                    followup_kwargs["extra_body"] = {"reasoning": {"enabled": True}}
+
+                resp2 = client.chat.completions.with_raw_response.create(**followup_kwargs)
+                response = resp2.parse()
+                msg = response.choices[0].message
+                content = msg.content
+                finish_reason = response.choices[0].finish_reason
+            # ── END TOOL-CALLING LOOP ────────────────────────────────────────
 
             if content and finish_reason != "length":
                 header = (
@@ -3232,6 +3379,9 @@ def sleep_mode() -> str:
     STT_PATH = os.path.expanduser(config["stt_path"])
 
     try:
+        # Add Termux-STT to path for the import
+        if STT_PATH not in sys.path:
+            sys.path.insert(0, STT_PATH)
         from main import listen
         check_cmd = "where edge-tts" if sys.platform == "win32" else "which edge-tts"
         if subprocess.run(
@@ -3551,8 +3701,8 @@ def get_whatsapp_chats(filter_type: str = "all") -> str:
 
     def _fmt(c):
         parts = [f"  {c['name']}"]
-        if c.get("isPinned"):  parts.append("📌")
-        if c.get("isMuted"):   parts.append("🔇")
+        if c.get("isPinned"):  parts.append("[PIN]")
+        if c.get("isMuted"):   parts.append("[MUTE]")
         if c.get("unread"):    parts.append(f"[{c['unread']} unread]")
         return " ".join(parts) + f"\n    JID: {c['jid']}"
 
@@ -4027,16 +4177,16 @@ def _format_todos(data: dict) -> str:
     title = data.get("title", "My Tasks")
     tasks = data.get("tasks", [])
     if not tasks:
-        return f"📋 {title}\n{'─' * 40}\n  (no tasks yet)\n"
+        return f"[TODO] {title}\n{'─' * 40}\n  (no tasks yet)\n"
     total = len(tasks)
     done = sum(1 for t in tasks if t.get("done"))
     lines = [
-        f"📋 {title}",
+        f"[TODO] {title}",
         f"   Progress: {done}/{total} completed ({round(done / total * 100)}%)",
         f"{'─' * 40}",
     ]
     for t in tasks:
-        box = "✅" if t.get("done") else "⬜"
+        box = "[OK]" if t.get("done") else "[ ]"
         lines.append(f"  [{t['id']}] {box} {t['text']}")
     return "\n".join(lines) + "\n"
 
@@ -4064,7 +4214,7 @@ def manage_todos(
 
     if action == "clear":
         _save_todos({"title": "My Tasks", "tasks": [], "next_id": 1})
-        return "🧹 All tasks cleared. The todo list is now empty."
+        return "[CLEAR] All tasks cleared. The todo list is now empty."
 
     if action == "list":
         data = _load_todos()
@@ -4081,7 +4231,7 @@ def manage_todos(
                 next_id += 1
         data = {"title": new_title, "tasks": new_tasks, "next_id": next_id}
         _save_todos(data)
-        return f"✅ Created new todo list '{new_title}' with {len(new_tasks)} task(s).\n" + _format_todos(data)
+        return f"[OK] Created new todo list '{new_title}' with {len(new_tasks)} task(s).\n" + _format_todos(data)
 
     if action == "add":
         data = _load_todos()
@@ -4111,11 +4261,11 @@ def manage_todos(
         if action == "check":
             target["done"] = True
             _save_todos(data)
-            return f"✅ Checked task {task_id}: {target['text']}\n" + _format_todos(data)
+            return f"[OK] Checked task {task_id}: {target['text']}\n" + _format_todos(data)
         else:
             target["done"] = False
             _save_todos(data)
-            return f"⬜ Unchecked task {task_id}: {target['text']}\n" + _format_todos(data)
+            return f"[ ] Unchecked task {task_id}: {target['text']}\n" + _format_todos(data)
 
     if action == "delete":
         if task_id is None:
@@ -4126,6 +4276,6 @@ def manage_todos(
             return f"[ERROR] No task found with ID {task_id}."
         data["tasks"] = [t for t in data["tasks"] if t["id"] != task_id]
         _save_todos(data)
-        return f"🗑️ Deleted task {task_id}: {target['text']}\n" + _format_todos(data)
+        return f"[DEL] Deleted task {task_id}: {target['text']}\n" + _format_todos(data)
 
     return f"[ERROR] Unknown action '{action}'. Valid: create, add, list, check, uncheck, delete, clear."

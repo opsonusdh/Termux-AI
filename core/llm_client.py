@@ -80,19 +80,11 @@ def _warn_missing_keys() -> None:
 
 _warn_missing_keys()
 
-# Availability state is scoped as narrowly as possible.
-# Rate limits/transient failures affect one provider + key + model only.
-# Invalid credentials disable one key; 404/model-not-found disables one model.
-_key_cursor: dict[tuple[str, str], int] = {}
-_bad_keys: dict[str, set[str]] = {}
+# Simplified availability state:
+# - _bad_models: permanently disabled (model not found, repeated invalid requests)
+# - _key_cursor: per (provider, model) cursor for key rotation
 _bad_models: set[tuple[str, str]] = set()
-_account_restricted_until: dict[str, float] = {}
-_rate_limited_until: dict[tuple[str, str, str], float] = {}
-_transient_until: dict[tuple[str, str], float] = {}
-
-_RATE_LIMIT_COOLDOWN = 30.0
-_TRANSIENT_COOLDOWN = 5.0
-_ACCOUNT_RESTRICTION_COOLDOWN = 300.0
+_key_cursor: dict[tuple[str, str], int] = {}
 
 
 def _next_key(
@@ -100,113 +92,37 @@ def _next_key(
     model_name: str,
     excluded_keys: set[str] | None = None,
 ) -> str | None:
+    """Get next available API key for the given provider+model."""
     keys = API_KEYS.get(provider_id, [])
     if not keys or (provider_id, model_name) in _bad_models:
         return None
 
     excluded_keys = excluded_keys or set()
-    bad = _bad_keys.get(provider_id, set())
 
     cursor_key = (provider_id, model_name)
     idx = _key_cursor.get(cursor_key, 0) % len(keys)
     for offset in range(len(keys)):
         key = keys[(idx + offset) % len(keys)]
-        if key in bad or key in excluded_keys:
+        if key in excluded_keys:
             continue
         _key_cursor[cursor_key] = (keys.index(key) + 1) % len(keys)
         return key
     return None
 
 
-def _available_key_count(provider_id: str, model_name: str) -> int:
-    if (provider_id, model_name) in _bad_models:
-        return 0
-    if _account_restricted_until.get(provider_id, 0.0) > time.monotonic():
-        return 0
-    if _transient_until.get((provider_id, model_name), 0.0) > time.monotonic():
-        return 0
-    keys = API_KEYS.get(provider_id, [])
-    bad = _bad_keys.get(provider_id, set())
-    now = time.monotonic()
-    return sum(
-        1
-        for key in keys
-        if key not in bad
-        and _rate_limited_until.get((provider_id, key, model_name), 0.0) <= now
-    )
-
-
-def _mark_bad(provider_id: str, key: str) -> None:
-    # Invalid/forbidden credentials are key-wide.
-    _bad_keys.setdefault(provider_id, set()).add(key)
-
-
-def _mark_account_restricted(provider_id: str) -> None:
-    # Organization/account restrictions affect every key under this provider.
-    _account_restricted_until[provider_id] = (
-        time.monotonic() + _ACCOUNT_RESTRICTION_COOLDOWN
-    )
-
-
 def _mark_model_bad(provider_id: str, model_name: str) -> None:
     _bad_models.add((provider_id, model_name))
 
 
-def _mark_rate_limited(provider_id: str, key: str, model_name: str) -> None:
-    _rate_limited_until[(provider_id, key, model_name)] = (
-        time.monotonic() + _RATE_LIMIT_COOLDOWN
-    )
-
-
-def _mark_transient(provider_id: str, model_name: str) -> None:
-    # 5xx/server overload is normally provider+model scoped, not credential
-    # scoped. Skip the remaining keys for this model instead of hammering the
-    # same failing endpoint with every credential.
-    _transient_until[(provider_id, model_name)] = (
-        time.monotonic() + _TRANSIENT_COOLDOWN
-    )
-
-
-def _clear_expired_state() -> None:
-    now = time.monotonic()
-    for provider_id, until in list(_account_restricted_until.items()):
-        if until <= now:
-            _account_restricted_until.pop(provider_id, None)
-    for store in (_rate_limited_until, _transient_until):
-        for identity, until in list(store.items()):
-            if until <= now:
-                store.pop(identity, None)
-
-
-def _temporary_retry_delay() -> float | None:
-    _clear_expired_state()
-    now = time.monotonic()
-    deadlines = [
-        until
-        for until in (*_rate_limited_until.values(), *_transient_until.values())
-        if until > now
-    ]
-    if not deadlines:
-        return None
-    return max(0.0, min(deadlines) - now)
-
-
 def _reset_provider(provider_id: str) -> None:
-    # Compatibility helper: reset temporary provider state. Permanent failures
-    # stay disabled, except account restrictions which are deliberately cooldown-based.
-    _account_restricted_until.pop(provider_id, None)
+    # Reset per-model key cursors for this provider
     for key in list(_key_cursor):
         if key[0] == provider_id:
             _key_cursor.pop(key, None)
-    for identity in list(_rate_limited_until):
-        if identity[0] == provider_id:
-            _rate_limited_until.pop(identity, None)
-    for identity in list(_transient_until):
-        if identity[0] == provider_id:
-            _transient_until.pop(identity, None)
 
 
 def _error_status(exc: Exception) -> int | None:
+    """Extract HTTP status code from an exception."""
     status = getattr(exc, "status_code", None)
     if isinstance(status, int):
         return status
@@ -221,45 +137,6 @@ def _error_status(exc: Exception) -> int | None:
     return None
 
 
-def _is_rate_limit(exc: Exception) -> bool:
-    status = _error_status(exc)
-    s = str(exc).lower()
-    return status == 429 or any(
-        x in s for x in ("resource_exhausted", "rate limit", "rate-limit", "too many requests")
-    )
-
-
-def _is_transient(exc: Exception) -> bool:
-    status = _error_status(exc)
-    s = str(exc).lower()
-    return status in {500, 502, 503, 504} or any(
-        x in s for x in ("temporarily unavailable", "server error", "overloaded", "unavailable")
-    )
-
-
-def _is_account_restriction(exc: Exception) -> bool:
-    """Identify 400-level account/org restrictions that are not model errors."""
-    status = _error_status(exc)
-    if status != 400:
-        return False
-    s = str(exc).lower()
-    return any(
-        x in s
-        for x in (
-            "organization has been restricted",
-            "organization is restricted",
-            "organization has been suspended",
-            "organization is suspended",
-            "account has been restricted",
-            "account is restricted",
-            "account has been suspended",
-            "account is suspended",
-            "project has been disabled",
-            "project is disabled",
-        )
-    )
-
-
 def _is_context_error(exc: Exception) -> bool:
     """Identify request-size/context errors independently of HTTP status."""
     s = str(exc).lower()
@@ -268,24 +145,6 @@ def _is_context_error(exc: Exception) -> bool:
         for x in (
             "context", "token_limit", "max_tokens", "exceed",
             "excluding", "window", "too many tokens", "prompt is too long",
-        )
-    )
-
-
-def _is_invalid_request(exc: Exception) -> bool:
-    """Identify recoverable 400/422 request-shape errors."""
-    status = _error_status(exc)
-    if status not in {400, 422}:
-        return False
-    if _is_account_restriction(exc) or _is_context_error(exc):
-        return False
-    s = str(exc).lower()
-    return any(
-        x in s
-        for x in (
-            "invalid request", "invalid parameter", "invalid value",
-            "invalid argument", "malformed", "unsupported field",
-            "all elements", "expected", "must be",
         )
     )
 
@@ -561,6 +420,17 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         args = {}
 
     g = args.get
+    # Lazy import for toggle_torch to avoid circular import
+    try:
+        import importlib.util
+        import os
+        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_termux_torch.py')
+        spec = importlib.util.spec_from_file_location("wrapper_termux_torch", wrapper_path)
+        wrapper_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper_module)
+        toggle_torch = wrapper_module.toggle_torch
+    except Exception:
+        toggle_torch = None
     started = time.monotonic()
     routes = {
         "run_code":        lambda: run_code(
@@ -691,10 +561,13 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 jid = g("jid", ""),
                             ),
         "delegate_subtask":  lambda: delegate_subtask(
-                                task       = g("task", ""),
-                                context    = g("context", ""),
-                                model      = g("model", "openai/gpt-oss-120b"),
-                                max_tokens = int(g("max_tokens", 2048)),
+                                task                = g("task", ""),
+                                context             = g("context", ""),
+                                model               = g("model", "openai/gpt-oss-120b"),
+                                max_tokens          = int(g("max_tokens", 2048)),
+                                available_tools     = g("available_tools", None),
+                                tool_call_iterations  = int(g("tool_call_iterations", 5)),
+                                system_prompt        = g("system_prompt", None),
                              ),
         "generate_image":    lambda: generate_image(
                                 prompt   = g("prompt", ""),
@@ -792,10 +665,11 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 default      = g("default"),
                                 allow_custom = _safe_bool(g("allow_custom", True)),
                              ),
-        "confirm":           lambda: confirm(
+"confirm":           lambda: confirm(
                                 question = g("question", ""),
                                 default  = _safe_bool(g("default", True)),
-                             ),
+                              ),
+        "toggle_torch":      lambda: toggle_torch(on=_safe_bool(g("on", True))) if toggle_torch else "toggle_torch not available",
     }
 
     fn = routes.get(name)
@@ -960,8 +834,6 @@ def _ask_with_slots(
     invalid_request_retries: set[tuple[str, str]] = set()
 
     while True:
-        _clear_expired_state()
-
         if slot >= len(model_slots):
             _last_response_metadata = {
                 "state": "all_models_unavailable",
@@ -978,10 +850,6 @@ def _ask_with_slots(
         max_tok = slot_cfg["max_tokens"]
 
         if (pid, model_name) in _bad_models:
-            slot += 1
-            continue
-
-        if _account_restricted_until.get(pid, 0.0) > time.monotonic():
             slot += 1
             continue
 
@@ -1044,6 +912,59 @@ def _ask_with_slots(
                 preserve_native_reasoning=preserve_native_reasoning,
                 reasoning_carry_provider=reasoning_carry_provider,
             )
+            # If switching providers (not just models), and native reasoning
+            # cannot be carried, inject the prior model's reasoning and tool_calls
+            # as raw content so the new model has full context.
+            provider_changed = (
+                history_model_identity is not None
+                and history_model_identity[0] != pid
+            )
+            if provider_changed and not preserve_native_reasoning and not reasoning_carry_provider:
+                # Find the last assistant message with reasoning or tool_calls
+                for prev in reversed(source):
+                    if prev.get("role") != "assistant":
+                        continue
+                    reasoning = prev.get("reasoning") or prev.get("reasoning_content")
+                    reasoning_details = prev.get("reasoning_details")
+                    tool_calls = prev.get("tool_calls")
+                    if reasoning or reasoning_details or tool_calls:
+                        # Build a raw context message
+                        parts = []
+                        if reasoning:
+                            parts.append(f"[Previous model reasoning]\n{reasoning}")
+                        if reasoning_details:
+                            if isinstance(reasoning_details, list):
+                                for item in reasoning_details:
+                                    if isinstance(item, dict) and item.get("text"):
+                                        parts.append(f"[Previous model reasoning detail]\n{item['text']}")
+                                    else:
+                                        parts.append(f"[Previous model reasoning detail]\n{item}")
+                            else:
+                                parts.append(f"[Previous model reasoning detail]\n{reasoning_details}")
+                        if tool_calls:
+                            for tc in tool_calls:
+                                fn = tc.get("function", {})
+                                parts.append(
+                                    f"[Previous tool call] {fn.get('name', 'unknown')}"
+                                    f"({fn.get('arguments', '{}')})"
+                                )
+                        if parts:
+                            raw_context = "\n\n".join(parts)
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "The previous model ("
+                                    f"{history_model_identity[0]}/{history_model_identity[1]}) "
+                                    "produced the following reasoning and tool calls. "
+                                    "Use this context to continue:\n\n"
+                                    f"{raw_context}"
+                                ),
+                            })
+                            print(
+                                f"{YELLOW}[{pid}/{model_name}] Injected reasoning and "
+                                f"tool calls from previous provider as raw context.{RESET}"
+                            )
+                        break
             history_model_identity = current_model_identity
             last_slot = slot
             carried = max(0, len(messages) - len(base_messages))
@@ -1323,10 +1244,10 @@ def _ask_with_slots(
                 ) or "[EMPTY RESPONSE]"
 
         except Exception as exc:
-            status = _error_status(exc)
             message = str(exc)
             s_lower = message.lower()
 
+            # Context/token limit: reduce max_tokens and retry (no key/model change)
             if _is_context_error(exc) and max_tok and max_tok > 512:
                 slot_cfg["max_tokens"] = max_tok // 2
                 print(
@@ -1335,8 +1256,47 @@ def _ask_with_slots(
                 )
                 continue
 
-            # All API/runtime errors use the same consecutive-error rule.
-            # No 429/500/400-specific branch skips a key or model early.
+            # Rate limit (429): Google's quota is per-model, not per-key.
+            # Retrying with different keys for the same model is pointless.
+            # Skip the model entirely after the first 429.
+            status = _error_status(exc)
+            if status == 429:
+                s_lower = message.lower()
+                is_quota = any(
+                    x in s_lower for x in (
+                        "resource_exhausted", "quota", "rate limit",
+                        "rate-limit", "too many requests",
+                    )
+                )
+                if is_quota:
+                    print(
+                        f"{RED}[{pid}/{model_name}] Rate-limited/quota exhausted. "
+                        f"Skipping model (all keys share the same quota).{RESET}"
+                    )
+                    slot += 1
+                    last_slot = -1
+                    consecutive_error_identity = None
+                    consecutive_error_signature = None
+                    consecutive_error_count = 0
+                    forced_retry_key = None
+                    continue
+
+            # Model not found (404): permanently disable this model, move to next
+            if status == 404:
+                _mark_model_bad(pid, model_name)
+                print(
+                    f"{RED}[{pid}/{model_name}] Model not found (404). "
+                    f"Marking model as unavailable; moving to next model.{RESET}"
+                )
+                slot += 1
+                last_slot = -1
+                consecutive_error_identity = None
+                consecutive_error_signature = None
+                consecutive_error_count = 0
+                forced_retry_key = None
+                continue
+
+            # All other errors: consecutive-error rule (retry up to 5 times on same key)
             current_identity = (pid, model_name, api_key)
             error_signature = (
                 f"status={status!r}|{type(exc).__name__}|{message.strip()}"
@@ -1363,6 +1323,7 @@ def _ask_with_slots(
                 time.sleep(1)
                 continue
 
+            # Same error 5 times on this key -> exhaust this key for this model
             exhausted_keys.setdefault((pid, model_name), set()).add(api_key)
             remaining = len(API_KEYS.get(pid, [])) - len(
                 exhausted_keys.get((pid, model_name), set())

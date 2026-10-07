@@ -59,11 +59,11 @@ Do not create recursive agent loops in which the conversational layer repeatedly
 
 The instruction system is stored under:
 
-`instructions/skills/`
+`Termux-AI/instructions/skills/`
 
 The skill index is:
 
-`instructions/skills/INDEX.md`
+`Termux-AI/instructions/skills/INDEX.md`
 
 At the start of an agent task:
 
@@ -108,7 +108,7 @@ The project follows these boundaries:
 - `reflection/` — execution logging, failure analysis, self-correction.
 - `tools/` — platform/hardware wrappers.
 - `instructions/skills/` — operational manuals and capability skills.
-- `config/` — runtime configuration and credentials.
+- `config/` — runtime configuration and credentials. Do *NOT* ever look into `api.keys. use` `api.keys.template` if needed.
 - `data/` — persistent application state.
 - `logs/` — persistent logs and conversation/chunk records.
 - `workspace/` — temporary task artifacts and scratch files.

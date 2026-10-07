@@ -92,6 +92,10 @@ def _update_config(**kwargs) -> dict:
     os.replace(tmp, CONFIG_PATH)
     return data
 
+STT_PATH = os.path.join(BASE_DIR, "Termux-STT")
+if STT_PATH not in sys.path:
+    sys.path.insert(0, STT_PATH)
+
 try:
     from main import listen
 

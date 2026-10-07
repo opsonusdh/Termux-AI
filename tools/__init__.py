@@ -151,6 +151,7 @@ __all__ = [
     'ask_ai_simple',
     'search_in_files',
     'TOOLS_DESCRIPTION',
+    '_dispatch_sub_tool',
     'ask_user',
     'confirm',
 ]

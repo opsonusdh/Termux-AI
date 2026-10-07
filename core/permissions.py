@@ -120,6 +120,21 @@ def is_voice_available():
 # Directories the AI must never silently modify
 PROTECTED_DIRS: List[str] = [CORE_DIR, STT_DIR]
 
+# The real secrets files (config/api.keys and its Termux-STT twin).
+# api.keys.template is the safe, distributable template and is NOT protected —
+# only the genuine secrets file (basename exactly "api.keys") is gated.
+API_KEYS_PATHS = [
+    paths.API_KEYS_FILE,
+    os.path.join(BASE_DIR, "Termux-STT", "api.keys"),
+]
+
+# Regex matching the token "api.keys" only as a *standalone* reference — never
+# as part of "api.keys.template" or identifiers like "myapi.keys.bak".
+#   (?<![\w.])  — not preceded by word-char or dot
+#   api\.keys   — the literal filename
+#   (?![\w.])   — not followed by word-char or dot
+_API_KEYS_REF = re.compile(r"(?<![\w.])api\.keys(?![\w.])")
+
 # Unconditionally blocked – these touch system state no AI should touch.
 FORBIDDEN_COMMANDS = {
     "sudo", "su", "pkexec", "passwd",
@@ -240,6 +255,42 @@ def _is_fd_dup_target(token: str) -> bool:
     return bool(re.fullmatch(r'(?:&\d+|\d+)', t))
 
 
+def _is_api_keys_file(path: str) -> bool:
+    """True for the real ``api.keys`` secrets file.
+
+    The companion ``api.keys.template`` (the safe, redistributable template) is
+    explicitly excluded — only the genuine secrets file is gated.  Both
+    ``config/api.keys`` and ``Termux-STT/api.keys`` are covered.
+    """
+    try:
+        p = _expand_path(path)
+    except Exception:
+        return False
+    name = os.path.basename(p)
+    if name == "api.keys.template":
+        return False
+    return name == "api.keys"
+
+
+def _is_api_keys_template(path: str) -> bool:
+    """True for the safe ``api.keys.template`` file (NOT gated)."""
+    try:
+        p = _expand_path(path)
+    except Exception:
+        return False
+    return os.path.basename(p) == "api.keys.template"
+
+
+def _segment_references_api_keys(segment: str) -> bool:
+    """True if a shell-command segment mentions ``api.keys`` anywhere — as a
+    read target, write target, source argument, or inside inline (``-c``) code.
+
+    Uses a word-boundary-style regex so that ``api.keys.template`` and
+    identifiers like ``myapi.keys`` are *not* matched.
+    """
+    return bool(_API_KEYS_REF.search(segment))
+
+
 def _is_owned_path(path: str) -> bool:
     target = _expand_path(path)
     for owned in _load_owned_paths():
@@ -251,6 +302,14 @@ def _is_owned_path(path: str) -> bool:
 def _path_verdict(path: str) -> Tuple[bool, str]:
     if _is_special_sink(path):
         return False, "OK"
+
+    # The api.keys secrets file is gated for reads and writes in EVERY mode.
+    if _is_api_keys_file(path):
+        rel = os.path.relpath(_expand_path(path), AI_ROOT)
+        return True, (
+            f"path '{rel}' is the api.keys secrets file; "
+            f"explicit permission required (api.keys.template is allowed)"
+        )
 
     if _is_protected(path):
         rel = os.path.relpath(_expand_path(path), AI_ROOT)
@@ -510,6 +569,10 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
         if tok in {"-c", "-Command", "/C"} and i + 1 < len(tokens):
             inline = tokens[i + 1]
 
+            # api.keys references in inline code are always gated.
+            if _segment_references_api_keys(inline):
+                return True, "inline code references the api.keys secrets file"
+
             for pdir in PROTECTED_DIRS:
                 name = os.path.basename(pdir)
                 if pdir in inline or name in inline:
@@ -546,6 +609,16 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
         return False, "OK"
 
     cmd = _cmd_name(segment)
+
+    # api.keys (the real secrets file, never the .template) is ALWAYS gated —
+    # for both reads and writes, in every mode.  Checking the whole segment
+    # catches it whether it appears as a read target, write target, source
+    # argument, or inside inline (-c) code.
+    if _segment_references_api_keys(segment):
+        return True, (
+            "command references the api.keys secrets file; "
+            "explicit permission required in all modes"
+        )
 
     # A directory change alters the meaning of every following relative path
     # in the shell chain. Require explicit approval instead of pretending we
@@ -590,24 +663,39 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
 
 
 def command_needs_permission(cmd: str) -> bool:
+    """Return True if any segment of *cmd* requires explicit permission.
+
+    In autonomous mode everything is auto-approved **except** references to the
+    api.keys secrets file, which always requires explicit permission regardless
+    of mode.
+    """
+    segments = _split_shell_chain(cmd)
+
     if is_autonomous():
-        return False
+        # api.keys is the one thing that stays gated in autonomous mode.
+        return any(_segment_references_api_keys(seg) for seg in segments)
+
     return any(
         _segment_needs_permission(seg)[0]
-        for seg in _split_shell_chain(cmd)
+        for seg in segments
     )
 
 
 def validate_command(cmd: str) -> Tuple[bool, str]:
     """Validate a complete shell command and obtain explicit approval when needed.
 
-    If autonomous mode is enabled in config, the permission gate is bypassed
-    and commands execute without interactive approval.
+    In autonomous mode everything is auto-approved **except** references to the
+    api.keys secrets file, which always requires explicit permission regardless
+    of mode.
     """
-    if is_autonomous():
-        return True, "Autonomous mode active (permission gate bypassed)"
-
     segments = _split_shell_chain(cmd)
+
+    # In autonomous mode, auto-approve all segments EXCEPT those that
+    # reference the api.keys secrets file.  api.keys is gated in every mode.
+    if is_autonomous():
+        if not any(_segment_references_api_keys(seg) for seg in segments):
+            return True, "Autonomous mode active (permission gate bypassed)"
+
     requests: List[Tuple[str, str]] = []
 
     for segment in segments:
@@ -655,6 +743,37 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
             return False, "Denied: explicit user denial"
 
         print("  Please answer 'y' or 'n'.")
+
+def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
+    """Request permission for a direct file-system operation (read/write/find_replace).
+
+    Used by ``tools.py`` for file operations that bypass the shell.  Returns
+    ``(approved, reason)`` — when *approved* is ``True`` the caller may proceed.
+
+    The api.keys secrets file is always gated regardless of autonomous mode.
+    All other paths defer to the existing ``validate_command`` logic so that
+    nothing is *automatically* rejected — the user is always asked first.
+    """
+    p = _expand_path(path)
+
+    # Build a representative shell command so the existing permission logic
+    # (which knows about api.keys, protected dirs, outside-root, etc.) is
+    # reused rather than duplicated.
+    if operation == "read":
+        cmd = f"cat {shlex.quote(path)}"
+    elif operation == "write":
+        cmd = f"cat > {shlex.quote(path)}"
+    elif operation == "find_replace":
+        cmd = f"sed -i s/x/y/ {shlex.quote(path)}"
+    else:
+        cmd = f"cat {shlex.quote(path)}"
+
+    approved, reason = validate_command(cmd)
+    if not approved:
+        rel = os.path.relpath(p, AI_ROOT)
+        return False, f"[PERMISSION DENIED] '{rel}': {reason}"
+    return True, "OK"
+
 
 def temp_path(name: str, session_id: str | None = None) -> str:
     sid = session_id or os.environ.get("TERMUX_AI_SESSION_ID") or "default"
