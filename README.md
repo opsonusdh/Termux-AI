@@ -6,7 +6,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 
 ## Features
 
-- **Multi-provider LLM fallback** — Cycles through Google Gemini, OpenRouter, Groq, and NVIDIA models automatically. Rate-limited or invalid keys rotate to the next key for the same model; a transient server error (500/502/503/504) skips straight to the next model instead of retrying every key for it.
+- **Multi-provider LLM fallback** — Cycles through Google Gemini, OpenRouter, Groq, NVIDIA, and Ollama (cloud & local) models automatically. Rate-limited or invalid keys rotate to the next key for the same model; a transient server error (500/502/503/504) skips straight to the next model instead of retrying every key for it.
 - **Tool use** — `run_code`, `read_file`, `write_file`, `web_scrape`, `save_memory`, `retrieve_memory`, `index_files`, `intermediate_print`, `sleep_mode`.
 - **Enhanced Tool Suite** — 7 new utility tools added:
   - `search_in_files` - recursive file content search with advanced options and filters
@@ -74,7 +74,9 @@ nano config/api.keys
   "google":     ["YOUR_GEMINI_KEY_1", "YOUR_GEMINI_KEY_2"],
   "openrouter": ["YOUR_OPENROUTER_KEY"],
   "groq":       ["YOUR_GROQ_KEY"],
-  "nvidia":     ["YOUR_NVIDIA_KEY"]
+  "nvidia":     ["YOUR_NVIDIA_KEY"],
+  "ollama":    ["YOUR_OLLAMA_KEY"],
+  "ollama-local": ["No-Need"]
 }
 ```
 
@@ -363,7 +365,9 @@ Multiple keys per provider rotate round-robin and are retired on an invalid cred
   "google":     ["key1", "key2"],
   "openrouter": ["key1"],
   "groq":       ["key1"],
-  "nvidia":     ["key1"]
+  "nvidia":     ["key1"],
+  "ollama":     ["your-ollama-key"],
+  "ollama-local": ["No-Need"]
 }
 ```
 
