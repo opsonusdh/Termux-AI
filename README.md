@@ -85,7 +85,7 @@ nano config/api.keys
 python core
 ```
 
-Free API keys: [Google AI Studio](https://aistudio.google.com/) · [Groq Console](https://console.groq.com/) · [NVIDIA NIM](https://build.nvidia.com/) · [OPENROUTER](https://openrouter.ai/)
+Free API keys: [Google AI Studio](https://aistudio.google.com/) • [Groq Console](https://console.groq.com/) • [NVIDIA NIM](https://build.nvidia.com/) • [OPENROUTER](https://openrouter.ai/) • [OLLAMA](https://ollama.com/dashboard/)
 
 ---
 
