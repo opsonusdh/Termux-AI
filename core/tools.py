@@ -70,7 +70,7 @@ TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
-            "name": "run_code",
+            "name": "shell",
             "description": (
                 "Execute shell commands inside the system environment (Termux, Linux, or Windows). "
                 "Supports an optional execution timeout in seconds."
@@ -2469,7 +2469,7 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         args = {}
 
     local_funcs = {
-        "run_code": run_code,
+        "shell": shell,
         "read_file": read_file,
         "write_file": write_file,
         "save_memory": save_memory,
@@ -3265,9 +3265,9 @@ def search_in_files(
 
 # ── TOOL FUNCTIONS ─────────────────────────────────────────────────────────────
 
-def run_code(bash: str, timeout: int = 0) -> str:
+def shell(bash: str, timeout: int = 0) -> str:
     """Execute shell commands in system environment after permission validation."""
-    log_write(f"[run_code] timeout:{timeout} cmd:{bash}")
+    log_write(f"[shell] timeout:{timeout} cmd:{bash}")
     print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")
 
     allowed, reason = validate_command(bash)
@@ -3300,7 +3300,7 @@ def run_code(bash: str, timeout: int = 0) -> str:
             stdout, stderr = p.communicate()
 
         dur = time.time() - start_t
-        log_write(f"[run_code] returncode:{p.returncode} dur:{dur:.2f}s")
+        log_write(f"[shell] returncode:{p.returncode} dur:{dur:.2f}s")
         output = stdout + (f"\n[STDERR]\n{stderr}" if stderr else "")
         if p.returncode != 0:
             output += f"\n[EXIT CODE {p.returncode}]"

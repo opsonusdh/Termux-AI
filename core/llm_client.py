@@ -32,17 +32,23 @@ def _load_api_keys() -> dict[str, list[str]]:
 
     if os.path.exists(path):
         try:
-            raw = open(path, "r", encoding="utf-8").read().strip()
+            raw = open(path, "r", encoding="utf-8").read()
+            # Strip control characters (except whitespace) that break JSON parsing
+            raw = "".join(ch for ch in raw if ch == "\n" or ch == "\r" or ch == "\t" or ord(ch) >= 32)
+            raw = raw.strip()
             data = json.loads(raw)
             res = {k: (v if isinstance(v, list) else [v]) for k, v in data.items()}
-        except Exception:
-            try:
-                raw = open(path, "r", encoding="utf-8").read().strip()
+        except json.JSONDecodeError:
+            # Legacy plain-text format: one key per line (no braces, no quotes)
+            # Only use this fallback if the file does NOT look like JSON.
+            raw = open(path, "r", encoding="utf-8").read().strip()
+            if raw and not (raw.startswith("{") or raw.startswith("[")):
                 keys = [line.strip() for line in raw.splitlines() if line.strip()]
-                print(f"{YELLOW}[WARN] api.keys is legacy plain-text. {RESET}")
+                print(f"{YELLOW}[WARN] api.keys is legacy plain-text format. {RESET}")
                 res = {"google": keys}
-            except Exception:
-                res = {}
+            else:
+                # File looks like JSON but failed to parse — surface the error
+                raise
 
     # Fallback to Environment Variables
     env_map = {
@@ -89,6 +95,15 @@ _warn_missing_keys()
 _bad_models: set[tuple[str, str]] = set()
 _key_cursor: dict[tuple[str, str], int] = {}
 
+# Persistent consecutive same-status-code error tracking across all API calls.
+# Keyed by (provider_id, model_name). When the same HTTP status code is seen
+# _SAME_STATUS_THRESHOLD times in a row the current API key is exhausted and
+# the next key is tried. Any successful response resets the counter to 0.
+_SAME_STATUS_THRESHOLD = 10
+_consecutive_error_status: dict[tuple[str, str], int | None] = {}
+_consecutive_error_count: dict[tuple[str, str], int] = {}
+_persistent_exhausted_keys: dict[tuple[str, str], set[str]] = {}
+
 
 def _next_key(
     provider_id: str,
@@ -122,6 +137,56 @@ def _reset_provider(provider_id: str) -> None:
     for key in list(_key_cursor):
         if key[0] == provider_id:
             _key_cursor.pop(key, None)
+
+
+def _reset_error_counters(provider_id: str, model_name: str) -> None:
+    """Reset persistent error counters for a provider+model (called on success).
+
+    A successful API response means the current key/model is healthy again, so
+    the same-status-code streak is zeroed and the exhausted-key set is cleared.
+    This is what makes a single success reset the 10-strike counter.
+    """
+    _pkey = (provider_id, model_name)
+    _consecutive_error_status[_pkey] = None
+    _consecutive_error_count[_pkey] = 0
+    _persistent_exhausted_keys.pop(_pkey, None)
+
+
+def _get_exhausted_keys(pid: str, model_name: str,
+                        exhausted_keys: dict) -> set[str]:
+    """Union of locally- and persistently-exhausted keys for a provider+model."""
+    return (
+        exhausted_keys.get((pid, model_name), set())
+        | _persistent_exhausted_keys.get((pid, model_name), set())
+    )
+
+
+def _log_api_error_log(
+    provider_id: str,
+    model_name: str,
+    status: int | None,
+    count: int,
+    threshold: int,
+    key_switched: bool = False,
+    message: str = "",
+) -> None:
+    """Append a concise API-error line to ``workspace/error.log`` for diagnostics."""
+    try:
+        with open(
+            os.path.join(paths.WORKSPACE_DIR, "error.log"),
+            "a",
+            encoding="utf-8",
+        ) as fh:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+            suffix = " - key switched, continuing workflow" if key_switched else ""
+            detail = f" | {message.strip()[:200]}" if message else ""
+            fh.write(
+                f"[{ts}] [{provider_id}/{model_name}] API error "
+                f"(status {status or 'unknown'}), attempt "
+                f"{count}/{threshold} on current key{suffix}{detail}.\n"
+            )
+    except Exception:
+        pass
 
 
 def _error_status(exc: Exception) -> int | None:
@@ -343,7 +408,7 @@ def _stitch_assistant_turns(messages: list[dict], last_chunk: str) -> str:
 
 
 _TOOL_TAGS = {
-    "run_code":    "EXEC",
+    "shell":    "EXEC",
     "write_file":  "EDITING FILE",
     "read_file":   "READING FILE",
     "find_replace": "FIND REPLACE",
@@ -364,7 +429,7 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
     """
     tag = _TOOL_TAGS.get(name, name.upper())
 
-    if name == "run_code":
+    if name == "shell":
         bash = str(args.get("bash", "") or "")
         lines = bash.splitlines() or [""]
         if expanded:
@@ -445,7 +510,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         toggle_torch = None
     started = time.monotonic()
     routes = {
-        "run_code":        lambda: run_code(
+        "shell":        lambda: shell(
                                 bash    = g("bash", ""),
                                 timeout = int(g("timeout", 0)),
                            ),
@@ -821,13 +886,14 @@ def _ask_with_slots(
     messages: list[dict] = []
     base_len = len(base_messages)
     # Generic API-error policy for this request:
-    # same key + same error -> retry up to five times; then change key.
-    # A success resets the counter. Keys exhausted by five identical errors
-    # are tracked locally, so ordinary server errors never permanently
-    # blacklist credentials.
-    consecutive_error_identity: tuple[str, str, str] | None = None
-    consecutive_error_signature: str | None = None
-    consecutive_error_count = 0
+    # same status code -> retry up to _SAME_STATUS_THRESHOLD (10) times;
+    # then change key and continue. The same-status-code streak is tracked
+    # persistently across calls so a steadily-failing provider/model
+    # accumulates the counter even across separate ask_ai() invocations.
+    # Any successful response resets the counter. Keys exhausted by reaching
+    # the threshold are tracked locally (this call) and persisted (next
+    # call) so ordinary server errors never permanently blacklist
+    # credentials — a single success clears the exhaustion record.
     forced_retry_key: tuple[str, str, str] | None = None
     exhausted_keys: dict[tuple[str, str], set[str]] = {}
 
@@ -873,11 +939,13 @@ def _ask_with_slots(
             else:
                 forced_retry_key = None
                 api_key = _next_key(
-                    pid, model_name, exhausted_keys.get((pid, model_name), set())
+                    pid, model_name,
+                    _get_exhausted_keys(pid, model_name, exhausted_keys),
                 )
         else:
             api_key = _next_key(
-                pid, model_name, exhausted_keys.get((pid, model_name), set())
+                pid, model_name,
+                _get_exhausted_keys(pid, model_name, exhausted_keys),
             )
 
         if api_key is None:
@@ -1031,11 +1099,12 @@ def _ask_with_slots(
                 finish_reason = choice.finish_reason
                 msg_dict = _msg_to_dict(choice.message)
 
-                # Any successful model response resets the generic API-error streak.
-                consecutive_error_identity = None
-                consecutive_error_signature = None
-                consecutive_error_count = 0
+                # Any successful model response resets the generic API-error
+                # streak (both within-call and persistent same-status-code
+                # counters). This is what makes a single success reset the
+                # 10-strike error counter.
                 forced_retry_key = None
+                _reset_error_counters(pid, model_name)
 
                 reasoning = msg_dict.get("reasoning") or msg_dict.get(
                     "reasoning_content"
@@ -1261,7 +1330,6 @@ def _ask_with_slots(
         except Exception as exc:
             status = _error_status(exc)
             message = str(exc)
-            s_lower = message.lower()
 
             # Context/token limit: reduce max_tokens and retry (no key/model change)
             if _is_context_error(exc) and max_tok and max_tok > 512:
@@ -1272,53 +1340,69 @@ def _ask_with_slots(
                 )
                 continue
 
-            # All API/runtime errors use the same consecutive-error rule.
-            # No 429/500/400-specific branch skips a key or model early.
-            current_identity = (pid, model_name, api_key)
-            error_signature = (
-                f"status={status!r}|{type(exc).__name__}|{message.strip()}"
-            )
-
+            # Track consecutive same-status-code errors persistently across
+            # all API calls. A success resets the counter to 0. When the same
+            # status code is seen _SAME_STATUS_THRESHOLD (10) times in a row
+            # the current API key is exhausted and the next key is tried.
+            _pkey = (pid, model_name)
             if (
-                consecutive_error_identity == current_identity
-                and consecutive_error_signature == error_signature
+                _pkey in _consecutive_error_count
+                and status == _consecutive_error_status.get(_pkey)
             ):
-                consecutive_error_count += 1
+                _consecutive_error_count[_pkey] += 1
             else:
-                consecutive_error_identity = current_identity
-                consecutive_error_signature = error_signature
-                consecutive_error_count = 1
+                _consecutive_error_status[_pkey] = status
+                _consecutive_error_count[_pkey] = 1
+
+            error_count = _consecutive_error_count[_pkey]
 
             print(
                 f"{RED}[{pid}/{model_name}] API error "
                 f"(status {status or 'unknown'}), attempt "
-                f"{consecutive_error_count}/5 on current key.{RESET}"
+                f"{error_count}/{_SAME_STATUS_THRESHOLD} on current key.{RESET}"
             )
 
-            if consecutive_error_count < 5:
-                forced_retry_key = current_identity
+            # Log every API error to workspace/error.log for diagnostics.
+            _log_api_error_log(
+                pid, model_name, status, error_count,
+                _SAME_STATUS_THRESHOLD, message=message,
+            )
+
+            if error_count < _SAME_STATUS_THRESHOLD:
+                # Retry the exact same key quickly before switching.
+                forced_retry_key = (pid, model_name, api_key)
                 time.sleep(1)
                 continue
 
-            # Same error 5 times on this key -> exhaust this key for this model
+            # Same status code reached the threshold — exhaust this key
+            # for this model and switch to the next available key.
             exhausted_keys.setdefault((pid, model_name), set()).add(api_key)
+            _persistent_exhausted_keys.setdefault(_pkey, set()).add(api_key)
             remaining = len(API_KEYS.get(pid, [])) - len(
-                exhausted_keys.get((pid, model_name), set())
+                _get_exhausted_keys(pid, model_name, exhausted_keys)
             )
             print(
-                f"{RED}[{pid}/{model_name}] Same error reached 5 consecutive "
-                f"times. Changing API key; {max(remaining, 0)} key(s) remain "
+                f"{RED}[{pid}/{model_name}] Same status code reached "
+                f"{_SAME_STATUS_THRESHOLD} consecutive times. "
+                f"Switching API key; {max(remaining, 0)} key(s) remain "
                 f"for this model.{RESET}"
             )
+            _log_api_error_log(
+                pid, model_name, status, error_count,
+                _SAME_STATUS_THRESHOLD, key_switched=True, message=message,
+            )
 
-            consecutive_error_identity = None
-            consecutive_error_signature = None
-            consecutive_error_count = 0
+            # Reset the same-status streak for this slot; the next key
+            # gets a fresh count. The exhausted key stays in
+            # _persistent_exhausted_keys until a success clears it.
             forced_retry_key = None
             last_slot = -1
+            _consecutive_error_status[_pkey] = None
+            _consecutive_error_count[_pkey] = 0
 
             # Stay on this model while another key is available. Once every
-            # key has reached five identical failures, move to the next model.
+            # key has reached the threshold of identical failures, move to
+            # the next model.
             continue
 
 
