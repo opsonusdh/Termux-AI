@@ -25,6 +25,7 @@ from functools import lru_cache
 from typing import Iterable, List, Tuple
 
 import paths
+from core import shell_parse
 
 # Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -137,7 +138,7 @@ _API_KEYS_REF = re.compile(r"(?<![\w.])api\.keys(?![\w.])")
 
 # Unconditionally blocked – these touch system state no AI should touch.
 FORBIDDEN_COMMANDS = {
-    "sudo", "su", "pkexec", "passwd",
+    "sudo", "su", "doas", "pkexec", "passwd",
     "shutdown", "reboot", "poweroff", "halt",
     "mount", "umount", "runas", "format",
 }
@@ -215,6 +216,11 @@ def _commonpath_is_inside(base: str, path: str) -> bool:
 
 
 def _expand_path(path: str) -> str:
+    # ``expandvars`` first: a path like ``$HOME/x`` must be resolved to the
+    # real location it points at, otherwise it looks like a relative path
+    # inside the project root and a destructive command against it would be
+    # waved through.
+    path = os.path.expandvars(path)
     return os.path.normpath(os.path.realpath(os.path.expanduser(path)))
 
 
@@ -372,63 +378,21 @@ def unregister_owned_path(path: str) -> None:
 # Shell parsing helpers -----------------------------------------------------
 
 def _split_shell_chain(cmd: str) -> List[str]:
-    parts: List[str] = []
-    buf:   List[str] = []
-    quote = None
-    escape = False
-    i = 0
+    """Split *cmd* into the simple commands it actually runs.
 
-    while i < len(cmd):
-        ch = cmd[i]
-        if escape:
-            buf.append(ch)
-            escape = False
-            i += 1
-            continue
-        if ch == "\\":
-            buf.append(ch)
-            escape = True
-            i += 1
-            continue
-        if quote:
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            buf.append(ch)
-            quote = ch
-            i += 1
-            continue
-        if ch in ("\n", ";"):
-            seg = "".join(buf).strip()
-            if seg:
-                parts.append(seg)
-            buf = []
-            i += 1
-            continue
-        if ch == "&" and i + 1 < len(cmd) and cmd[i + 1] == "&":
-            seg = "".join(buf).strip()
-            if seg:
-                parts.append(seg)
-            buf = []
-            i += 2
-            continue
-        if ch == "|" and i + 1 < len(cmd) and cmd[i + 1] == "|":
-            seg = "".join(buf).strip()
-            if seg:
-                parts.append(seg)
-            buf = []
-            i += 2
-            continue
-        buf.append(ch)
-        i += 1
+    The split is **structural**, not textual.  The previous implementation cut
+    the command at every ``;``, ``&&``, ``||`` and newline, which tore compound
+    blocks apart: in ``for i in 1 2 3; do rm -rf $HOME/x; done`` the cut landed
+    right before ``rm``, so the segment's command word was ``do`` — a shell
+    keyword — and the destructive command inside the loop was never inspected.
 
-    tail = "".join(buf).strip()
-    if tail:
-        parts.append(tail)
-    return parts
+    ``core.shell_parse`` parses the command properly and returns the text of
+    every simple command, including the ones nested in ``for``/``while``/
+    ``until``/``if``/``case`` blocks, ``{ }`` groups, subshells and command
+    substitutions.  Each of them is then checked on its own by
+    :func:`_segment_needs_permission`.
+    """
+    return shell_parse.simple_commands(cmd)
 
 
 def _safe_split(cmd: str) -> List[str]:
@@ -438,9 +402,98 @@ def _safe_split(cmd: str) -> List[str]:
         return []
 
 
+#: A leading ``NAME=value`` assignment, e.g. ``FOO=bar rm -rf x``.
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+#: Commands whose real payload is *another* command.  The permission check has
+#: to look through them, otherwise ``command rm -rf /tmp/x``,
+#: ``env FOO=1 rm -rf /tmp/x``, ``xargs rm -rf`` or ``timeout 30 rm -rf x``
+#: would slip past the gate.
+_COMMAND_WRAPPERS = {
+    "command", "builtin", "exec", "env", "nohup", "stdbuf", "setsid",
+    "nice", "ionice", "time", "xargs", "timeout", "watch",
+}
+
+#: Options of the wrapper commands that take a separate value argument.
+_WRAPPER_VALUE_OPTIONS = {
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "-n", "--class", "--classdata"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "watch": {"-n", "--interval"},
+    "stdbuf": {"-i", "-o", "-e"},
+}
+
+#: ``timeout 30s`` / ``timeout 1.5m`` — the duration before the command.
+_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+
+
+def _command_word(tokens: List[str]) -> str:
+    """The command word of *tokens*, ignoring leading ``NAME=value`` assignments.
+
+    ``FOO=1 rm -rf x`` runs ``rm``; looking only at the first token would
+    report ``FOO=1`` as the command and the ``rm`` would never be checked.
+    """
+    for tok in tokens:
+        if not tok:
+            continue
+        if _ASSIGNMENT_RE.match(tok):
+            continue
+        return os.path.basename(tok).lower()
+    return ""
+
+
 def _cmd_name(segment: str) -> str:
     tokens = _safe_split(segment)
-    return os.path.basename(tokens[0]).lower() if tokens else ""
+    return _command_word(tokens) if tokens else ""
+
+
+def _wrapped_command(tokens: List[str]) -> List[str]:
+    """Return the token list of the command a wrapper actually runs.
+
+    ``None`` when *tokens* does not start with a wrapper, or when the wrapper
+    has no command to run.
+    """
+    if len(tokens) < 2:
+        return None
+
+    cmd = _command_word(tokens)
+    if cmd not in _COMMAND_WRAPPERS:
+        return None
+
+    # Find the wrapper itself (it may follow leading assignments).
+    index = 0
+    while index < len(tokens) and _ASSIGNMENT_RE.match(tokens[index]):
+        index += 1
+    if index >= len(tokens):
+        return None
+    if os.path.basename(tokens[index]).lower() != cmd:
+        return None
+    index += 1
+
+    # Skip the wrapper's own options.
+    value_opts = _WRAPPER_VALUE_OPTIONS.get(cmd, set())
+    while index < len(tokens):
+        tok = tokens[index]
+        if tok == "--":
+            index += 1
+            break
+        if tok.startswith("-"):
+            index += 2 if tok in value_opts else 1
+            continue
+        break
+
+    # `env` may carry its own assignments before the command.
+    if cmd == "env":
+        while index < len(tokens) and _ASSIGNMENT_RE.match(tokens[index]):
+            index += 1
+
+    # `timeout` takes a duration before the command.
+    if cmd == "timeout" and index < len(tokens) and _DURATION_RE.match(tokens[index]):
+        index += 1
+
+    if index >= len(tokens):
+        return None
+    return tokens[index:]
 
 
 def _extract_write_targets(tokens: List[str]) -> List[str]:
@@ -582,6 +635,15 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
                 if pat.search(inline):
                     return True, "inline code contains a potentially destructive pattern"
 
+            # The inline code is a shell script in its own right, so the
+            # commands it actually runs have to be checked too — otherwise
+            # `bash -c "rm /tmp/x"` would pass just because the pattern list
+            # above only looks for the recursive form.
+            for sub in shell_parse.simple_commands(inline):
+                needs, reason = _segment_needs_permission(sub)
+                if needs:
+                    return True, f"inline code: {reason}"
+
             return False, "OK"
 
         if tok.startswith("-") or tok.startswith("/"):
@@ -607,14 +669,23 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
     tokens = _safe_split(segment)
     if not tokens:
         return False, "OK"
+    return _tokens_needs_permission(tokens, segment)
 
-    cmd = _cmd_name(segment)
+
+def _tokens_needs_permission(tokens: List[str], raw: str) -> Tuple[bool, str]:
+    """Decide whether one simple command needs explicit permission.
+
+    *tokens* is the token list of the command and *raw* its original text (the
+    api.keys reference check works on the raw text, because it has to see the
+    exact filename).
+    """
+    cmd = _command_word(tokens)
 
     # api.keys (the real secrets file, never the .template) is ALWAYS gated —
     # for both reads and writes, in every mode.  Checking the whole segment
     # catches it whether it appears as a read target, write target, source
     # argument, or inside inline (-c) code.
-    if _segment_references_api_keys(segment):
+    if _segment_references_api_keys(raw):
         return True, (
             "command references the api.keys secrets file; "
             "explicit permission required in all modes"
@@ -628,6 +699,14 @@ def _segment_needs_permission(segment: str) -> Tuple[bool, str]:
 
     if cmd in FORBIDDEN_COMMANDS:
         return True, f"'{cmd}' is a forbidden system command"
+
+    # A wrapper (``env``, ``command``, ``nohup``, ``xargs``, ``timeout`` …)
+    # runs another command.  The check has to look at *that* command, or
+    # ``command rm -rf /tmp/x`` would be waved through as a read-only
+    # ``command``.
+    wrapped = _wrapped_command(tokens)
+    if wrapped is not None and len(wrapped) < len(tokens):
+        return _tokens_needs_permission(wrapped, raw)
 
     if cmd in READ_ONLY_COMMANDS:
         write_targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
@@ -669,11 +748,18 @@ def command_needs_permission(cmd: str) -> bool:
     api.keys secrets file, which always requires explicit permission regardless
     of mode.
     """
-    segments = _split_shell_chain(cmd)
+    # The api.keys reference is looked for in the *whole* command, not in the
+    # individual segments: it can sit somewhere that is not a command of its
+    # own — a ``for`` word list, a loop header, an assignment — while the
+    # command that finally reads the file only mentions a variable.
+    if _segment_references_api_keys(cmd):
+        return True
 
     if is_autonomous():
         # api.keys is the one thing that stays gated in autonomous mode.
-        return any(_segment_references_api_keys(seg) for seg in segments)
+        return False
+
+    segments = _split_shell_chain(cmd)
 
     return any(
         _segment_needs_permission(seg)[0]
@@ -690,15 +776,30 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
     """
     segments = _split_shell_chain(cmd)
 
+    # The api.keys secrets file is gated in every mode.  The reference is
+    # looked for in the *whole* command, because it can sit somewhere that is
+    # not a command of its own — a ``for`` word list, a loop header, an
+    # assignment — while the command that finally reads the file only
+    # mentions a variable.
+    references_api_keys = _segment_references_api_keys(cmd)
+
     # In autonomous mode, auto-approve all segments EXCEPT those that
     # reference the api.keys secrets file.  api.keys is gated in every mode.
-    if is_autonomous():
-        if not any(_segment_references_api_keys(seg) for seg in segments):
-            return True, "Autonomous mode active (permission gate bypassed)"
+    if is_autonomous() and not references_api_keys:
+        return True, "Autonomous mode active (permission gate bypassed)"
 
     requests: List[Tuple[str, str]] = []
 
+    if references_api_keys:
+        requests.append((cmd, (
+            "command references the api.keys secrets file; "
+            "explicit permission required in all modes"
+        )))
+
     for segment in segments:
+        if references_api_keys and _segment_references_api_keys(segment):
+            # Already reported above, as the whole command.
+            continue
         needs, reason = _segment_needs_permission(segment)
         if needs:
             requests.append((segment, reason))

@@ -30,7 +30,12 @@ if _CORE_DIR not in sys.path:
 if _ROOT_DIR not in sys.path:
     sys.path.insert(1, _ROOT_DIR)
 
-from permissions import validate_command
+# The permission gate is imported as a *package* module.  The other three
+# call sites in this file already use `from core import permissions`; importing
+# it as a top-level module here loaded a second, independent copy of the same
+# file, so the two copies had separate module state and separate monkeypatches
+# for the very same permission rules.
+from core.permissions import validate_command
 from renderer import RED, GRAY, YELLOW, RESET, render_for_voice, render_markdown_terminal
 from core.models import PROVIDERS
 from core import shell_runner
@@ -3417,7 +3422,7 @@ def search_in_files(
 def shell(bash: str, timeout: int = 30) -> str:
     """Execute shell commands in system environment after permission validation.
 
-    The timeout is applied **per stage**: every command of an ``&&``/``||``/
+    ``timeout`` is applied **per stage**: every command of an ``&&``/``||``/
     ``;``/``|`` chain gets its own budget, so a slow first stage no longer
     starves the rest of the chain.  When a stage runs out of time, GNU
     ``timeout`` terminates that stage's whole process group; when the chain as
