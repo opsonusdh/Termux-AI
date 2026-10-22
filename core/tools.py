@@ -80,12 +80,12 @@ TOOLS_DESCRIPTION = [
                 "properties": {
                     "bash": {
                         "type": "string",
-                        "description": "Shell command to execute.",
+                        "description": "Shell command to execute. **You should put the command you want to execute in parameter 'bash'.**",
                     },
                     "timeout": {
                         "type": "integer",
                         "description": "Maximum execution time in seconds (0 = no limit).",
-                        "default": 0,
+                        "default": 30,
                         "minimum": 0,
                     },
                 },
@@ -1407,9 +1407,37 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_uptime",
+            "description": (
+                "Retrieve system uptime and idle time. "
+                "Runs the `uptime` command on Linux/macOS and a PowerShell equivalent on Windows. "
+                "Returns a dict with 'uptime', 'idle_time', and 'raw' keys."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_hostname",
+            "description": (
+                "Retrieve the system hostname and fully qualified domain name (FQDN). "
+                "Uses socket.gethostname() and platform.node(). "
+                "Returns a dict with 'hostname' and 'fqdn' keys."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
-
-# ── LOGGING HELPERS ────────────────────────────────────────────────────────────
 
 def log_write(msg: str) -> None:
     try:
@@ -2506,6 +2534,8 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         "ask_user": ask_user,
         "confirm": confirm,
         "manage_todos": manage_todos,
+        "find_replace": find_replace,
+        "set_whatsapp_seen": set_whatsapp_seen,
     }
     # Lazy import to avoid circular dependency
     try:
@@ -2516,6 +2546,28 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         wrapper_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(wrapper_module)
         local_funcs["toggle_torch"] = wrapper_module.toggle_torch
+    except Exception:
+        pass
+
+    try:
+        import importlib.util
+        import os
+        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_system_hostname.py')
+        spec = importlib.util.spec_from_file_location("wrapper_system_hostname", wrapper_path)
+        wrapper_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper_module)
+        local_funcs["get_hostname"] = wrapper_module.get_hostname
+    except Exception:
+        pass
+
+    try:
+        import importlib.util
+        import os
+        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_system_uptime.py')
+        spec = importlib.util.spec_from_file_location("wrapper_system_uptime", wrapper_path)
+        wrapper_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper_module)
+        local_funcs["get_uptime"] = wrapper_module.get_uptime
     except Exception:
         pass
 
@@ -3265,7 +3317,7 @@ def search_in_files(
 
 # ── TOOL FUNCTIONS ─────────────────────────────────────────────────────────────
 
-def shell(bash: str, timeout: int = 0) -> str:
+def shell(bash: str, timeout: int = 30) -> str:
     """Execute shell commands in system environment after permission validation."""
     log_write(f"[shell] timeout:{timeout} cmd:{bash}")
     print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")

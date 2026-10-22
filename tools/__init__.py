@@ -17,7 +17,8 @@ from .wrapper_termux_wallpaper import set_wallpaper, get_wallpaper
 from .wrapper_termux_camera import take_photo, record_video, get_camera_info
 from .wrapper_termux_audio import start_recording, stop_recording, record_audio
 from .wrapper_termux_filepicker import pick_file, share_file, share_text
-
+from .wrapper_system_hostname import get_hostname
+from .wrapper_system_uptime import get_uptime
 # Re-export core tools functions
 import sys
 import os
@@ -154,4 +155,6 @@ __all__ = [
     '_dispatch_sub_tool',
     'ask_user',
     'confirm',
+    'get_hostname',
+    'get_uptime',
 ]

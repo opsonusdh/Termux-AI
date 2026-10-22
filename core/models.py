@@ -72,6 +72,7 @@ MODEL_SLOTS: list[dict] = [
 
 
 AGENT_MODEL_SLOTS: list[dict] = [
+    {"provider_id": "openrouter", "name": "minimax/minimax-m3.1-flash:free",               "max_tokens": None},
     {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",                    "max_tokens": None},
     {"provider_id": "openrouter", "name": "dots-studio/dots-3-note-preview:free",          "max_tokens": None},
     {"provider_id": "openrouter", "name": "inclusionai/ling-3.0-flash-vl:free",          "max_tokens": None},

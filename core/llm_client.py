@@ -509,6 +509,29 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     except Exception:
         toggle_torch = None
     started = time.monotonic()
+    # Lazy import for get_hostname (wrapper functions live in tools/wrapper_*.py,
+    # not core/tools.py, so 'from tools import *' does not bring them in)
+    try:
+        import importlib.util
+        import os as _os
+        _wrapper_path = _os.path.join(_os.path.dirname(__file__), '..', 'tools', 'wrapper_system_hostname.py')
+        _spec = importlib.util.spec_from_file_location("wrapper_system_hostname", _wrapper_path)
+        _wrapper_module = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_wrapper_module)
+        get_hostname = _wrapper_module.get_hostname
+    except Exception:
+        get_hostname = lambda: {"error": "wrapper_system_hostname not available"}
+
+    try:
+        import importlib.util
+        import os as _os
+        _wrapper_path = _os.path.join(_os.path.dirname(__file__), '..', 'tools', 'wrapper_system_uptime.py')
+        _spec = importlib.util.spec_from_file_location("wrapper_system_uptime", _wrapper_path)
+        _wrapper_module = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_wrapper_module)
+        get_uptime = _wrapper_module.get_uptime
+    except Exception:
+        get_uptime = lambda: {"error": "wrapper_system_uptime not available"}
     routes = {
         "shell":        lambda: shell(
                                 bash    = g("bash", ""),
@@ -746,7 +769,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 question = g("question", ""),
                                 default  = _safe_bool(g("default", True)),
                               ),
-        "toggle_torch":      lambda: toggle_torch(on=_safe_bool(g("on", True))) if toggle_torch else "toggle_torch not available",
+"toggle_torch":      lambda: toggle_torch(on=_safe_bool(g("on", True))) if toggle_torch else "toggle_torch not available",
+        "get_hostname":      lambda: get_hostname(),
+        "get_uptime":        lambda: get_uptime() if get_uptime else "get_uptime not available",
     }
 
     fn = routes.get(name)
