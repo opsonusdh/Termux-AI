@@ -38,7 +38,6 @@ MODEL_SLOTS: list[dict] = [
     {"provider_id": "google", "name": "gemini-3-flash-preview",             "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.1-pro-preview",             "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.1-pro-preview-customtools", "max_tokens": None},
-    {"provider_id": "google", "name": "gemini-flash-latest",                "max_tokens": None},
     {"provider_id": "google", "name": "gemini-flash-lite-latest",           "max_tokens": None},
     {"provider_id": "google", "name": "gemini-pro-latest",                  "max_tokens": None},
     {"provider_id": "google", "name": "gemma-4-31b-it",                     "max_tokens": None},

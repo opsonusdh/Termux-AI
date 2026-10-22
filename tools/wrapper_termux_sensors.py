@@ -20,22 +20,62 @@ SENSOR_TYPES = {
     "step_detector": "step_detector",
 }
 
+# `termux-sensor -l` reports raw Android sensor names (e.g. "icm4n607 acc").
+# Map them onto the canonical sensor types used by get_sensor_data().
+_SENSOR_NAME_HINTS = (
+    ("acc",         "accelerometer"),
+    ("gyro",        "gyroscope"),
+    ("mag",         "magnetometer"),
+    ("als",         "light"),
+    ("light",       "light"),
+    ("prox",        "proximity"),
+    ("pressure",    "pressure"),
+    ("temp",        "temperature"),
+    ("humid",       "humidity"),
+    ("step_count",  "step_counter"),
+    ("step_detect", "step_detector"),
+)
+
+
+def _guess_sensor_type(raw_name: str) -> str:
+    """Best-effort mapping of an Android sensor name to a canonical type."""
+    lowered = raw_name.lower()
+    for hint, sensor_type in _SENSOR_NAME_HINTS:
+        if hint in lowered:
+            return sensor_type
+    return "unknown"
+
+
 def list_sensors() -> list:
     """List all available sensors."""
     if sys.platform == "win32":
         return [{"name": "Windows", "type": "N/A", "note": "Sensors not available on Windows"}]
-    
+
     try:
         print(f"{GRAY}[EXECUTING] termux-sensor -l{RESET}")
         result = subprocess.check_output(['termux-sensor', '-l'], text=True, timeout=10)
         if result.strip():
             print(f"{GRAY}[OUT]\n{result.strip()}{RESET}")
-        # Parse the output - it's typically a list of sensor names
-        sensors = []
-        for line in result.strip().split('\n'):
-            if line.strip():
-                sensors.append({"name": line.strip(), "type": "unknown"})
-        return sensors
+
+        # termux-sensor -l emits JSON: {"sensors": ["name", ...]}.
+        # Older builds emitted a plain newline-separated list, so keep a
+        # fallback for that shape.
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            data = None
+
+        if isinstance(data, dict) and isinstance(data.get("sensors"), list):
+            raw_names = [str(s) for s in data["sensors"]]
+        elif isinstance(data, list):
+            raw_names = [str(s) for s in data]
+        else:
+            raw_names = [line.strip() for line in result.strip().split('\n') if line.strip()]
+
+        return [
+            {"name": name, "type": _guess_sensor_type(name)}
+            for name in raw_names
+        ]
     except Exception as e:
         print(f"{RED}[ERR] Failed to list sensors: {e}{RESET}")
         raise RuntimeError(f"Failed to list sensors: {e}")
@@ -63,9 +103,17 @@ def get_sensor_data(sensor_type: str = "accelerometer", samples: int = 1, delay:
         )
         if result.strip():
             print(f"{GRAY}[OUT]\n{result.strip()}{RESET}")
-        return json.loads(result)
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"termux-sensor returned non-JSON output for '{sensor_type}': "
+                f"{result.strip()[:200] or '(empty)'}"
+            ) from exc
     except subprocess.TimeoutExpired:
         raise RuntimeError("termux-sensor timed out")
+    except RuntimeError:
+        raise
     except Exception as e:
         print(f"{RED}[ERR] Failed to get sensor data: {e}{RESET}")
         raise RuntimeError(f"Failed to get sensor data: {e}")

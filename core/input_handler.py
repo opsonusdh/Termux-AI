@@ -104,14 +104,12 @@ try:
             word_start = before_cursor.rfind(' ', 0, word_start-1) + 1
         current_word = before_cursor[word_start:]
         
-        # Command completions
+        # Command completions — only commands the chat loop actually
+        # handles (see core/interface.py chat_loop). Suggesting commands that
+        # do not exist turns a typo into a message silently sent to the model.
         commands = [
-            '/delegate', '/agent', '/autonomous', '/chunks', '/clear', '/collapse',
-            '/config', '/diagnosis', '/exit', '/expand', '/help', '/index',
-            '/recall', '/save_mem', '/project_add', '/project_init', '/project_update',
-            '/palette', '/sleep', '/wa_busy', '/wa_chats', '/wa_history',
-            '/wa_report', '/wa_search', '/wa_send', '/wa_silence', '/wa_status',
-            '/web', '/session_save', '/session_load', '/session_list', '/session_delete',
+            '/agent', '/autonomous', '/chat', '/collapse', '/details',
+            '/expand', '/normal', '/notify',
         ]
         
         # Filter commands that start with current word
@@ -185,8 +183,21 @@ def _fallback_multiline_input(prompt_str: str) -> str:
     return _fallback_posix_input(prompt_str)
 
 
+def _stdin_is_tty() -> bool:
+    """True when stdin is an interactive terminal (not a pipe / redirect)."""
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
+
+
 def _fallback_windows_input(prompt_str: str) -> str:
     import msvcrt
+
+    # Non-interactive stdin (pipe / redirect): plain line input. msvcrt.getwch()
+    # only works on a real console.
+    if not _stdin_is_tty():
+        return input(prompt_str)
 
     print(prompt_str, end="", flush=True)
     lines = [""]
@@ -219,9 +230,17 @@ def _fallback_posix_input(prompt_str: str) -> str:
     import termios
     import tty
 
+    # Non-interactive stdin (pipe / redirect): plain line input. Putting the
+    # terminal into raw mode raises termios.error on a non-tty stdin.
+    if not _stdin_is_tty():
+        return input(prompt_str)
+
     print(prompt_str, end="", flush=True)
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    try:
+        old = termios.tcgetattr(fd)
+    except termios.error:
+        return input(prompt_str)
     lines = [""]
     try:
         tty.setraw(fd)

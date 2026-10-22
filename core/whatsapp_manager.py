@@ -253,11 +253,14 @@ class WhatsAppManager:
         last_reply_at = entry.get("last_auto_reply_at")
         if not last_reply_at:
             return False
+        # The 60-second burst guard is intentionally disabled (instant replies
+        # are wanted).  The timestamp is still parsed so a malformed value is
+        # simply ignored instead of raising.
         try:
-            elapsed = (datetime.now() - datetime.fromisoformat(last_reply_at)).total_seconds()
-            return False #elapsed < 60 | PERSONAL: KEEPING FALSE FOR INSTANT REPLIES
+            datetime.fromisoformat(last_reply_at)
         except (ValueError, TypeError):
-            return False
+            pass
+        return False
 
     #  Public Filter Configuration API
 
@@ -732,8 +735,8 @@ class WhatsAppManager:
                         ack_msg = "Got it! I will stop replying now. Let me know if you need any assistance later (just ask for Orion)."
                         self.send_message(sender, ack_msg)
                         try:
-                            from tools_core import wa_log_write
-                            wa_log_write("SENT (auto-reply)", profile_name, sender, ack_msg)
+                            from tools import wa_log_write
+                            wa_log_write("SENT (auto-reply)", sender, profile_name, ack_msg)
                         except Exception:
                             pass
                         return
@@ -763,9 +766,9 @@ class WhatsAppManager:
                         })
 
                 try:
-                    from tools_core import wa_log_write
+                    from tools import wa_log_write
                     log_text = text or f"[{media.get('type', 'media')}]"
-                    wa_log_write("RECEIVED", profile_name, sender, log_text)
+                    wa_log_write("RECEIVED", sender, profile_name, log_text)
                 except Exception:
                     pass
 
@@ -880,7 +883,7 @@ class WhatsAppManager:
         )
 
         try:
-            from tools_core import ask_ai_simple
+            from tools import ask_ai_simple
             reply_text = ask_ai_simple(prompt, "gemini-2.5-flash-lite", system_prompt)
 
             if reply_text and not reply_text.startswith("[EMPTY"):
@@ -915,8 +918,8 @@ class WhatsAppManager:
                     self.save_filters()
 
                     try:
-                        from tools_core import wa_log_write
-                        wa_log_write("SENT (auto-reply)", profile_name, sender, reply_text)
+                        from tools import wa_log_write
+                        wa_log_write("SENT (auto-reply)", sender, profile_name, reply_text)
                     except Exception:
                         pass
                 else:

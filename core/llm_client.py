@@ -535,7 +535,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     routes = {
         "shell":        lambda: shell(
                                 bash    = g("bash", ""),
-                                timeout = int(g("timeout", 0)),
+                                timeout = _safe_int(g("timeout", 30), 30),
                            ),
         "save_memory":     lambda: save_memory(
                                 text     = g("text", ""),
@@ -829,6 +829,22 @@ def _safe_bool(value) -> bool:
     return bool(value)
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """Coerce a model-supplied value into an int, falling back to *default*."""
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except (TypeError, ValueError):
+            pass
+    return default
+
+
 DEBUG = False
 
 _last_response_metadata: dict = {}
@@ -836,7 +852,7 @@ _last_response_metadata: dict = {}
 
 def _dbg(*args) -> None:
     if DEBUG:
-        print(f"[DEBUG]", *args)
+        print("[DEBUG]", *args)
 
 
 def get_last_response_metadata() -> dict:
@@ -953,6 +969,12 @@ def _ask_with_slots(
         max_tok = slot_cfg["max_tokens"]
 
         if (pid, model_name) in _bad_models:
+            slot += 1
+            continue
+
+        # Skip a model that already answered with an invalid request in this
+        # call (duplicate slot entries would otherwise retry it).
+        if (pid, model_name) in invalid_request_retries:
             slot += 1
             continue
 
@@ -1392,6 +1414,25 @@ def _ask_with_slots(
                 pid, model_name, status, error_count,
                 _SAME_STATUS_THRESHOLD, message=message,
             )
+
+            # HTTP 400 — the request itself is malformed, so every key of this
+            # account will fail the same way.  Retrying the same key (or
+            # burning through the whole key pool) just delays the fallback and
+            # wrongly marks healthy keys as exhausted.  Move to the next model
+            # instead and remember the model so a duplicate slot entry is not
+            # retried either.
+            if status == 400:
+                invalid_request_retries.add(_pkey)
+                _consecutive_error_status[_pkey] = None
+                _consecutive_error_count[_pkey] = 0
+                forced_retry_key = None
+                last_slot = -1
+                print(
+                    f"{RED}[{pid}/{model_name}] Invalid request (400) — "
+                    f"skipping this model and trying the next one.{RESET}"
+                )
+                slot += 1
+                continue
 
             if error_count < _SAME_STATUS_THRESHOLD:
                 # Retry the exact same key quickly before switching.

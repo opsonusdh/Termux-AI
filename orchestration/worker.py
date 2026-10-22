@@ -9,6 +9,10 @@ GRAY  = "\033[90m"
 RED   = "\033[31m"
 RESET = "\033[0m"
 
+#: Hard ceiling for a single worker task.  Without this a hung command would
+#: block the orchestrator forever.
+TASK_TIMEOUT = 300
+
 
 class Worker:
     def __init__(self, name: str):
@@ -22,7 +26,7 @@ class Worker:
         """
         task_type = task.get('type', 'shell')
         command   = task.get('command', '')
-        start     = time.time()
+        start     = time.monotonic()
 
         print(f"{GRAY}[WORKER:{self.name}] type={task_type}{RESET}")
 
@@ -47,19 +51,25 @@ class Worker:
                 "task_type": "mock",
                 "status":    mock.get("status", "success"),
                 "result":    mock,
-                "duration":  time.time() - start,
+                "duration":  time.monotonic() - start,
             }
         else:
             return {
                 "worker":    self.name,
                 "status":    "error",
                 "error":     f"Unknown task type: {task_type}",
-                "duration":  time.time() - start,
+                "duration":  time.monotonic() - start,
             }
 
     def _run_subprocess(self, cmd, task_type: str, start: float, shell: bool = False) -> dict:
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                shell=shell,
+                timeout=TASK_TIMEOUT,
+            )
             return {
                 "worker":     self.name,
                 "task_type":  task_type,
@@ -67,7 +77,15 @@ class Worker:
                 "returncode": res.returncode,
                 "stdout":     res.stdout.strip(),
                 "stderr":     res.stderr.strip(),
-                "duration":   time.time() - start,
+                "duration":   time.monotonic() - start,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "worker":    self.name,
+                "task_type": task_type,
+                "status":    "timeout",
+                "error":     f"task exceeded {TASK_TIMEOUT}s",
+                "duration":  time.monotonic() - start,
             }
         except Exception as e:
             return {
@@ -75,7 +93,7 @@ class Worker:
                 "task_type": task_type,
                 "status":    "error",
                 "error":     str(e),
-                "duration":  time.time() - start,
+                "duration":  time.monotonic() - start,
             }
 
 

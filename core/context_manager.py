@@ -628,7 +628,7 @@ def _call_summarizer(parent_id: int, stage: str, existing: dict) -> str:
         "No preamble, no labels, no markdown."
     )
     try:
-        from tools_core import ask_ai_simple
+        from tools import ask_ai_simple
         return ask_ai_simple(prompt, SUMMARIZER_MODEL, sys_prompt)
     except Exception:
         return ""

@@ -200,8 +200,16 @@ def chat_loop():
         print()
 
     while True:
-        with open(CONFIG_PATH, "r") as f:
-            config = json.load(f)
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                loaded_config = json.load(f)
+            if isinstance(loaded_config, dict):
+                config = loaded_config
+        except Exception as e:
+            # A missing or corrupt config.json must not kill the session —
+            # keep the last known-good settings and carry on.
+            print(f"{RED}[WARN] Could not read config.json ({e}); "
+                  f"keeping the previous settings.{RESET}")
         if not config.get("tts_enabled") or not HAS_STT:
             try:
                 user_input = get_interactive_input("\nYOU > ")

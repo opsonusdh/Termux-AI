@@ -76,6 +76,8 @@ _dispatch_sub_tool = _core_tools._dispatch_sub_tool
 TOOLS_DESCRIPTION = _core_tools.TOOLS_DESCRIPTION
 ask_user = _core_tools.ask_user
 confirm = _core_tools.confirm
+find_replace = _core_tools.find_replace
+manage_todos = _core_tools.manage_todos
 
 __all__ = [
     'notify',
@@ -155,6 +157,8 @@ __all__ = [
     '_dispatch_sub_tool',
     'ask_user',
     'confirm',
+    'find_replace',
+    'manage_todos',
     'get_hostname',
     'get_uptime',
 ]

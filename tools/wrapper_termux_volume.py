@@ -21,7 +21,7 @@ def get_volume_info() -> list:
                 {"stream": "notification", "volume": 50, "max_volume": 100},
                 {"stream": "system", "volume": 50, "max_volume": 100}
             ]
-        except Exception as e:
+        except Exception:
             return []
 
     try:
