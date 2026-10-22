@@ -31,8 +31,116 @@ if _ROOT_DIR not in sys.path:
     sys.path.insert(1, _ROOT_DIR)
 
 from permissions import validate_command
-from renderer import RED, GRAY, RESET, render_for_voice, render_markdown_terminal
+from renderer import RED, GRAY, YELLOW, RESET, render_for_voice, render_markdown_terminal
+from core.models import PROVIDERS
+from core import shell_runner
 import paths
+
+
+# ── Platform wrapper re-exports ────────────────────────────────────────────────
+# The `tools/` package (which holds the Termux API wrappers) is shadowed in
+# sys.modules by this very module: core/tools.py is imported as "tools", so
+# `from tools.wrapper_x import y` cannot resolve from here. Load the wrapper
+# modules by file path and re-export their functions so that every consumer of
+# `from tools import *` (core/llm_client.py, core/interface.py) keeps working
+# and every advertised tool route resolves to a real callable.
+#
+# Each wrapper gets a graceful stub first, so a wrapper that cannot be imported
+# on this platform never breaks the import of this module — the tool simply
+# reports that it is unavailable.
+def _load_platform_wrapper(module_name: str):
+    """Import tools/wrapper_<module_name>.py by path and return the module."""
+    import importlib.util
+
+    path = os.path.join(_ROOT_DIR, "tools", f"wrapper_{module_name}.py")
+    spec = importlib.util.spec_from_file_location(f"wrapper_{module_name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _unavailable_wrapper(tool_name: str):
+    """Return a stub for a platform wrapper that could not be imported."""
+    def _stub(*_args, **_kwargs):
+        return f"[ERROR] '{tool_name}' is not available on this system."
+    return _stub
+
+
+def _load_optional_wrapper(module_name: str):
+    """Load a wrapper module, or None when it cannot be imported here."""
+    try:
+        return _load_platform_wrapper(module_name)
+    except Exception as exc:  # pragma: no cover - platform dependent
+        print(f"{YELLOW}[WARN] Platform wrapper '{module_name}' unavailable: "
+              f"{exc}{RESET}")
+        return None
+
+
+get_contacts = _unavailable_wrapper("get_contacts")
+get_contact_by_id = _unavailable_wrapper("get_contact_by_id")
+list_sensors = _unavailable_wrapper("list_sensors")
+get_sensor_data = _unavailable_wrapper("get_sensor_data")
+set_wallpaper = _unavailable_wrapper("set_wallpaper")
+take_photo = _unavailable_wrapper("take_photo")
+record_video = _unavailable_wrapper("record_video")
+record_audio = _unavailable_wrapper("record_audio")
+pick_file = _unavailable_wrapper("pick_file")
+share_file = _unavailable_wrapper("share_file")
+share_text = _unavailable_wrapper("share_text")
+toggle_torch = _unavailable_wrapper("toggle_torch")
+get_battery_status = _unavailable_wrapper("get_battery_status")
+get_wifi_scan_info = _unavailable_wrapper("get_wifi_scan_info")
+get_hostname = _unavailable_wrapper("get_hostname")
+get_uptime = _unavailable_wrapper("get_uptime")
+
+_contacts_wrapper = _load_optional_wrapper("termux_contacts")
+if _contacts_wrapper is not None:
+    get_contacts = _contacts_wrapper.get_contacts
+    get_contact_by_id = _contacts_wrapper.get_contact_by_id
+
+_sensors_wrapper = _load_optional_wrapper("termux_sensors")
+if _sensors_wrapper is not None:
+    list_sensors = _sensors_wrapper.list_sensors
+    get_sensor_data = _sensors_wrapper.get_sensor_data
+
+_camera_wrapper = _load_optional_wrapper("termux_camera")
+if _camera_wrapper is not None:
+    take_photo = _camera_wrapper.take_photo
+    record_video = _camera_wrapper.record_video
+
+_audio_wrapper = _load_optional_wrapper("termux_audio")
+if _audio_wrapper is not None:
+    record_audio = _audio_wrapper.record_audio
+
+_filepicker_wrapper = _load_optional_wrapper("termux_filepicker")
+if _filepicker_wrapper is not None:
+    pick_file = _filepicker_wrapper.pick_file
+    share_file = _filepicker_wrapper.share_file
+    share_text = _filepicker_wrapper.share_text
+
+_wallpaper_wrapper = _load_optional_wrapper("termux_wallpaper")
+if _wallpaper_wrapper is not None:
+    set_wallpaper = _wallpaper_wrapper.set_wallpaper
+
+_torch_wrapper = _load_optional_wrapper("termux_torch")
+if _torch_wrapper is not None:
+    toggle_torch = _torch_wrapper.toggle_torch
+
+_battery_wrapper = _load_optional_wrapper("termux_battery_status")
+if _battery_wrapper is not None:
+    get_battery_status = _battery_wrapper.get_battery_status
+
+_wifi_wrapper = _load_optional_wrapper("termux_wifi_scaninfo")
+if _wifi_wrapper is not None:
+    get_wifi_scan_info = _wifi_wrapper.get_wifi_scan_info
+
+_hostname_wrapper = _load_optional_wrapper("system_hostname")
+if _hostname_wrapper is not None:
+    get_hostname = _hostname_wrapper.get_hostname
+
+_uptime_wrapper = _load_optional_wrapper("system_uptime")
+if _uptime_wrapper is not None:
+    get_uptime = _uptime_wrapper.get_uptime
 
 # Import WhatsApp Manager (same package, safe relative import)
 try:
@@ -73,7 +181,10 @@ TOOLS_DESCRIPTION = [
             "name": "shell",
             "description": (
                 "Execute shell commands inside the system environment (Termux, Linux, or Windows). "
-                "Supports an optional execution timeout in seconds."
+                "Supports an optional execution timeout in seconds. "
+                "The timeout applies PER STAGE: every command of a chain "
+                "('a && b', 'a; b', 'a | b') gets its own budget, and each stage "
+                "is terminated together with the processes it spawns."
             ),
             "parameters": {
                 "type": "object",
@@ -84,7 +195,11 @@ TOOLS_DESCRIPTION = [
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Maximum execution time in seconds (0 = no limit).",
+                        "description": (
+                            "Maximum execution time in seconds for each command in the chain "
+                            "(0 = no limit). A stage that exceeds it is killed along with all "
+                            "the processes it spawned."
+                        ),
                         "default": 30,
                         "minimum": 0,
                     },
@@ -1922,8 +2037,8 @@ def _find_free_port() -> int | None:
 
 def _wait_for_port(port: int, timeout: float = 15.0) -> bool:
     """Wait until a TCP connection to 127.0.0.1:port succeeds."""
-    start = time.time()
-    while time.time() - start < timeout:
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.5)
@@ -1950,8 +2065,8 @@ def _send_cdp(ws, method: str, params: dict | None = None, msg_id: int = 1, time
         msg["params"] = params
     ws.send(json.dumps(msg))
 
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             raw = ws.recv()
         except Exception:
@@ -1976,10 +2091,10 @@ def _wait_for_load(ws, timeout: float = 12.0, msg_id: int = 4) -> bool:
     navigation hasn't been detected yet), the function briefly waits and re-checks
     so that a navigation triggered by the click is properly caught.
     """
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     was_complete = False
-    recheck_deadline = time.time() + 2.0  # give a navigation 2s to start
-    while time.time() < deadline:
+    recheck_deadline = time.monotonic() + 2.0  # give a navigation 2s to start
+    while time.monotonic() < deadline:
         resp = _send_cdp(ws, "Runtime.evaluate", {
             "expression": "document.readyState",
             "returnByValue": True
@@ -1993,13 +2108,13 @@ def _wait_for_load(ws, timeout: float = 12.0, msg_id: int = 4) -> bool:
             # First time seeing complete. Give a brief window for navigation
             # to start (click may have triggered a delayed navigation).
             was_complete = True
-            if time.time() > recheck_deadline:
+            if time.monotonic() > recheck_deadline:
                 return True
             time.sleep(0.2)
             continue
         else:
             was_complete = False
-            recheck_deadline = time.time() + 2.0
+            recheck_deadline = time.monotonic() + 2.0
         time.sleep(0.3)
     return False
 
@@ -2226,7 +2341,6 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
                     if not action_url:
                         action_url = url
                     # Resolve relative URLs
-                    from urllib.parse import urljoin
                     action_url = urljoin(url, action_url)
 
                     if method == "POST":
@@ -2255,7 +2369,6 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
                     if el.name == "a" or el.get("href"):
                         href = el.get("href")
                         if href:
-                            from urllib.parse import urljoin
                             new_url = urljoin(url, href)
                             url = new_url
                             resp = requests.get(url, headers=headers, timeout=12)
@@ -2496,80 +2609,7 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
     except Exception:
         args = {}
 
-    local_funcs = {
-        "shell": shell,
-        "read_file": read_file,
-        "write_file": write_file,
-        "save_memory": save_memory,
-        "retrieve_memory": retrieve_memory,
-        "index_files": index_files,
-        "browse_web": browse_web,
-        "generate_image": generate_image,
-        "send_whatsapp_message": send_whatsapp_message,
-        "get_whatsapp_status": get_whatsapp_status,
-        "get_whatsapp_chats": get_whatsapp_chats,
-        "get_pending_whatsapp_messages": get_pending_whatsapp_messages,
-        "fetch_whatsapp_chat_history": fetch_whatsapp_chat_history,
-        "set_whatsapp_busy_mode": set_whatsapp_busy_mode,
-        "get_whatsapp_report": get_whatsapp_report,
-        "set_whatsapp_user_profile": set_whatsapp_user_profile,
-        "archive_whatsapp_chat": archive_whatsapp_chat,
-        "search_whatsapp_chat": search_whatsapp_chat,
-        "get_whatsapp_group_participants": get_whatsapp_group_participants,
-        "get_whatsapp_contact_info": get_whatsapp_contact_info,
-        "react_to_whatsapp_message": react_to_whatsapp_message,
-        "download_whatsapp_media": download_whatsapp_media,
-        "silence_whatsapp_contact": silence_whatsapp_contact,
-        "schedule_whatsapp_message": schedule_whatsapp_message,
-        "run_diagnosis": run_diagnosis,
-        "sleep_mode": sleep_mode,
-        "intermediate_print": intermediate_print,
-        "search_in_files": search_in_files,
-        "list_directory": list_directory,
-        "search_files": search_files,
-        "rename_file": rename_file,
-        "delete_file": delete_file,
-        "http_request": http_request,
-        "get_datetime": get_datetime,
-        "ask_user": ask_user,
-        "confirm": confirm,
-        "manage_todos": manage_todos,
-        "find_replace": find_replace,
-        "set_whatsapp_seen": set_whatsapp_seen,
-    }
-    # Lazy import to avoid circular dependency
-    try:
-        import importlib.util
-        import os
-        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_termux_torch.py')
-        spec = importlib.util.spec_from_file_location("wrapper_termux_torch", wrapper_path)
-        wrapper_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(wrapper_module)
-        local_funcs["toggle_torch"] = wrapper_module.toggle_torch
-    except Exception:
-        pass
-
-    try:
-        import importlib.util
-        import os
-        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_system_hostname.py')
-        spec = importlib.util.spec_from_file_location("wrapper_system_hostname", wrapper_path)
-        wrapper_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(wrapper_module)
-        local_funcs["get_hostname"] = wrapper_module.get_hostname
-    except Exception:
-        pass
-
-    try:
-        import importlib.util
-        import os
-        wrapper_path = os.path.join(os.path.dirname(__file__), '..', 'tools', 'wrapper_system_uptime.py')
-        spec = importlib.util.spec_from_file_location("wrapper_system_uptime", wrapper_path)
-        wrapper_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(wrapper_module)
-        local_funcs["get_uptime"] = wrapper_module.get_uptime
-    except Exception:
-        pass
+    local_funcs = _SUB_TOOL_FUNCS
 
     if name in local_funcs:
         try:
@@ -2625,6 +2665,9 @@ def delegate_subtask(
         user_message += f"\n\n## Context\n{context.strip()}"
 
     def _infer_provider(m: str) -> tuple[str, str]:
+        # Base URLs come from core/models.py PROVIDERS — the single source of
+        # truth.  Hardcoding them here silently diverged from the provider
+        # table (e.g. the Ollama cloud endpoint fix).
         if (
             m.startswith("openrouter")
             or m.startswith("cohere/")
@@ -2640,14 +2683,16 @@ def delegate_subtask(
             or m.startswith("qwen/")
             or "/" in m
         ):
-            return "openrouter", "https://openrouter.ai/api/v1"
-        if m.startswith("gemini") or m.startswith("gemma"):
-            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
-        if "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
-            return "groq", "https://api.groq.com/openai/v1/"
-        if "nvidia" in m or "nemotron" in m or "deepseek" in m:
-            return "nvidia", "https://integrate.api.nvidia.com/v1"
-        return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+            pid = "openrouter"
+        elif m.startswith("gemini") or m.startswith("gemma"):
+            pid = "google"
+        elif "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
+            pid = "groq"
+        elif "nvidia" in m or "nemotron" in m or "deepseek" in m:
+            pid = "nvidia"
+        else:
+            pid = "google"
+        return pid, PROVIDERS[pid]["base_url"]
 
     primary_pid, primary_url = _infer_provider(model)
     from llm_client import API_KEYS, _sanitize_messages_for_provider
@@ -2682,16 +2727,20 @@ def delegate_subtask(
     # OpenRouter.  Stored as a dict with provider/model/reasoning fields.
     carried_reasoning: dict | None = None
 
-    # Determine which tools to expose to the sub-AI
+    # Determine which tools to expose to the sub-AI.
+    # Only tools that _dispatch_sub_tool can actually execute are advertised —
+    # otherwise the sub-AI is offered a tool whose dispatch would reject it.
     sub_tools = None
     if tool_call_iterations > 0:
         if available_tools is None:
-            # All tools available
-            sub_tools = TOOLS_DESCRIPTION
-        elif len(available_tools) > 0:
-            # Filter to only the requested tools
-            sub_tool_names = set(available_tools)
-            sub_tools = [t for t in TOOLS_DESCRIPTION if t.get("function", {}).get("name") in sub_tool_names]
+            sub_tool_names = set(_SUB_TOOL_FUNCS)
+        else:
+            sub_tool_names = set(available_tools) & set(_SUB_TOOL_FUNCS)
+        if sub_tool_names:
+            sub_tools = [
+                t for t in TOOLS_DESCRIPTION
+                if t.get("function", {}).get("name") in sub_tool_names
+            ]
 
     while attempts < max_attempts:
         cfg = rotation[ind]
@@ -2900,13 +2949,16 @@ def delegate_subtask(
 
 # ── GENERATE IMAGE ─────────────────────────────────────────────────────────────
 
+# Model IDs verified against the live /v1beta/openai/ model list. The old
+# imagen-*-generate-* ids are not served by this API version (404) and used to
+# hide the real error behind a bogus "model not found" message.
 _NANO_BANANA_MODELS = [
     "gemini-3.1-flash-image-preview",
     "gemini-3-pro-image-preview",
-    "imagen-4.0-generate-preview-05-20",
-    "imagen-4.0-ultra-generate-exp-05-20",
-    "imagen-3.0-generate-002",
-    "imagen-3.0-generate-001",
+    "gemini-3.1-flash-image",
+    "gemini-3-pro-image",
+    "gemini-3.1-flash-lite-image",
+    "gemini-2.5-flash-image",
 ]
 
 _NANO_BANANA_QUALITY_ALIAS = {
@@ -2914,7 +2966,45 @@ _NANO_BANANA_QUALITY_ALIAS = {
     "pro":   "gemini-3-pro-image-preview",
 }
 
-_NANO_BANANA_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+_NANO_BANANA_BASE_URL = PROVIDERS["google"]["base_url"]
+
+_DATA_URI_RE = re.compile(r"data:image/\w+;base64,([A-Za-z0-9+/=]+)")
+
+
+def _extract_image_bytes(response) -> bytes | None:
+    """Pull inline image bytes out of an OpenAI-compatible image response.
+
+    Gemini's OpenAI-compatible endpoint returns image-model output either as a
+    data URI inside the text content or in ``message.images[].image_url.url``.
+    Both shapes are handled here.
+    """
+    try:
+        message = response.choices[0].message
+    except Exception:
+        return None
+
+    content = getattr(message, "content", None) or ""
+    match = _DATA_URI_RE.search(content)
+    if match:
+        try:
+            return base64.b64decode(match.group(1))
+        except Exception:
+            return None
+
+    images = getattr(message, "images", None)
+    if images is None:
+        extra = getattr(message, "model_extra", None) or {}
+        if isinstance(extra, dict):
+            images = extra.get("images")
+    for image in (images or []):
+        url = getattr(getattr(image, "image_url", None), "url", "") or ""
+        match = _DATA_URI_RE.search(url)
+        if match:
+            try:
+                return base64.b64decode(match.group(1))
+            except Exception:
+                return None
+    return None
 
 
 def generate_image(
@@ -2944,7 +3034,7 @@ def generate_image(
     if not google_keys:
         return "[generate_image ERROR] No Google API key found in api.keys."
 
-    last_error = ""
+    errors: list[str] = []
     for model_name in model_order:
         for key in google_keys:
             client = OpenAI(api_key=key, base_url=_NANO_BANANA_BASE_URL)
@@ -2954,18 +3044,25 @@ def generate_image(
                     messages=[{"role": "user", "content": prompt}],
                 )
 
-                content = response.choices[0].message.content or ""
-                b64_match = re.search(r"data:image/\w+;base64,([A-Za-z0-9+/=]+)", content)
-                if b64_match:
-                    img_bytes = base64.b64decode(b64_match.group(1))
+                img_bytes = _extract_image_bytes(response)
+                if img_bytes:
                     with open(out_path, "wb") as f:
                         f.write(img_bytes)
                     return f"Successfully generated image and saved to {out_path}"
 
+                errors.append(
+                    f"{model_name}: response contained no inline image data"
+                )
             except Exception as e:
-                last_error = str(e)
+                errors.append(f"{model_name}: {str(e)[:200]}")
 
-    return f"[generate_image ERROR] Failed to generate image: {last_error}"
+    if not errors:
+        return "[generate_image ERROR] Failed to generate image: no model was attempted."
+
+    # Report every attempt, not just the last one — a single misleading
+    # error (e.g. a 404 for a stale model id) used to hide the real cause.
+    return ("[generate_image ERROR] Failed to generate image. Attempts:\n"
+            + "\n".join(f"  - {e}" for e in errors))
 
 
 # ── NEW UTILITY TOOLS ──────────────────────────────────────────────────────────
@@ -2994,7 +3091,7 @@ def list_directory(path: str, recursive: bool = False, max_depth: int = 3) -> st
                     except OSError:
                         entries.append(f"  [FILE] {name}")
                 if len(entries) >= 200:
-                    entries.append(f"  ... (truncated at 200 entries)")
+                    entries.append("  ... (truncated at 200 entries)")
                     break
         else:
             count = 0
@@ -3318,7 +3415,16 @@ def search_in_files(
 # ── TOOL FUNCTIONS ─────────────────────────────────────────────────────────────
 
 def shell(bash: str, timeout: int = 30) -> str:
-    """Execute shell commands in system environment after permission validation."""
+    """Execute shell commands in system environment after permission validation.
+
+    The timeout is applied **per stage**: every command of an ``&&``/``||``/
+    ``;``/``|`` chain gets its own budget, so a slow first stage no longer
+    starves the rest of the chain.  When a stage runs out of time, GNU
+    ``timeout`` terminates that stage's whole process group; when the chain as
+    a whole runs out of time, every descendant of the command is killed — the
+    old implementation only killed the immediate ``bash`` process, which left
+    orphaned children running.
+    """
     log_write(f"[shell] timeout:{timeout} cmd:{bash}")
     print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")
 
@@ -3326,44 +3432,21 @@ def shell(bash: str, timeout: int = 30) -> str:
     if not allowed:
         return f"[PERMISSION DENIED] Action blocked by security policy. Reason: {reason}"
 
-    start_t = time.time()
     try:
-        if sys.platform == "win32":
-            p = subprocess.Popen(
-                ["cmd.exe", "/c", bash],
-                cwd=AI_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        else:
-            p = subprocess.Popen(
-                ["bash", "-c", bash],
-                cwd=AI_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-
-        if timeout > 0:
-            stdout, stderr = p.communicate(timeout=timeout)
-        else:
-            stdout, stderr = p.communicate()
-
-        dur = time.time() - start_t
-        log_write(f"[shell] returncode:{p.returncode} dur:{dur:.2f}s")
-        output = stdout + (f"\n[STDERR]\n{stderr}" if stderr else "")
-        if p.returncode != 0:
-            output += f"\n[EXIT CODE {p.returncode}]"
-        return output.strip() or "[NO OUTPUT]"
-
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.communicate()
-        return f"[TIMEOUT] Command timed out after {timeout} seconds."
+        result = shell_runner.run(bash, timeout=timeout, cwd=AI_ROOT)
     except Exception as e:
         return f"[ERROR] Failed to execute command: {e}"
+
+    log_write(
+        f"[shell] returncode:{result.returncode} dur:{result.duration:.2f}s "
+        f"stages:{result.stages} wrapped:{result.wrapped} killed:{result.killed}"
+    )
+    if result.timed_out:
+        log_write(f"[shell] TIMEOUT after {result.duration:.1f}s cmd:{bash[:120]}")
+    elif result.stage_timed_out:
+        log_write(f"[shell] STAGE TIMEOUT after {result.duration:.1f}s cmd:{bash[:120]}")
+
+    return shell_runner.describe(result, timeout)
 
 
 def _speak_blocking(text: str, debug: bool = False) -> str:
@@ -3410,10 +3493,12 @@ def speak(text: str, block: bool = False) -> None:
     else:
         _speak_thread = threading.Thread(target=_speak_blocking, args=(text,), daemon=True)
         _speak_thread.start()
+
+
 def sleep_mode() -> str:
     CONFIG_PATH = paths.CONFIG_FILE
     DEFAULT_CONFIG = {
-        "stt_path":    os.path.join(BASE_DIR, "Termux-STT"),
+        "stt_path":    os.path.join(paths.ROOT, "Termux-STT"),
         "tts_enabled": False,
         "use_groq":    False,
         "show_details": False,
@@ -3428,7 +3513,9 @@ def sleep_mode() -> str:
             config = json.load(f)
     except Exception:
         config = DEFAULT_CONFIG
-    STT_PATH = os.path.expanduser(config["stt_path"])
+    if not isinstance(config, dict):
+        config = DEFAULT_CONFIG
+    STT_PATH = os.path.expanduser(config.get("stt_path", DEFAULT_CONFIG["stt_path"]))
 
     try:
         # Add Termux-STT to path for the import
@@ -4016,26 +4103,27 @@ def get_whatsapp_report(clear: bool = False) -> str:
 
         by_contact = defaultdict(list)
         for e in entries:
-            by_contact[e["sender_id"]].append(e)
+            by_contact[e.get("sender_id", "unknown")].append(e)
 
         report_lines = [f" WhatsApp Report — {len(entries)} total message(s) across {len(by_contact)} contact(s)\n"]
         report_lines.append("=" * 50)
 
         for contact_id, msgs in by_contact.items():
-            contact_name = msgs[0]["sender_name"]
+            contact_name = msgs[0].get("sender_name") or contact_id
             report_lines.append(f"\n {contact_name} ({contact_id})")
             report_lines.append(f"   {len(msgs)} message(s):")
             for m in msgs:
-                ts = m["timestamp"][:16].replace("T", " ")
-                direction = m["direction"]
-                text = m["message"]
+                ts = (m.get("timestamp") or "")[:16].replace("T", " ")
+                direction = m.get("direction", "")
+                text = m.get("message", "")
                 arrow = "←" if direction == "RECEIVED" else "→"
                 report_lines.append(f"   [{ts}] {arrow} [{direction}] {text}")
 
         report_lines.append("\n" + "=" * 50)
 
         if clear:
-            open(wa_log_file, "w", encoding="utf-8").close()
+            with open(wa_log_file, "w", encoding="utf-8"):
+                pass
             report_lines.append(" Log cleared.")
 
         return "\n".join(report_lines)
@@ -4057,15 +4145,20 @@ def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_p
         ]
 
         def _infer_provider(m: str) -> tuple[str, str]:
+            # Base URLs come from core/models.py PROVIDERS — the single source
+            # of truth.  Hardcoding them here silently diverged from the
+            # provider table (e.g. the Ollama cloud endpoint fix).
             if m.startswith("openrouter") or "/" in m:
-                return "openrouter", "https://openrouter.ai/api/v1"
-            if m.startswith("gemini") or m.startswith("gemma"):
-                return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
-            if "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
-                return "groq", "https://api.groq.com/openai/v1/"
-            if "nvidia" in m or "nemotron" in m or "deepseek" in m:
-                return "nvidia", "https://integrate.api.nvidia.com/v1"
-            return "google", "https://generativelanguage.googleapis.com/v1beta/openai/"
+                pid = "openrouter"
+            elif m.startswith("gemini") or m.startswith("gemma"):
+                pid = "google"
+            elif "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
+                pid = "groq"
+            elif "nvidia" in m or "nemotron" in m or "deepseek" in m:
+                pid = "nvidia"
+            else:
+                pid = "google"
+            return pid, PROVIDERS[pid]["base_url"]
 
         pid, url = _infer_provider(model_name)
         keys = API_KEYS.get(pid, [])
@@ -4096,7 +4189,7 @@ def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_p
                 continue
 
         return ""
-    except Exception as e:
+    except Exception:
         return ""
 
 # ── USER INTERACTION TOOLS ────────────────────────────────────────────────────
@@ -4331,3 +4424,79 @@ def manage_todos(
         return f"[DEL] Deleted task {task_id}: {target['text']}\n" + _format_todos(data)
 
     return f"[ERROR] Unknown action '{action}'. Valid: create, add, list, check, uncheck, delete, clear."
+
+
+# ── Sub-AI tool registry ──────────────────────────────────────────────────────
+# Single source of truth for the tools a delegated sub-AI is allowed to run.
+# It is built here (after every tool function is defined) so the entries can
+# reference the functions directly.
+#
+# delegate_subtask() advertises only these tools to the sub-AI, which keeps
+# the advertised schema list and the executable set in sync — a sub-AI can no
+# longer be offered a tool whose dispatch would reject it.
+#
+# Deliberately NOT exposed to a sub-AI:
+#   * delegate_subtask — recursion is not allowed for delegated workers
+#   * initialize_project / add_subtask / update_subtask — these mutate the
+#     parent agent's project state and belong to the main agent only
+#   * retrieve_chunk / list_chunks — context browsing stays with the main agent
+_SUB_TOOL_FUNCS: dict = {
+    # Core file / shell tools
+    "shell":                      shell,
+    "read_file":                  read_file,
+    "write_file":                 write_file,
+    "find_replace":               find_replace,
+    "index_files":                index_files,
+    "search_in_files":            search_in_files,
+    "search_files":               search_files,
+    "list_directory":             list_directory,
+    "rename_file":                rename_file,
+    "delete_file":                delete_file,
+    "http_request":               http_request,
+    "get_datetime":               get_datetime,
+    # Memory / delegation helpers
+    "save_memory":                save_memory,
+    "retrieve_memory":            retrieve_memory,
+    "intermediate_print":         intermediate_print,
+    "manage_todos":               manage_todos,
+    "ask_user":                   ask_user,
+    "confirm":                    confirm,
+    "sleep_mode":                 sleep_mode,
+    "run_diagnosis":              run_diagnosis,
+    # Web / media
+    "browse_web":                 browse_web,
+    "generate_image":             generate_image,
+    # WhatsApp
+    "send_whatsapp_message":      send_whatsapp_message,
+    "get_whatsapp_status":        get_whatsapp_status,
+    "get_whatsapp_chats":         get_whatsapp_chats,
+    "get_pending_whatsapp_messages": get_pending_whatsapp_messages,
+    "fetch_whatsapp_chat_history": fetch_whatsapp_chat_history,
+    "set_whatsapp_busy_mode":     set_whatsapp_busy_mode,
+    "get_whatsapp_report":        get_whatsapp_report,
+    "set_whatsapp_user_profile":  set_whatsapp_user_profile,
+    "archive_whatsapp_chat":      archive_whatsapp_chat,
+    "search_whatsapp_chat":       search_whatsapp_chat,
+    "get_whatsapp_group_participants": get_whatsapp_group_participants,
+    "get_whatsapp_contact_info":  get_whatsapp_contact_info,
+    "react_to_whatsapp_message":  react_to_whatsapp_message,
+    "download_whatsapp_media":    download_whatsapp_media,
+    "silence_whatsapp_contact":   silence_whatsapp_contact,
+    "schedule_whatsapp_message":  schedule_whatsapp_message,
+    "set_whatsapp_seen":          set_whatsapp_seen,
+    # Platform wrappers (tools/wrapper_*.py)
+    "get_contacts":               get_contacts,
+    "get_contact_by_id":          get_contact_by_id,
+    "list_sensors":               list_sensors,
+    "get_sensor_data":            get_sensor_data,
+    "set_wallpaper":              set_wallpaper,
+    "take_photo":                 take_photo,
+    "record_video":               record_video,
+    "record_audio":               record_audio,
+    "pick_file":                  pick_file,
+    "share_file":                 share_file,
+    "share_text":                 share_text,
+    "toggle_torch":               toggle_torch,
+    "get_hostname":               get_hostname,
+    "get_uptime":                 get_uptime,
+}
