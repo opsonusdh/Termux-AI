@@ -534,8 +534,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         get_uptime = lambda: {"error": "wrapper_system_uptime not available"}
     routes = {
         "shell":        lambda: shell(
-                                bash    = g("bash", ""),
-                                timeout = _safe_int(g("timeout", 30), 30),
+                                bash         = g("bash", ""),
+                                timeout      = _safe_int(g("timeout", 30), 30),
+                                total_timeout = _safe_int(g("total_timeout", 0), 0) or None,
                            ),
         "save_memory":     lambda: save_memory(
                                 text     = g("text", ""),

@@ -189,7 +189,9 @@ TOOLS_DESCRIPTION = [
                 "Supports an optional execution timeout in seconds. "
                 "The timeout applies PER STAGE: every command of a chain "
                 "('a && b', 'a; b', 'a | b') gets its own budget, and each stage "
-                "is terminated together with the processes it spawns."
+                "is terminated together with the processes it spawns. "
+                "Use 'total_timeout' for a chain-wide ceiling that bounds the whole "
+                "command regardless of how many stages it has."
             ),
             "parameters": {
                 "type": "object",
@@ -206,6 +208,17 @@ TOOLS_DESCRIPTION = [
                             "the processes it spawned."
                         ),
                         "default": 30,
+                        "minimum": 0,
+                    },
+                    "total_timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum execution time in seconds for the WHOLE chain, "
+                            "independent of the number of stages (0 = derive it from the "
+                            "per-stage timeout). Use this to bound a long chain: the whole "
+                            "process tree is killed when the ceiling is reached."
+                        ),
+                        "default": 0,
                         "minimum": 0,
                     },
                 },
@@ -3419,18 +3432,25 @@ def search_in_files(
 
 # ── TOOL FUNCTIONS ─────────────────────────────────────────────────────────────
 
-def shell(bash: str, timeout: int = 30) -> str:
+def shell(bash: str, timeout: int = 30, total_timeout: int | None = None) -> str:
     """Execute shell commands in system environment after permission validation.
 
     ``timeout`` is applied **per stage**: every command of an ``&&``/``||``/
     ``;``/``|`` chain gets its own budget, so a slow first stage no longer
     starves the rest of the chain.  When a stage runs out of time, GNU
-    ``timeout`` terminates that stage's whole process group; when the chain as
-    a whole runs out of time, every descendant of the command is killed — the
-    old implementation only killed the immediate ``bash`` process, which left
-    orphaned children running.
+    ``timeout`` terminates that stage's whole process group.
+
+    ``total_timeout`` is the **chain-wide** ceiling: it bounds the whole
+    command no matter how many stages it has.  When it is not given, the
+    ceiling is derived from the per-stage budget (one budget per stage, plus a
+    small grace period) and capped, so a long chain can never block the chat
+    loop indefinitely.
+
+    When the chain-wide ceiling is reached, every descendant of the command is
+    killed — the old implementation only killed the immediate ``bash`` process,
+    which left orphaned children running.
     """
-    log_write(f"[shell] timeout:{timeout} cmd:{bash}")
+    log_write(f"[shell] timeout:{timeout} total:{total_timeout} cmd:{bash}")
     print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")
 
     allowed, reason = validate_command(bash)
@@ -3438,13 +3458,16 @@ def shell(bash: str, timeout: int = 30) -> str:
         return f"[PERMISSION DENIED] Action blocked by security policy. Reason: {reason}"
 
     try:
-        result = shell_runner.run(bash, timeout=timeout, cwd=AI_ROOT)
+        result = shell_runner.run(
+            bash, timeout=timeout, cwd=AI_ROOT, total_timeout=total_timeout
+        )
     except Exception as e:
         return f"[ERROR] Failed to execute command: {e}"
 
     log_write(
         f"[shell] returncode:{result.returncode} dur:{result.duration:.2f}s "
-        f"stages:{result.stages} wrapped:{result.wrapped} killed:{result.killed}"
+        f"stages:{result.stages} wrapped:{result.wrapped} killed:{result.killed} "
+        f"budget:{result.budget}"
     )
     if result.timed_out:
         log_write(f"[shell] TIMEOUT after {result.duration:.1f}s cmd:{bash[:120]}")

@@ -235,3 +235,59 @@ def test_describe_reports_the_timeout():
     text = sr.describe(res, 1)
     assert "[TIMEOUT]" in text
     assert "[EXIT CODE 124]" in text
+
+
+# ── the chain-wide ceiling ───────────────────────────────────────────────────
+
+def test_budget_is_derived_from_the_stage_budget():
+    budget, explicit = sr.compute_budget(30, 3)
+    assert budget == 30 * 3 + sr.BUDGET_GRACE_SECONDS
+    assert explicit is False
+
+
+def test_an_explicit_chain_budget_wins():
+    budget, explicit = sr.compute_budget(30, 3, 100)
+    assert budget == 100
+    assert explicit is True
+
+
+def test_an_explicit_chain_budget_is_capped():
+    budget, explicit = sr.compute_budget(30, 3, 10 ** 9)
+    assert budget == sr.MAX_EXPLICIT_BUDGET
+    assert explicit is True
+
+
+def test_no_budget_at_all_when_nothing_is_limited():
+    budget, explicit = sr.compute_budget(0, 3)
+    assert budget is None
+    assert explicit is False
+
+
+def test_an_explicit_budget_applies_even_without_a_stage_budget():
+    budget, explicit = sr.compute_budget(0, 3, 60)
+    assert budget == 60
+    assert explicit is True
+
+
+def test_the_chain_ceiling_stops_a_long_chain():
+    """The per-stage budget must not let a chain outrun the chain ceiling."""
+    t0 = time.monotonic()
+    res = sr.run("echo a && sleep 300", timeout=30, total_timeout=3)
+    dur = time.monotonic() - t0
+    assert res.timed_out
+    assert not res.stage_timed_out, "the stage budget was 30s, not the ceiling"
+    assert dur < 20, f"took {dur:.1f}s"
+
+
+def test_the_chain_ceiling_is_reported_distinctly():
+    res = sr.run("sleep 300", timeout=30, total_timeout=2)
+    text = sr.describe(res, 30)
+    assert "[TIMEOUT]" in text
+    assert "chain-wide" in text
+
+
+def test_the_chain_ceiling_kills_the_whole_tree():
+    res = sr.run(f"{LEAKY} && sleep 300", timeout=30, total_timeout=2)
+    assert res.timed_out
+    time.sleep(0.6)
+    assert _alive_leaked() == [], "a grandchild survived the chain ceiling"

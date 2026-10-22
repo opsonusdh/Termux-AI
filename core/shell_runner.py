@@ -65,6 +65,10 @@ BUDGET_GRACE_SECONDS = 5
 #: Hard ceiling for the outer watchdog, so a huge ``timeout`` value combined
 #: with a long chain can never block the chat loop indefinitely.
 MAX_TOTAL_BUDGET = 1800
+#: Hard ceiling for an explicitly requested chain-wide budget.  A caller may
+#: ask for more than ``MAX_TOTAL_BUDGET`` (e.g. a deliberate long build), but
+#: never for an unbounded one.
+MAX_EXPLICIT_BUDGET = 86400
 #: How long to wait for the pipe readers to drain after the process is gone.
 READER_JOIN_GRACE = 3.0
 #: Grace period between SIGTERM and SIGKILL for the process group.
@@ -775,7 +779,11 @@ class ShellResult:
     wrapped: int = 0
     command: str = ""
     killed: int = 0
+    #: The wall-clock budget the outer watchdog enforced on the whole chain.
     budget: float | None = None
+    #: True when ``budget`` came from an explicit chain-wide request rather
+    #: than from the derived ``timeout * stages`` estimate.
+    budget_explicit: bool = False
     error: str = ""
 
 
@@ -803,12 +811,54 @@ def _pump(stream, sink: list) -> int:
     return dropped
 
 
+def compute_budget(
+    timeout: int,
+    stage_count: int,
+    total_timeout: int | None = None,
+) -> tuple[float | None, bool]:
+    """Return ``(budget, explicit)`` for the outer watchdog.
+
+    The outer watchdog is the *chain-wide* ceiling: it bounds the whole
+    command regardless of how many stages it has.  Two ways to set it:
+
+    * ``total_timeout`` — an explicit chain-wide ceiling.  It wins over
+      everything else and is capped at :data:`MAX_EXPLICIT_BUDGET` so it can
+      never be unbounded.
+    * otherwise — a derived estimate: every stage may burn its own
+      ``timeout`` seconds, plus a small grace period for the stages that
+      could not be wrapped (shell builtins and compound blocks).  The result is
+      capped at :data:`MAX_TOTAL_BUDGET`.
+
+    ``timeout == 0`` means "no per-stage limit", so the derived budget is
+    ``None`` (unbounded) unless an explicit ceiling was requested.
+    """
+    if total_timeout is not None:
+        try:
+            requested = int(total_timeout)
+        except (TypeError, ValueError):
+            requested = 0
+        if requested > 0:
+            return float(min(requested, MAX_EXPLICIT_BUDGET)), True
+
+    if timeout > 0:
+        budget = timeout * max(1, stage_count) + BUDGET_GRACE_SECONDS
+        return float(min(budget, MAX_TOTAL_BUDGET)), False
+
+    return None, False
+
+
 def run(
     cmd: str,
     timeout: int = DEFAULT_STAGE_TIMEOUT,
     cwd: str | None = None,
+    total_timeout: int | None = None,
 ) -> ShellResult:
-    """Run *cmd* with a per-stage timeout and guaranteed tree termination."""
+    """Run *cmd* with a per-stage timeout and guaranteed tree termination.
+
+    *timeout* bounds **each stage** of the chain.  *total_timeout* bounds the
+    **whole chain** — it is the outer watchdog's ceiling and is independent of
+    the number of stages, so a long chain can never outrun it.
+    """
     started = time.monotonic()
 
     try:
@@ -826,11 +876,7 @@ def run(
     else:
         executable = effective
 
-    if timeout > 0:
-        budget = timeout * max(1, stage_count) + BUDGET_GRACE_SECONDS
-        budget = min(budget, MAX_TOTAL_BUDGET)
-    else:
-        budget = None
+    budget, budget_explicit = compute_budget(timeout, stage_count, total_timeout)
 
     if sys.platform == "win32":
         argv = ["cmd.exe", "/c", executable]
@@ -920,6 +966,7 @@ def run(
         command=effective,
         killed=killed,
         budget=budget,
+        budget_explicit=budget_explicit,
     )
 
 
@@ -934,10 +981,17 @@ def describe(result: ShellResult, timeout: int) -> str:
 
     if result.timed_out:
         budget = int(result.budget) if result.budget else int(result.duration)
-        output += (
-            f"\n[TIMEOUT] The command exceeded its overall budget of "
-            f"{budget}s and the whole process tree was terminated."
-        )
+        if result.budget_explicit:
+            output += (
+                f"\n[TIMEOUT] The command exceeded its chain-wide limit of "
+                f"{budget}s and the whole process tree was terminated."
+            )
+        else:
+            output += (
+                f"\n[TIMEOUT] The command exceeded its overall budget of "
+                f"{budget}s (the sum of the {result.stages} stage budgets) and "
+                f"the whole process tree was terminated."
+            )
     elif result.stage_timed_out and timeout > 0:
         output += (
             f"\n[TIMEOUT] A command in the chain exceeded its {timeout}s limit "
