@@ -16,7 +16,7 @@ import paths
 from agent import state_manager
 from openai import OpenAI
 import httpx
-from core.renderer import RED, YELLOW, RESET, GRAY
+from core.renderer import RED, YELLOW, RESET, GRAY, GREEN, BLUE, CYAN, MAG, DIM
 from tools import *
 import context_manager as _cm
 import core.display_state as display_state
@@ -76,7 +76,7 @@ _in_agent_mode = False
 
 def _warn_missing_keys() -> None:
     seen: set[str] = set()
-    for slot in MODEL_SLOTS:
+    for slot in MODEL_SLOTS + AGENT_MODEL_SLOTS:
         pid = slot["provider_id"]
         if pid not in seen:
             seen.add(pid)
@@ -415,6 +415,17 @@ _TOOL_TAGS = {
     "manage_todos": "TODO",
 }
 
+# Muted color mapping for each tool type (using dim variants for subtlety)
+_TOOL_COLORS = {
+    "shell":       {"tag": GREEN,     "body": DIM + GREEN,     "end": GREEN},      # Green for shell/exec
+    "write_file":  {"tag": CYAN,      "body": DIM + CYAN,      "end": CYAN},       # Cyan for file writes
+    "read_file":   {"tag": BLUE,      "body": DIM + BLUE,      "end": BLUE},       # Blue for file reads
+    "find_replace": {"tag": MAG,      "body": DIM + MAG,      "end": MAG},        # Magenta for find/replace
+    "manage_todos": {"tag": YELLOW,   "body": DIM + YELLOW,   "end": YELLOW},     # Yellow for todos
+    # Default fallback
+    "default":     {"tag": GRAY,      "body": DIM,            "end": GRAY},
+}
+
 # Individual lines longer than this in a *collapsed* command preview get cut
 # off — "first three lines" is meant to stay a brief preview even if one of
 # those lines is itself huge (e.g. a minified one-liner). Expanded mode is
@@ -422,10 +433,11 @@ _TOOL_TAGS = {
 _COLLAPSED_LINE_CHAR_CAP = 200
 
 
-def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
+def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
     """Build the tag/preview line(s) printed before [OUTPUT]/[TOOL DONE] for
     one tool call. Presentation-layer only — never touches the tool's actual
     return value, only what gets echoed to the terminal.
+    Returns a dict with 'lines' (list of strings) and 'tool_name' (for color mapping).
     """
     tag = _TOOL_TAGS.get(name, name.upper())
 
@@ -443,11 +455,11 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
             body = "\n".join(preview_lines)
             if len(lines) > 3:
                 body += "\n..."
-        return [f"[{tag}]", body]
+        return {"lines": [f"[{tag}]", body], "tool_name": name}
 
     if name in ("write_file", "read_file"):
         if not expanded:
-            return [f"[{tag}]"]
+            return {"lines": [f"[{tag}]"], "tool_name": name}
         path = args.get("path", "")
         seg_start = args.get("segment_start")
         seg_end = args.get("segment_end")
@@ -455,29 +467,29 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
         span = f"{seg_start}-{seg_end}" if (seg_start is not None or seg_end is not None) else "all"
         if name == "write_file":
             mode = args.get("mode", "overwrite")
-            return [f"[{tag}] {path} | mode: {mode} | {unit}: {span}"]
-        return [f"[{tag}] {path} | {unit}: {span}"]
+            return {"lines": [f"[{tag}] {path} | mode: {mode} | {unit}: {span}"], "tool_name": name}
+        return {"lines": [f"[{tag}] {path} | {unit}: {span}"], "tool_name": name}
 
     if name == "find_replace":
         if not expanded:
-            return [f"[{tag}]"]
+            return {"lines": [f"[{tag}]"], "tool_name": name}
         path = args.get("path", "")
         find_text = args.get("find", "")
         segment_start = args.get("segment_start")
         segment_end = args.get("segment_end")
         # Show truncated find text in header
         find_preview = find_text[:80] + ("..." if len(find_text) > 80 else "")
-        find_preview = find_preview.replace(chr(10), "\n")
+        # Escape newlines so a multi-line find pattern stays on one header line.
+        find_preview = find_preview.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
         if segment_start is not None or segment_end is not None:
-            seg_desc = f" lines {segment_start or 1}..{segment_end or "end"}"
-            return [f"[{tag}] {path}{seg_desc} | find: {find_preview}"]
-        return [f"[{tag}] {path} | find: {find_preview}"]
-        return [f"[{tag}] {path} | find: {find_preview}"]
+            seg_desc = f" lines {(segment_start if segment_start is not None else 1)}..{(segment_end if segment_end is not None else "end")}"
+            return {"lines": [f"[{tag}] {path}{seg_desc} | find: {find_preview}"], "tool_name": name}
+        return {"lines": [f"[{tag}] {path} | find: {find_preview}"], "tool_name": name}
 
     # Every other tool: unchanged detail-picking, restructured into the same
     # tag(+detail)-then-OUTPUT-then-TOOL DONE shape as EXEC/EDITING FILE.
     if not expanded:
-        return [f"[{tag}]"]
+        return {"lines": [f"[{tag}]"], "tool_name": name}
     detail = ""
     preferred = ("path", "bash", "query", "url", "to", "jid", "filename", "prompt")
     for key in preferred:
@@ -485,7 +497,7 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> list[str]:
         if value not in (None, ""):
             detail = str(value)
             break
-    return [f"[{tag}]{' ' + detail if detail else ''}"]
+    return {"lines": [f"[{tag}]{' ' + detail if detail else ''}"], "tool_name": name}
 
 
 def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
@@ -536,7 +548,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "shell":        lambda: shell(
                                 bash         = g("bash", ""),
                                 timeout      = _safe_int(g("timeout", 30), 30),
-                                total_timeout = _safe_int(g("total_timeout", 0), 0) or None,
+                                total_timeout = _safe_int(g("total_timeout"), 0) if "total_timeout" in args else None,
                            ),
         "save_memory":     lambda: save_memory(
                                 text     = g("text", ""),
@@ -566,7 +578,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 path           = g("path", ""),
                                 find           = g("find", ""),
                                 replace        = g("replace", ""),
-                                case_sensitive = g("case_sensitive", True),
+                                case_sensitive = _safe_bool(g("case_sensitive", True)),
+                                segment_start  = g("segment_start"),
+                                segment_end    = g("segment_end"),
                            ),
         "index_files":     lambda: index_files(
                                 path             = g("path", ""),
@@ -778,18 +792,26 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     fn = routes.get(name)
     if fn:
         expanded = display_state.is_expanded()
-        header_lines = _tool_header_lines(name, args, expanded)
+        header = _tool_header_lines(name, args, expanded)
+        header_lines = header["lines"]
+        tool_name = header["tool_name"]
+        colors = _TOOL_COLORS.get(tool_name, _TOOL_COLORS["default"])
+        tag_color = colors["tag"]
+        body_color = colors["body"]
+        end_color = colors["end"]
 
         try:
             res = fn()
         except Exception as exc:
             elapsed = time.monotonic() - started
-            for line in header_lines:
-                print(f"{RED}{line}{RESET}")
+            for i, line in enumerate(header_lines):
+                # First line is tag, rest are body
+                color = tag_color if i == 0 else body_color
+                print(f"{color}{line}{RESET}")
             if expanded:
-                print(f"{RED}[OUTPUT]{RESET}")
-                print(f"{RED}{exc}{RESET}")
-            print(f"{RED}[TOOL ERROR] ({elapsed:.2f}s){RESET}")
+                print(f"{body_color}[OUTPUT]{RESET}")
+                print(f"{body_color}{exc}{RESET}")
+            print(f"{end_color}[TOOL ERROR] ({elapsed:.2f}s){RESET}")
             return f"[TOOL ERROR] {name} raised an exception: {exc}"
 
         elapsed = time.monotonic() - started
@@ -802,12 +824,13 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         else:
             normalized = str(res)
 
-        for line in header_lines:
-            print(f"{GRAY}{line}{RESET}")
+        for i, line in enumerate(header_lines):
+            color = tag_color if i == 0 else body_color
+            print(f"{color}{line}{RESET}")
         if expanded:
-            print(f"{GRAY}[OUTPUT]{RESET}")
-            print(f"{GRAY}{normalized}{RESET}")
-        print(f"{GRAY}[TOOL DONE] ({elapsed:.2f}s){RESET}")
+            print(f"{body_color}[OUTPUT]{RESET}")
+            print(f"{body_color}{normalized}{RESET}")
+        print(f"{end_color}[TOOL DONE] ({elapsed:.2f}s){RESET}")
 
         return normalized
     print(f"{RED}[ERROR] Unknown tool: {name}{RESET}")

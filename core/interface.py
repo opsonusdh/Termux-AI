@@ -24,6 +24,18 @@ import core.display_state as display_state
 from tools import *
 import context_manager as _cm
 
+# Session memory
+try:
+    from core.session_memory import (
+        list_sessions,
+        resume_session,
+        delete_session,
+        finalize_session,
+        get_session_draft,
+    )
+except Exception:
+    list_sessions = resume_session = delete_session = finalize_session = get_session_draft = None
+
 # Config
 BASE_DIR    = _ROOT
 CONFIG_PATH = paths.CONFIG_FILE
@@ -147,6 +159,72 @@ def _get_diag_history():
 # Shared display state is owned by display_state.py and toggled by
 # input_handler.py so the shortcut is attached to the real PromptSession.
 display_state.configure(CONFIG_PATH)
+
+
+def _handle_session_command(command: str) -> None:
+    """Handle /session subcommands: list, resume, save, delete, draft."""
+    if list_sessions is None:
+        print(f"{RED}[Session memory module not available]{RESET}")
+        return
+
+    parts = command.strip().split()
+    if len(parts) < 2:
+        print(f"{GRAY}Usage: /session <list|resume|save|delete|draft> [session_id]{RESET}")
+        print(f"  /session list           — List all saved sessions")
+        print(f"  /session resume <id>    — Resume a session (injects context)")
+        print(f"  /session save             — Finalize current session draft")
+        print(f"  /session delete <id>    — Delete a saved session")
+        print(f"  /session draft            — Show current draft")
+        return
+
+    sub = parts[1].lower()
+
+    try:
+        if sub == "list":
+            result = list_sessions()
+            print(result)
+
+        elif sub == "resume":
+            if len(parts) < 3:
+                print(f"{RED}Usage: /session resume <session_id>{RESET}")
+                return
+            session_id = parts[2]
+            print(f"{GRAY}[Resuming session {session_id}...]{RESET}")
+            result = resume_session(session_id)
+            print(f"{GRAY}[Resumed]{RESET}")
+            # The resumed context would need to be injected into the current history
+            # For now, just show the session content
+            print(result)
+
+        elif sub == "save":
+            print(f"{GRAY}[Finalizing current session...]{RESET}")
+            path = finalize_session(use_small_model=False)  # Set True when API configured
+            if path.startswith("[ERROR"):
+                print(f"{RED}[{path}]{RESET}")
+            else:
+                print(f"{GRAY}[Session saved to {path}]{RESET}")
+
+        elif sub == "delete":
+            if len(parts) < 3:
+                print(f"{RED}Usage: /session delete <session_id>{RESET}")
+                return
+            session_id = parts[2]
+            result = delete_session(session_id)
+            if result.startswith("[ERROR]"):
+                print(f"{RED}[{result}]{RESET}")
+            else:
+                print(f"{GRAY}[{result}]{RESET}")
+
+        elif sub == "draft":
+            draft = get_session_draft()
+            print(json.dumps(draft, ensure_ascii=False, indent=2))
+
+        else:
+            print(f"{RED}Unknown subcommand: {sub}{RESET}")
+            print(f"{GRAY}Available: list, resume, save, delete, draft{RESET}")
+
+    except Exception as e:
+        print(f"{RED}[Session error] {e}{RESET}")
 
 
 def chat_loop():
@@ -347,6 +425,11 @@ def chat_loop():
             config = _update_config(notify=True)
         if command_low in ("/notify false",):
             config = _update_config(notify=False)
+
+        # Session memory commands
+        if command_low.startswith("/session"):
+            _handle_session_command(command)
+            continue
 
         if agent_mode:
             try:

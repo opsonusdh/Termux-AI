@@ -64,6 +64,19 @@ if _ROOT not in sys.path:
 
 import paths
 
+# ── Session memory integration ──────────────────────────────────────────────
+try:
+    from core.session_memory.integration import (
+        note_on_chunk_open,
+        note_on_chunk_close,
+    )
+except Exception:
+    # Graceful degradation if session_memory is unavailable
+    def note_on_chunk_open(*args, **kwargs):
+        pass
+    def note_on_chunk_close(*args, **kwargs):
+        pass
+
 # ── Paths ──────────────────────────────────────────────────────────────────
 CHUNKS_FILE    = paths.CHUNKS_FILE
 SUMMARIES_FILE = paths.CHUNK_SUMMARIES_FILE
@@ -178,6 +191,8 @@ def open_chunk(user_input: str) -> None:
             "ts":       datetime.now().isoformat(),
             "messages": [{"role": "user", "content": user_input}],
         }
+    # Session memory: record chunk start
+    note_on_chunk_open(cid, user_input)
 
 
 def close_chunk(assistant_reply: str, reasoning_meta: dict | None = None) -> int:
@@ -197,6 +212,13 @@ def close_chunk(assistant_reply: str, reasoning_meta: dict | None = None) -> int
         tool_msgs    = list(_pending_context)
         _current_chunk   = None
         _pending_context = []
+
+    # Extract user input from the first message
+    user_input = ""
+    for m in user_msgs:
+        if m.get("role") == "user" and m.get("content"):
+            user_input = m["content"]
+            break
 
     # Assemble the full message sequence for this turn:
     #   user message → tool exchanges → final assistant reply
@@ -220,6 +242,16 @@ def close_chunk(assistant_reply: str, reasoning_meta: dict | None = None) -> int
         _write_split_chunk(cid, ts, msgs)
     else:
         _write_normal_chunk(cid, ts, msgs)
+
+    # Session memory: record chunk completion
+    tools_used = [m.get("tool_calls", []) for m in tool_msgs if m.get("tool_calls")]
+    tools_used = [
+        tc.get("function", {}).get("name", "unknown")
+        for tc_list in tools_used
+        for tc in tc_list
+        if isinstance(tc, dict) and isinstance(tc.get("function"), dict)
+    ]
+    note_on_chunk_close(cid, user_input, assistant_reply, tools_used, reasoning_meta)
 
     return cid
 

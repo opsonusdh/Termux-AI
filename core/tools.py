@@ -405,7 +405,6 @@ TOOLS_DESCRIPTION = [
     },
     {
         "type": "function",
-        "type": "function",
         "function": {
             "name": "find_replace",
             "description": (
@@ -3451,7 +3450,6 @@ def shell(bash: str, timeout: int = 30, total_timeout: int | None = None) -> str
     which left orphaned children running.
     """
     log_write(f"[shell] timeout:{timeout} total:{total_timeout} cmd:{bash}")
-    print(f"{GRAY}[EXEC] {bash[:80]}{'...' if len(bash) > 80 else ''}{RESET}")
 
     allowed, reason = validate_command(bash)
     if not allowed:

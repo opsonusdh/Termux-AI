@@ -424,7 +424,9 @@ _WRAPPER_VALUE_OPTIONS = {
 }
 
 #: ``timeout 30s`` / ``timeout 1.5m`` — the duration before the command.
-_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$")
+#: Also accepts GNU ``timeout``'s colon forms: ``1:30`` (MM:SS) and
+#: ``1:2:30`` (HH:MM:SS).
+_DURATION_RE = re.compile(r"^\d+(\.\d+)?[smhd]?$|^\d{1,2}:\d{1,2}(:\d{1,2})?$")
 
 
 def _command_word(tokens: List[str]) -> str:
