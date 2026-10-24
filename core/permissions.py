@@ -648,7 +648,9 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
 
             return False, "OK"
 
-        if tok.startswith("-") or tok.startswith("/"):
+        # Skip flag arguments. On Windows, flags can start with '/'.
+        # On POSIX, '/' starts absolute paths, so only skip '-' there.
+        if tok.startswith("-") or (sys.platform == "win32" and tok.startswith("/")):
             i += 1
             continue
 

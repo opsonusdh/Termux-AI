@@ -18,6 +18,7 @@ from openai import OpenAI
 import httpx
 from core.renderer import RED, YELLOW, RESET, GRAY, GREEN, BLUE, CYAN, MAG, DIM
 from tools import *
+from core.plugin_manager import plugin_manager
 import context_manager as _cm
 import core.display_state as display_state
 from core.models import PROVIDERS, MODEL_SLOTS, AGENT_MODEL_SLOTS
@@ -507,6 +508,11 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         args = json.loads(raw_args or "{}")
     except Exception:
         args = {}
+
+    # Check if tool's plugin is enabled
+    if not plugin_manager.is_tool_allowed(name):
+        plugin = plugin_manager.get_tool_plugin(name)
+        return f"[ERROR] Tool '{name}' is not available: plugin '{plugin}' is disabled. Use '/plugin {plugin} enable' to enable it."
 
     g = args.get
     # Lazy import for toggle_torch to avoid circular import
@@ -1131,10 +1137,13 @@ def _ask_with_slots(
 
         try:
             while True:
+                # Filter tools based on enabled plugins
+                available_tools = plugin_manager.filter_tools_description(TOOLS_DESCRIPTION)
+
                 kwargs: dict = {
                     "model": model_name,
                     "messages": messages,
-                    "tools": TOOLS_DESCRIPTION,
+                    "tools": available_tools,
                     "tool_choice": "auto",
                 }
                 if max_tok is not None:

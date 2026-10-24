@@ -35,7 +35,7 @@ if _ROOT_DIR not in sys.path:
 # it as a top-level module here loaded a second, independent copy of the same
 # file, so the two copies had separate module state and separate monkeypatches
 # for the very same permission rules.
-from core.permissions import validate_command
+from core.permissions import validate_command, request_file_permission
 from renderer import RED, GRAY, YELLOW, RESET, render_for_voice, render_markdown_terminal
 from core.models import PROVIDERS
 from core import shell_runner
@@ -3091,6 +3091,11 @@ def list_directory(path: str, recursive: bool = False, max_depth: int = 3) -> st
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
 
+    # Permission check for directory read
+    approved, reason = request_file_permission("read", p)
+    if not approved:
+        return reason
+
     if not os.path.isdir(p):
         return f"[ERROR] Directory not found: {path}"
 
@@ -3192,6 +3197,14 @@ def rename_file(old_path: str, new_path: str) -> str:
     if not os.path.isabs(np):
         np = os.path.join(paths.ROOT, np)
 
+    # Permission check for both source and destination
+    approved, reason = request_file_permission("write", op)
+    if not approved:
+        return reason
+    approved, reason = request_file_permission("write", np)
+    if not approved:
+        return reason
+
     if not os.path.exists(op):
         return f"[ERROR] Source not found: {old_path}"
 
@@ -3209,6 +3222,11 @@ def delete_file(path: str, force: bool = False) -> str:
     p = os.path.expanduser(path)
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
+
+    # Permission check for delete (write operation)
+    approved, reason = request_file_permission("write", p)
+    if not approved:
+        return reason
 
     real = os.path.realpath(p)
     if real == "/" or real == os.path.realpath(AI_ROOT):
@@ -3350,6 +3368,11 @@ def search_in_files(
     p = os.path.expanduser(str(path or "").strip())
     if not os.path.isabs(p):
         p = os.path.join(paths.ROOT, p)
+
+    # Permission check for directory read
+    approved, reason = request_file_permission("read", p)
+    if not approved:
+        return reason
 
     query = str(query or "")
     file_pattern = str(file_pattern or "*")
@@ -3791,12 +3814,22 @@ def run_diagnosis() -> dict:
     results = {}
     with ThreadPoolExecutor(max_workers=len(CHECKS)) as executor:
         futures = {executor.submit(fn): name for name, fn in CHECKS.items()}
-        for future in as_completed(futures, timeout=DIAGNOSIS_TIMEOUT):
-            name = futures[future]
-            try:
-                results[name] = future.result()
-            except Exception as e:
-                results[name] = {"error": str(e)}
+        try:
+            for future in as_completed(futures, timeout=DIAGNOSIS_TIMEOUT):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception as e:
+                    results[name] = {"error": str(e)}
+        except TimeoutError:
+            # Cancel all pending futures
+            for future in futures:
+                future.cancel()
+            # Wait briefly for cancellation to take effect
+            for future in as_completed(futures, timeout=2):
+                name = futures[future]
+                if name not in results:
+                    results[name] = {"error": "timeout"}
     return results
 
 

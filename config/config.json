@@ -5,5 +5,19 @@
     "show_details": true,
     "autonomous": true,
     "model": "openai/gpt-oss-120b",
-    "notify": true
+    "notify": true,
+    "plugins": {
+        "whatsapp": {
+            "enabled": true
+        },
+        "gmail": {
+            "enabled": false
+        },
+        "google_calendar": {
+            "enabled": false
+        },
+        "google_drive": {
+            "enabled": false
+        }
+    }
 }

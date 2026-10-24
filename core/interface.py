@@ -18,11 +18,12 @@ import paths
 
 # Project imports
 from llm_client import ask_ai, ask_agent, get_last_response_metadata
-from core.renderer import render_markdown_terminal, GRAY, RESET, RED
+from core.renderer import render_markdown_terminal, GRAY, RESET, RED, YELLOW, GREEN, BLUE, CYAN, MAG
 from core.input_handler import get_interactive_input
 import core.display_state as display_state
 from tools import *
 import context_manager as _cm
+from core.plugin_manager import plugin_manager
 
 # Session memory
 try:
@@ -227,14 +228,96 @@ def _handle_session_command(command: str) -> None:
         print(f"{RED}[Session error] {e}{RESET}")
 
 
+def _handle_plugin_command(command: str) -> None:
+    """Handle /plugin subcommands: list, enable, disable, status."""
+    global config
+    parts = command.strip().split()
+    if len(parts) < 2:
+        print(f"{GRAY}Usage: /plugin <list|enable|disable|status> [plugin_name]{RESET}")
+        print(f"  /plugin list                    — List all plugins and their status")
+        print(f"  /plugin enable <name>           — Enable a plugin (e.g., whatsapp, gmail)")
+        print(f"  /plugin disable <name>          — Disable a plugin")
+        print(f"  /plugin status <name>           — Show plugin details")
+        return
+
+    sub = parts[1].lower()
+
+    if sub == "list":
+        plugins = plugin_manager.list_plugins()
+        print(f"\n{BLUE}┌─ Plugins ────────────────────────────────┐{RESET}")
+        for name, info in plugins.items():
+            status = f"{GREEN}● ENABLED{RESET}" if info["enabled"] else f"{RED}○ DISABLED{RESET}"
+            desc = info["description"]
+            print(f"  {CYAN}{name}{RESET:18} {status}  {GRAY}{desc}{RESET}")
+        print(f"{BLUE}└──────────────────────────────────────────┘{RESET}\n")
+        return
+
+    if len(parts) < 3:
+        print(f"{RED}Plugin name required. Usage: /plugin {sub} <plugin_name>{RESET}")
+        return
+
+    plugin_name = parts[2].lower()
+
+    if sub == "enable":
+        if plugin_manager.enable(plugin_name):
+            print(f"{GREEN}[✓] Plugin '{plugin_name}' enabled.{RESET}")
+            # Reload config to pick up the change
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+        else:
+            print(f"{RED}[✗] Unknown plugin: '{plugin_name}'{RESET}")
+            print(f"{GRAY}Available: {', '.join(plugin_manager.list_plugins().keys())}{RESET}")
+        return
+
+    if sub == "disable":
+        if plugin_manager.disable(plugin_name):
+            print(f"{YELLOW}[✓] Plugin '{plugin_name}' disabled.{RESET}")
+            # Reload config to pick up the change
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except Exception:
+                pass
+        else:
+            print(f"{RED}[✗] Unknown plugin: '{plugin_name}'{RESET}")
+            print(f"{GRAY}Available: {', '.join(plugin_manager.list_plugins().keys())}{RESET}")
+        return
+
+    if sub == "status":
+        info = plugin_manager.get_plugin_info(plugin_name)
+        if info:
+            status = f"{GREEN}ENABLED{RESET}" if info["enabled"] else f"{RED}DISABLED{RESET}"
+            print(f"\n  {CYAN}{plugin_name}{RESET}")
+            print(f"  Status:  {status}")
+            print(f"  Description: {info['description']}")
+            if info["enabled"]:
+                tools = plugin_manager.get_enabled_plugin_tools(plugin_name)
+                if tools:
+                    print(f"  Available tools ({len(tools)}):")
+                    for t in tools:
+                        print(f"    - {t}")
+        else:
+            print(f"{RED}Unknown plugin: '{plugin_name}'{RESET}")
+        return
+
+    print(f"{RED}Unknown subcommand: {sub}{RESET}")
+    print(f"{GRAY}Available: list, enable, disable, status{RESET}")
+
+
 def chat_loop():
-    # Start WhatsApp Manager
+    # Start WhatsApp Manager (only if plugin is enabled)
     log_write("—"*20)
     global config
-    try:
-        whatsapp_manager.start()
-    except Exception as e:
-        print(f"{RED}[Whatsapp] Failed to start WhatsApp Manager: {e}{RESET}")
+    if plugin_manager.is_enabled("whatsapp"):
+        try:
+            whatsapp_manager.start()
+        except Exception as e:
+            print(f"{RED}[Whatsapp] Failed to start WhatsApp Manager: {e}{RESET}")
+    else:
+        print(f"{GRAY}[WhatsApp] Plugin disabled — manager not started. Use '/plugin whatsapp enable' to start.{RESET}")
 
     history: list[dict] = []
     agent_history: list[dict] = []
@@ -423,12 +506,19 @@ def chat_loop():
             continue
         if command_low in ("/notify true",):
             config = _update_config(notify=True)
+            continue
         if command_low in ("/notify false",):
             config = _update_config(notify=False)
+            continue
 
         # Session memory commands
         if command_low.startswith("/session"):
             _handle_session_command(command)
+            continue
+
+        # Plugin commands
+        if command_low.startswith("/plugin"):
+            _handle_plugin_command(command)
             continue
 
         if agent_mode:
