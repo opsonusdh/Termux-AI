@@ -148,3 +148,40 @@ Always load via `paths` constants — never hardcode paths.
 3. **Required packages** (installed by `setup.sh`): `openai`, `requests`, `beautifulsoup4`, `jsonschema`, `tiktoken`
 4. **Termux system packages** — install via `pkg install <package>`, not `apt`. Never run `pkg remove` or system-level changes without explicit user authorization.
 5. **Python packages** — use `pip install`, not `pkg install python-<package>` unless explicitly needed for binary wheels.
+
+---
+
+## 8. Android & Termux Architecture Nuances
+
+- **Filesystem & Sandbox:** Termux runs on an Android kernel (`aarch64`) with Bionic libc. `/tmp` is owned by `shell` (mode 771) and is **not** writable by the Termux app user. Always write temporary files to `workspace/` or project paths.
+- **Path Resolution:** Always resolve `workspace` to `~/Termux-AI/workspace`, never `~/workspace`.
+- **Clock Drift & Timing:** Android system suspend causes `CLOCK_REALTIME` to drift ahead of monotonic time. Always use `time.monotonic()` for durations, deadlines, and timeout budgets; never use `time.time()`.
+- **DNS Resolution in Go Binaries:** Binaries like `cloudflared` cannot resolve DNS on Android because `/etc/resolv.conf` is missing. Use `proot` to bind a writable rootfs with `resolv.conf` and CA certificates. Surface-Tor health checks use socket-level port checks and process polling instead of HTTP 502 status codes.
+
+---
+
+## 9. Shell Runner Mechanics & Safety
+
+- **Stage vs. Chain Timeouts:** In `core/shell_runner.py`, the `timeout` parameter applies *per stage* in a pipeline, while `total_timeout` sets an overall chain ceiling.
+- **Process Tree Cleanup:** On timeout expiry, the entire process tree is terminated via `killpg` and `/proc` session inspection to prevent orphaned background processes.
+- **Bash DEBUG Trap:** Chain status masking across pipelines (`|`, `||`, `;`) is caught by a bash `DEBUG` trap reading `${PIPESTATUS[0]}` before subsequent commands reset it.
+- **Structural Shell Parsing:** `core/permissions.py` uses `core/shell_parse.py` for AST-level command inspection. Never split commands textually at `;`. Note: When `autonomous: true` is configured in `config/config.json`, operations are auto-approved except for protected credentials (`api.keys`, tokens).
+
+---
+
+## 10. Persistent Browser & Web Scraping (CDP)
+
+- **Persistent Chromium Sessions:** `browser(action=...)` maintains live CDP sessions (`b1`, `b2`...) with persistent cookies and state. Viewport is 1024x681 (DPR 1).
+- **Coordinate-Free Discovery & Centered Clicks:** Never guess click coordinates. Use `find` to discover DOM elements. Always scroll the target into view (`scrollIntoView({block:'center', behavior:'instant'})`) before computing `getBoundingClientRect()`, and click the center of the bounding box.
+- **Screenshot Constraints:** Headless Chrome (`--headless=new`) does not rasterize `data:` URLs (yielding blank white output). Always test against real HTTP(S) URLs. Screenshots are scaled to $\le 1024\text{px}$ JPEG.
+- **Hidden Content Stripping:** The fallback scraper (`requests` + `BeautifulSoup`) strips `display:none`, `visibility:hidden`, `[hidden]`, and `<noscript>` elements to avoid leaking invisible page content.
+- **Search Engine Captchas:** If DuckDuckGo or Startpage blocks automated requests with captchas, fallback to Bing with selector `#b_results` or interactive browser automation.
+
+---
+
+## 11. Plugins & External Services
+
+- **Plugin Lifecycle:** Managed by `core/plugin_manager.py`. Tools are exposed only when the plugin is enabled and authenticated.
+- **Google OAuth Client Type:** Google OAuth for Gmail, Calendar, and Drive requires a **"Desktop app"** client type to permit loopback (127.0.0.1) and PKCE flow. "TV / Limited Input" clients fail with scope and redirect errors.
+- **Multimodal Payload Invariants:** Image attachments must be placed in a `user` role turn following the tool output, as Google Gemini rejects image content parts inside `tool` role messages.
+- **NVIDIA Image Generation Specs:** Hosted GenAI endpoints (`https://ai.api.nvidia.com/v1/genai/{model}`) require strict adherence to model parameter envelopes (max 1,062,400 pixels total, CFG limits, valid aspect ratio literals). Image models belong exclusively in `IMAGE_MODEL_SLOTS`.

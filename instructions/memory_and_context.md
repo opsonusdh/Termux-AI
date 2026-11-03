@@ -178,3 +178,21 @@ The config uses concise WhatsApp replies.
 ```
 
 The first statement is about conversation history. The second is about current filesystem state. They are different claims and require different proof.
+
+---
+
+## 9. Reactive Context Compression & Archiving
+
+### Reactive Triggering
+- Rather than guessing model token limits in advance, context compression triggers reactively when an LLM provider returns a context-length limit error (or HTTP 405/413/422/431 payload size errors).
+- The provider's stated token ceiling is parsed directly from the error message to calculate the compression budget (subtracting system prompts, tool schemas, and output caps).
+
+### Archive Mechanics (`logs/context_archive.jsonl`)
+- When older context is compressed, the raw text of reasoning blocks, tool inputs, and tool outputs is written to `logs/context_archive.jsonl` with an incremental ID (e.g., `A1`, `A2`).
+- A placeholder marker `[Compressed context A<n>]` remains in the conversation, allowing the model to page raw context back using `retrieve_archive(archive_id=...)` if older details are required.
+
+### Compression Invariants
+1. **JSON Validity:** Tool call `arguments` must remain parseable JSON. Do not perform blind string truncation on arguments; truncate individual JSON property values.
+2. **Tool Pairing:** A tool call and its result must never be decoupled. If a call is preserved, its result must be preserved.
+3. **No Unanswered Tool Calls:** Never leave an assistant tool call without its corresponding tool result turn.
+4. **Compression Precedence:** History turns absorb compression before the current live turn is altered.

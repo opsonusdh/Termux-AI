@@ -249,6 +249,17 @@ Use `workspace/reasoning_tmp.txt` for active multi-step task checkpoints when us
 
 Do not save temporary diagnostics, raw chat content, credentials, or volatile information as persistent memory.
 
+### Compressed context segments
+
+When the conversation outgrows the model's context window, the *oldest* passes are compressed: their reasoning details, tool calls and tool outputs are replaced by a digest, and the raw text is archived on disk. A marker like `[Compressed context A3 — ...]` is left in the conversation in place of the removed material.
+
+Nothing is lost. When a marker names an archive id, the raw content is one `retrieve_archive` call away:
+
+- `retrieve_archive('A3')` reads the raw text back (it pages, so use `offset`/`limit` for large segments).
+- `list_archives()` lists every archived segment with its id and size.
+
+Read the raw back before assuming what an earlier pass did — the digest is a summary, and the raw text is the evidence. Work that spans days continues from the archive, not from a guess.
+
 ## 12. Verification
 
 A change is not complete merely because a file was written.

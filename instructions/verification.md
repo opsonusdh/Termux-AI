@@ -165,3 +165,19 @@ A task is done when:
 6. ✓ No adjacent functionality was broken (verified by running related tests)
 
 Not when you have made the edit. When all of the above are true.
+
+---
+
+## 9. Test Suite Architecture & Flake Prevention
+
+### In-Repo (`tests/`) vs Local Audit (`workspace/audit/`)
+- `tests/` is the permanent, in-repo pytest suite shipped with the repository. Any new subsystem or regression test must have test coverage added here.
+- `workspace/audit/` is a gitignored developer audit harness.
+- Audit scripts that execute within the audit harness must encapsulate execution in `def main(): ... return exit_code` and execute via `if __name__ == "__main__": sys.exit(main())`. Bare module-level `sys.exit()` calls crash pytest during test collection.
+
+### Timing & Monotonic Clocks in Tests
+- Never assert on elapsed wall-clock time (`time.time()`). On Android, suspend and power-saving can cause wall-clock time to jump tens of seconds.
+- Always use `time.monotonic()` to measure elapsed test intervals, and specify wide tolerances for network or subprocess operations.
+
+### Isolating Global Mutable State
+- Tools or helpers that read mutable configuration files on every invocation (such as `is_expanded()` reading `config.json`) must be pinned with pytest `monkeypatch` during tests to prevent suite execution order dependencies.

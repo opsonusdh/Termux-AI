@@ -3,11 +3,15 @@ import json
 import time
 import re
 import requests
+import shutil
+import signal
+import socket
 import threading
 import websocket
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -21,6 +25,19 @@ if not Path(qrcode_module).exists():
 
 BASE_URL = "http://localhost:3000"
 WS_URL   = "ws://localhost:3000"
+
+
+def gateway_port() -> int:
+    """The port the node gateway listens on.
+
+    Single-sourced from BASE_URL so the Python client and the node server
+    can never drift apart.
+    """
+    try:
+        return int(urlparse(BASE_URL).port or 3000)
+    except (TypeError, ValueError):
+        return 3000
+
 
 GRAY  = "\033[90m"
 YELLOW = "\033[93m"
@@ -42,8 +59,31 @@ class WhatsAppManager:
         self.ws_thread        = None
         self.running          = False
         self.connection_state = "DISCONNECTED"
+        # The node gateway (bot.js) this manager talks to.  It is a separate
+        # process: the Python side is only a client of it.
+        self.server_proc      = None
+        self.server_log       = None
+        self._server_lock     = threading.Lock()
+        # The WebSocket listener has its own lock: the gateway and the
+        # listener are started independently, and two threads enabling the
+        # plugin at the same time must not end up with two listeners.
+        self._listener_lock   = threading.Lock()
+        # The watchdog that restarts a gateway that died on its own.
+        self._supervisor      = None
+        self._supervisor_stop = threading.Event()
+        self._restarts        = 0
         self.debug            = False
         self._ready_event     = threading.Event()
+        # The pairing QR is *captured*, never printed.  It is a live secret:
+        # whoever scans it gets read/write access to the owner's WhatsApp.
+        # whatsapp-web.js also rotates it every few seconds, so printing it
+        # dumped a rotating secret into the middle of every chat session —
+        # and into every log the terminal keeps.
+        self.last_qr          = None
+        self._qr_lock         = threading.Lock()
+        self._qr_event        = threading.Event()
+        # The live WebSocket, kept so the listener can be closed on demand.
+        self.ws               = None
         self._seen_msg_ids    = set()
         self._seen_msg_lock   = threading.Lock()
         self._active_senders  = set()  # senders with an auto-reply in progress
@@ -640,19 +680,624 @@ class WhatsAppManager:
 
         return system_prompt, "\n".join(prompt_parts), already_introduced
 
+    #  Node gateway (Termux-WP) lifecycle
+    #
+    # ``bot.js`` is the WhatsApp gateway: it drives the WhatsApp Web session
+    # in Chromium and serves the HTTP API plus the WebSocket event stream on
+    # port 3000.  Everything in this class is a *client* of that server, so
+    # without the node process every WhatsApp tool fails with "connection
+    # refused" — no matter how enabled the plugin is.
+    #
+    # Starting the gateway used to be a manual step ("node bot.js" in a second
+    # terminal).  Enabling the plugin now starts it: a plugin that is
+    # "enabled" but has no server behind it is a lie the user only finds out
+    # about when a message fails to send.
+
+    def server_is_running(self) -> bool:
+        """True when something answers on the gateway port."""
+        port = gateway_port()
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1.5):
+                return True
+        except OSError:
+            return False
+
+    #  Orphaned browser cleanup
+    #
+    #  The WhatsApp engine runs Chromium against a profile directory
+    #  (Termux-WP/.wwebjs_auth/session).  When the node gateway dies, that
+    #  Chromium can survive — and a surviving Chromium keeps the profile
+    #  locked, so the next gateway refuses to start with "The browser is
+    #  already running for ...".  The WhatsApp plugin then stays dead until
+    #  somebody kills the orphan by hand.
+
+    def _profile_dir(self) -> str:
+        """The Chromium profile directory of the WhatsApp engine."""
+        return str(BASE_DIR / "Termux-WP" / ".wwebjs_auth" / "session")
+
+    def _profile_browsers(self) -> list:
+        """The Chromium processes that hold the WhatsApp profile."""
+        profile = self._profile_dir()
+        found = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode("utf-8", "replace").replace("\0", " ")
+            except OSError:
+                continue
+            if f"--user-data-dir={profile}" in cmdline:
+                found.append(int(entry))
+        return found
+
+    def _parent_pid(self, pid: int) -> int:
+        """The parent pid of a process (1 when it cannot be read)."""
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as fh:
+                fields = fh.read().rsplit(") ", 1)[-1].split()
+            return int(fields[1])
+        except (OSError, IndexError, ValueError):
+            return 1
+
+    def _orphaned_browsers(self) -> list:
+        """Profile browsers whose gateway is gone.
+
+        A browser whose parent is still alive belongs to a running gateway
+        and is none of our business; one that was reparented to init (or
+        whose parent no longer exists) is the orphan of a dead gateway.
+        """
+        orphans = []
+        for pid in self._profile_browsers():
+            ppid = self._parent_pid(pid)
+            if ppid <= 1:
+                orphans.append(pid)
+                continue
+            if not os.path.isdir(f"/proc/{ppid}"):
+                orphans.append(pid)
+        return orphans
+
+    def _clear_orphaned_browsers(self, reason: str) -> int:
+        """Kill the browsers left behind by a dead gateway."""
+        orphans = self._orphaned_browsers()
+        if not orphans:
+            return 0
+        for pid in orphans:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and self._orphaned_browsers():
+            time.sleep(0.25)
+        for pid in self._orphaned_browsers():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        print(f"{GRAY}[WhatsApp] Cleared {len(orphans)} orphaned browser "
+              f"process(es) holding the WhatsApp profile ({reason}).{RESET}")
+        return len(orphans)
+
+    def _gateway_stable(self, proc, settle: float) -> bool:
+        """True when the gateway is still alive after a short settle window.
+
+        The HTTP port opens *before* the WhatsApp Web engine has finished
+        initialising, and that engine can take the whole node process down
+        with it — a Chromium that dies leaves an unhandled rejection and
+        node exits.  Calling such a gateway "ready" was the one thing this
+        check must not do, so the process has to survive the settle window.
+        """
+        if settle <= 0:
+            return proc.poll() is None
+        deadline = time.monotonic() + settle
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return False
+            time.sleep(0.25)
+        return proc.poll() is None
+
+    @staticmethod
+    def _log_errors(log_path, limit: int = 3) -> list:
+        """The last error lines of the gateway log, with the QR art filtered out.
+
+        The message a user sees when the gateway refuses to start is much
+        more useful when it carries the actual reason out of the log.
+        """
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()[-400:]
+        except OSError:
+            return []
+        picked = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith(("at ", "^", "}", "{")):
+                continue
+            if stripped and set(stripped) <= set("▀▄█ "):
+                continue  # QR art
+            if "rror" in stripped:
+                picked.append(stripped[:160])
+            if len(picked) >= limit:
+                break
+        return picked
+
+    def start_server(self, timeout: float = 60.0,
+                     settle: float = 6.0) -> tuple[bool, str]:
+        """Start the Termux-WP node gateway if it is not up yet.
+
+        Returns ``(ok, message)``.  Starting it twice is harmless: a gateway
+        that is already listening is reported as such instead of spawning a
+        second process that would fight over the port.
+
+        ``settle`` is the grace period the new process has to survive after
+        the port opens before it is called ready.
+        """
+        with self._server_lock:
+            if self.server_is_running():
+                return True, "Termux-WP is already running."
+
+            node_bin = shutil.which("node")
+            if not node_bin:
+                return False, ("node is not installed — 'pkg install node' "
+                               "installs the runtime Termux-WP needs.")
+
+            bot_js = BASE_DIR / "Termux-WP" / "bot.js"
+            if not bot_js.exists():
+                return False, (f"Termux-WP is missing: {bot_js} was not found. "
+                               "Clone it with 'git clone "
+                               "https://github.com/opsonusdh/Termux-WP'.")
+
+            # A browser left behind by a dead gateway keeps the profile
+            # locked, and the new gateway would refuse to start with
+            # "The browser is already running for ...".
+            self._clear_orphaned_browsers("stale profile lock")
+
+            log_path = BASE_DIR / "Termux-WP" / "bot_output.log"
+            log_file = None
+            try:
+                log_file = open(log_path, "a", encoding="utf-8")
+                stdout = log_file
+            except OSError:
+                stdout = subprocess.DEVNULL
+
+            try:
+                proc = subprocess.Popen(
+                    [node_bin, str(bot_js)],
+                    cwd=str(BASE_DIR / "Termux-WP"),
+                    stdout=stdout,
+                    stderr=subprocess.STDOUT,
+                    # Detach from this process group so the gateway is not
+                    # killed by a Ctrl+C in the chat terminal — it belongs to
+                    # the plugin, not to the conversation.
+                    start_new_session=(os.name != "nt"),
+                )
+            except Exception as exc:
+                if log_file:
+                    log_file.close()
+                return False, f"Could not start Termux-WP: {exc}"
+
+            self.server_proc = proc
+            self.server_log = log_file
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    self.server_proc = None
+                    if log_file:
+                        log_file.close()
+                        self.server_log = None
+                    return False, (f"Termux-WP exited immediately "
+                                   f"(code {proc.returncode}) — see {log_path} "
+                                   f"for the reason.")
+                if self.server_is_running():
+                    if self._gateway_stable(proc, settle):
+                        self._ensure_supervisor()
+                        return True, f"Termux-WP started (pid {proc.pid})."
+                    # The port opened but the process is gone again — the
+                    # WhatsApp Web engine took it down.  Say so, and say why.
+                    code = proc.returncode
+                    self.server_proc = None
+                    if log_file:
+                        log_file.close()
+                        self.server_log = None
+                    errors = self._log_errors(log_path)
+                    detail = f" Last error: {errors[-1]}" if errors else ""
+                    return False, (f"Termux-WP exited right after starting "
+                                   f"(code {code}) — see {log_path} for the "
+                                   f"reason.{detail}")
+                time.sleep(0.5)
+
+            return False, (f"Termux-WP did not open port {gateway_port()} "
+                           f"within {int(timeout)}s — see {log_path}.")
+
+    #  Gateway watchdog
+    #
+    #  The node gateway goes down with the WhatsApp Web engine whenever
+    #  Chromium gives up during initialisation, and nothing used to restart
+    #  it: every WhatsApp tool then answered "connection refused" until a
+    #  human started the gateway by hand in a second terminal.  The watchdog
+    #  closes that gap — it watches the process this manager started and
+    #  brings it back with a growing delay.
+
+    def _ensure_supervisor(self) -> None:
+        """Start the watchdog if it is not already running."""
+        if self._supervisor and self._supervisor.is_alive():
+            return
+        self._supervisor_stop.clear()
+        self._supervisor = threading.Thread(
+            target=self._supervise_gateway, daemon=True)
+        self._supervisor.start()
+
+    def _stop_supervisor(self) -> None:
+        """Stop the watchdog."""
+        self._supervisor_stop.set()
+        thread = self._supervisor
+        self._supervisor = None
+        if thread and thread.is_alive():
+            thread.join(timeout=3)
+
+    def _supervise_gateway(self) -> None:
+        """Restart the gateway when it dies — and keep trying until it is back.
+
+        Only a gateway this process started is supervised — one the user
+        started by hand is not ours to kill and not ours to replace.
+
+        The watchdog also owns the case where a restart *fails*: the gateway
+        is then down with no process to watch, and skipping it would leave
+        the plugin dead until the next manual enable.  So the loop keeps
+        trying — with a growing delay — for as long as the watchdog runs.
+        """
+        while not self._supervisor_stop.wait(5):
+            proc = self.server_proc
+            if proc is not None and proc.poll() is None:
+                # It is up; the backoff counter starts over.
+                self._restarts = 0
+                continue
+
+            if proc is not None:
+                # Take the corpse out of the way first, so start_server()
+                # does not think it still owns a live process.
+                with self._server_lock:
+                    if self.server_proc is proc:
+                        self.server_proc = None
+                    if self.server_log:
+                        try:
+                            self.server_log.close()
+                        except Exception:
+                            pass
+                        self.server_log = None
+
+            if self.server_is_running():
+                # Somebody else's gateway is answering — leave it alone.
+                continue
+
+            self._restarts += 1
+            delay = min(60, 5 * self._restarts)
+            print(f"{YELLOW}[WhatsApp] The Termux-WP gateway is not running — "
+                  f"restarting it in {delay}s (attempt {self._restarts}).{RESET}")
+            if self._supervisor_stop.wait(delay):
+                return
+            try:
+                ok, message = self.start_server()
+            except Exception as exc:
+                print(f"{RED}[WhatsApp] The gateway could not be restarted: "
+                      f"{exc}{RESET}")
+                continue
+            if self._supervisor_stop.is_set():
+                # The plugin was disabled while the gateway was starting —
+                # do not leave it running behind the user's back.
+                if ok:
+                    self.stop_server()
+                return
+            if ok:
+                print(f"{GRAY}[WhatsApp] Termux-WP is back: {message}{RESET}")
+                if not self.running:
+                    self.start()
+
+    def stop_server(self) -> tuple[bool, str]:
+        """Stop the gateway *if this process started it*.
+
+        A gateway the user started by hand is left alone: it is not ours to
+        kill.
+        """
+        # The listener goes first: a live listener would reconnect to the
+        # gateway the moment it came back, even after the plugin was
+        # switched off.
+        self.stop()
+        # The watchdog goes first: it must not be holding the server lock
+        # while this method waits for it to finish.
+        self._stop_supervisor()
+        # A watchdog that is still inside a start attempt can hold the lock
+        # for up to a minute; waiting that long would make '/plugin disable'
+        # look like a hang.
+        if not self._server_lock.acquire(timeout=15):
+            return False, ("Termux-WP is busy starting — try again in a "
+                           "moment.")
+        try:
+            proc = self.server_proc
+            if proc is None:
+                return False, "Termux-WP was not started by this session."
+            self.server_proc = None
+            try:
+                proc.terminate()
+                proc.wait(timeout=8)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+            if self.server_log:
+                try:
+                    self.server_log.close()
+                except Exception:
+                    pass
+                self.server_log = None
+            # The browser belongs to the gateway we just stopped: left
+            # behind, it would keep the profile locked for the next one.
+            self._clear_orphaned_browsers("gateway stopped")
+            return True, "Termux-WP stopped."
+        finally:
+            self._server_lock.release()
+
+    def ensure_running(self) -> tuple[bool, str]:
+        """Bring up both halves of the bridge: the gateway and the listener."""
+        ok, message = self.start_server()
+        if not ok:
+            return False, message
+        # ``start()`` is idempotent and serialised, so callers racing to
+        # enable the plugin cannot end up with two listener threads.
+        self.start()
+        return True, message
+
+    def runtime_status(self) -> dict:
+        """What the plugin status line needs to know about the runtime."""
+        return {
+            "server_running": self.server_is_running(),
+            "listener_running": bool(self.running),
+            "connection_state": self.connection_state,
+            "port": gateway_port(),
+            "pid": (self.server_proc.pid if self.server_proc else None),
+        }
+
+    #  Pairing state (the QR)
+    #
+    #  The QR is the pairing secret of the WhatsApp session: scanning it
+    #  grants this device read/write access to the owner's account.  It used
+    #  to be rendered straight into the terminal every time the gateway
+    #  emitted it — which, because whatsapp-web.js rotates the QR every few
+    #  seconds and the WebSocket reconnects every five, meant the chat was
+    #  buried under QR art for the whole session.
+    #
+    #  It is captured here instead, and only rendered when the user asks
+    #  for it explicitly.
+
+    def _capture_qr(self, qr) -> None:
+        """Remember the pairing QR without showing it."""
+        if not qr:
+            return
+        with self._qr_lock:
+            self.last_qr = qr
+        self._qr_event.set()
+
+    def clear_qr(self) -> None:
+        """Forget the pairing QR (the session no longer needs it)."""
+        with self._qr_lock:
+            self.last_qr = None
+        self._qr_event.clear()
+
+    def current_qr(self):
+        """The pairing QR, or None when there is none."""
+        with self._qr_lock:
+            return self.last_qr
+
+    def wait_for_qr(self, timeout: float = 30.0):
+        """Wait for a pairing QR to arrive and return it (None on timeout)."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            qr = self.current_qr()
+            if qr:
+                return qr
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            self._qr_event.clear()
+            self._qr_event.wait(timeout=min(0.5, remaining))
+
+    def show_qr(self, qr=None) -> bool:
+        """Render the pairing QR in the terminal — on request only.
+
+        This is the *only* place the QR is ever drawn.  It is never called
+        from the event loop, so an unpaired gateway stays silent until the
+        user asks for the code.
+        """
+        qr = qr or self.current_qr()
+        if not qr:
+            return False
+        print(f"\n{YELLOW}[WhatsApp] Scan this code in WhatsApp → Linked devices "
+              f"to pair this device:{RESET}")
+        try:
+            subprocess.run(
+                ["node", "-e",
+                 f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
+                env={**os.environ, "QR_CODE": qr},
+                timeout=20,
+            )
+            return True
+        except Exception as exc:
+            print(f"{RED}[WhatsApp] Could not render the QR code: {exc}{RESET}")
+            return False
+
+    def gateway_state(self) -> dict:
+        """What the gateway itself reports — the authoritative pairing state.
+
+        The cached ``connection_state`` only knows what this session has
+        seen; the gateway knows whether the WhatsApp session is linked.
+        """
+        try:
+            response = requests.get(f"{BASE_URL}/api/status", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "state": data.get("state", "UNKNOWN"),
+                "qr": data.get("qr"),
+                "reachable": True,
+            }
+        except Exception:
+            return {"state": "UNKNOWN", "qr": None, "reachable": False}
+
+    def is_paired(self) -> bool:
+        """True when the gateway holds a linked WhatsApp session."""
+        return self.gateway_state().get("state") == "READY"
+
+    def wait_for_pairing_state(self, timeout: float = 60.0, poll: float = 1.0):
+        """Wait until the gateway reports a *decided* pairing state.
+
+        The gateway opens its port long before the WhatsApp engine has
+        finished booting, so the state right after the start is
+        "INITIALIZING".  Deciding then would hand out a pairing code for
+        a session that is in fact already linked — the exact opposite of
+        what the user asked for.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        state = "UNKNOWN"
+        while True:
+            state = self.gateway_state().get("state", "UNKNOWN")
+            if state in ("READY", "QR_REQUIRED"):
+                return state
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return state
+            time.sleep(poll)
+
+    #  Killing the gateway
+    #
+    #  ``stop_server()`` only stops the gateway *this* session started.  A
+    #  gateway somebody else started — by hand, or by the old entry point
+    #  that spawned its own — is just as much in the way when the user asks
+    #  for a fresh pairing, so the reset path kills every gateway process
+    #  that serves this checkout.
+
+    def _gateway_processes(self) -> list:
+        """The pids of every node process serving this checkout's bot.js.
+
+        The script is matched by working directory as well as by path: a
+        gateway started as a bare ``node bot`` does not carry the full path
+        in its command line.  The process table is scanned directly — a
+        ``pkill -f bot.js`` would match the shell running it.
+        """
+        wp_dir = str((BASE_DIR / "Termux-WP").resolve())
+        bot_js = str((BASE_DIR / "Termux-WP" / "bot.js").resolve())
+        pids = []
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode("utf-8", "replace").replace("\0", " ")
+            except OSError:
+                continue
+            if "node" not in cmdline:
+                continue
+            if bot_js not in cmdline and "bot.js" not in cmdline and " bot" not in cmdline:
+                continue
+            try:
+                cwd = os.readlink(f"/proc/{entry}/cwd")
+            except OSError:
+                cwd = ""
+            if cwd == wp_dir or bot_js in cmdline:
+                pids.append(pid)
+        return pids
+
+    def kill_gateway(self) -> tuple[int, str]:
+        """Stop every WhatsApp gateway process for this checkout.
+
+        Returns ``(killed, message)``.  Unlike ``stop_server()`` this is
+        unconditional: the gateway is killed even when this session did not
+        start it, because the user asked for it to go away.
+        """
+        killed = 0
+
+        # The one this session owns goes first, politely.
+        if self.server_proc is not None:
+            try:
+                stopped, _ = self.stop_server()
+                if stopped:
+                    killed += 1
+            except Exception:
+                pass
+
+        for pid in self._gateway_processes():
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except OSError:
+                continue
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and self._gateway_processes():
+            time.sleep(0.25)
+
+        for pid in self._gateway_processes():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+        self._clear_orphaned_browsers("gateway killed")
+        if killed:
+            return killed, f"Termux-WP stopped ({killed} process(es) killed)."
+        return 0, "Termux-WP was not running."
+
     #  WebSocket lifecycle
 
     def start(self):
-        if self.running:
-            return
-        self.running = True
-        print("WhatsApp integration initialized and background listener started.")
-        self.ws_thread = threading.Thread(target=self._run_ws_listener, daemon=True)
-        self.ws_thread.start()
+        # The check and the spawn happen under one lock: an unlocked
+        # ``if self.running`` let two callers slip past it and open two
+        # WebSocket connections to the gateway — every incoming message
+        # would then be handled twice.
+        with self._listener_lock:
+            if self.running:
+                return
+            self.running = True
+            print(f"{GRAY}[WhatsApp] Listener started.{RESET}")
+            self.ws_thread = threading.Thread(target=self._run_ws_listener, daemon=True)
+            self.ws_thread.start()
+        # Wait for the listener outside the lock, so a slow gateway cannot
+        # hold up another caller for the whole timeout.
         self._ready_event.wait(timeout=3)
+
+    def stop(self) -> None:
+        """Stop the WebSocket listener.
+
+        Without this the listener thread outlived ``/plugin disable``: it
+        kept reconnecting every five seconds, so a gateway that came back
+        later was picked up by a plugin the user had switched off — and
+        every incoming message was handled again.
+        """
+        with self._listener_lock:
+            if not self.running and self.ws_thread is None:
+                return
+            self.running = False
+            thread = self.ws_thread
+            self.ws_thread = None
+            ws = self.ws
+            self.ws = None
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
 
     def _run_ws_listener(self):
         while self.running:
+            ws = None
             try:
                 ws = websocket.WebSocketApp(
                     WS_URL,
@@ -660,9 +1305,15 @@ class WhatsAppManager:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
+                self.ws = ws
                 ws.run_forever(ping_interval=30, ping_timeout=10)
             except Exception:
                 pass
+            finally:
+                if self.ws is ws:
+                    self.ws = None
+            if not self.running:
+                break
             time.sleep(5)
 
     def _on_message(self, ws, message):
@@ -794,14 +1445,11 @@ class WhatsAppManager:
                             print(f"[WhatsApp] Owner sent to {to_jid} — hold active for {mins}m.")
 
             elif event_type == "SYSTEM_QR_REQUIRED":
-                qr_code = payload.get("qr")
-                print(f"\n{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
-                if qr_code:
-                    subprocess.run(
-                        ["node", "-e",
-                         f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
-                        env={**os.environ, "QR_CODE": qr_code},
-                    )
+                # Captured, not printed.  The QR is a live pairing secret
+                # and the gateway rotates it every few seconds — drawing it
+                # here buried the chat under QR art for the whole session.
+                # It is rendered only when the user asks for it.
+                self._capture_qr(payload.get("qr"))
 
             elif event_type == "SYSTEM_STATUS":
                 state   = payload.get("state", "UNKNOWN")
@@ -811,22 +1459,26 @@ class WhatsAppManager:
                     self.my_number = payload.get("myNumber", "")
                 if state in ("READY", "CONNECTED"):
                     self._ready_event.set()
-                else:
-                    print(f"[WhatsApp] Status: {state}")
-                if state == "QR_REQUIRED" and qr_code:
-                    print(f"{YELLOW}[WhatsApp] QR scan required. Please scan with WhatsApp:{RESET}")
-                    subprocess.run(
-                        ["node", "-e",
-                         f"require('{qrcode_module}').generate(process.env.QR_CODE, {{small: true}})"],
-                        env={**os.environ, "QR_CODE": qr_code},
-                    )
+                    self.clear_qr()
+                elif state == "QR_REQUIRED" and qr_code:
+                    self._capture_qr(qr_code)
+                elif self.debug:
+                    print(f"{GRAY}[WhatsApp] Status: {state}{RESET}")
 
             elif event_type == "SYSTEM_READY":
                 self.connection_state = "READY"
                 if "myNumber" in payload:
                     self.my_number = payload.get("myNumber", "")
                 self._ready_event.set()
-                print(f"[WhatsApp] Connected and ready. My number: {self.my_number}")
+                self.clear_qr()
+                # No terminal output here: the ready banner (the connected
+                # notice plus the owner's number) landed in the middle of
+                # the chat on every start and published the number into the
+                # scrollback.  The number is still stored — the group-mention
+                # check needs it — and it is shown by '/plugin status
+                # whatsapp' on request.
+                if self.debug:
+                    print(f"{GRAY}[WhatsApp] Session linked.{RESET}")
 
             elif event_type:
                 if self.debug:
@@ -1149,3 +1801,21 @@ class WhatsAppManager:
 
 # Singleton instance
 whatsapp_manager = WhatsAppManager()
+
+
+# The gateway is a child process of this session: when the session ends it
+# goes with it, instead of leaving an orphaned Chromium (and a WhatsApp
+# session nobody is serving) behind.
+try:  # pragma: no cover - interpreter shutdown hook
+    import atexit as _atexit
+
+    def _stop_gateway_on_exit():
+        try:
+            if whatsapp_manager.server_proc is not None:
+                whatsapp_manager.stop_server()
+        except Exception:
+            pass
+
+    _atexit.register(_stop_gateway_on_exit)
+except Exception:
+    pass

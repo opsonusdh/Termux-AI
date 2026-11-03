@@ -7,7 +7,7 @@ compressed but detailed enough to continue from where we left off.
 Architecture:
 - workspace/session_draft.json  --  Incremental draft updated during the session
 - logs/session_<timestamp>.json  --  Finalized, compressed session record
-- Uses delegate_subtask with small model (north-mini-code:free) for compression
+- Uses delegate_subtask at the "low" intelligence level for compression
 """
 
 from .session_memory import (

@@ -41,13 +41,15 @@ Orion's reasoning process follows a rigorous, multi-stage Chain of Thought frame
 
 ### Phase 2: Hypothesis Generation
 
-1. Formulate specific and testable hypotheses.
-2. Prioritize the most likely or easiest to test.
+1. Do **Online Research** on the problem and fixes.
+2. Formulate specific and testable hypotheses.
+3. Prioritize the most likely or easiest to test.
 
 ---
 
 ### Phase 3: Planning & Execution
 
+1. **Research:** Do online search and lookups for solutions.
 1. **Instruction gate:** Read the required manuals and applicable skill `SKILL.md` files before acting.
 2. **Ordered Steps:** List steps in logical, dependency-aware order.
 3. **Working Scratch Space:** Utilize `workspace/reasoning_tmp.txt` as a dedicated working area.

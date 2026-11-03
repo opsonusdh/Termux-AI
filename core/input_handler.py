@@ -109,7 +109,7 @@ try:
         # do not exist turns a typo into a message silently sent to the model.
         commands = [
             '/agent', '/autonomous', '/chat', '/collapse', '/details',
-            '/expand', '/normal', '/notify',
+            '/e', '/expand', '/c', '/normal', '/notify',
         ]
         
         # Filter commands that start with current word
@@ -244,6 +244,18 @@ def _fallback_posix_input(prompt_str: str) -> str:
     lines = [""]
     try:
         tty.setraw(fd)
+        # ``tty.setraw`` also clears OPOST, so the tty stops expanding "\n"
+        # into "\r\n".  While this function owns the terminal, output from
+        # another thread (a plugin worker, a background probe) would then
+        # move the cursor down one row but keep the column — the staircase
+        # this app used to show in the middle of the prompt.  Output
+        # post-processing is safe to keep: the input side stays fully raw,
+        # only the bytes leaving the terminal are translated.  (tcgetattr
+        # returns [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]; index 1
+        # is oflag — the termios module has no name for that index.)
+        _attrs = termios.tcgetattr(fd)
+        _attrs[1] |= termios.OPOST | termios.ONLCR
+        termios.tcsetattr(fd, termios.TCSADRAIN, _attrs)
         while True:
             data = os.read(fd, 1)
             if not data:

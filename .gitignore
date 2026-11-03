@@ -19,6 +19,15 @@ Thumbs.db
 .env
 data/state.json
 data/capability_registry.json
+# The interactive prompt history (core/input_handler.py).  It records what the
+# user typed at the permission gate, so a pasted credential lands in it — it is
+# runtime state, not source, and it must never be committed.
+data/cli_history
+# Google OAuth refresh tokens for the Gmail/Calendar/Drive plugins.  A refresh
+# token is a long-lived credential for the user's whole mailbox — it must never
+# end up in a commit.
+data/google_tokens*
+data/google_pending_auth.json
 docs/active_plan.md
 upgrade_roadmap.md
 reasoning_tmp*

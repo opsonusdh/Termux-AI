@@ -37,8 +37,22 @@ if _ROOT_DIR not in sys.path:
 # for the very same permission rules.
 from core.permissions import validate_command, request_file_permission
 from renderer import RED, GRAY, YELLOW, RESET, render_for_voice, render_markdown_terminal
-from core.models import PROVIDERS
+from core.models import (
+    PROVIDERS,
+    IMAGE_MODEL_SLOTS,
+    get_subagent_rotation,
+    normalize_intelligence_level,
+)
 from core import shell_runner
+from core import google_api
+from core import google_oauth
+from core import runtime_log
+from core import display_state
+from core import app_config
+from core import notifier
+# Module-level import (not a `from ... import name`) so this file shares the
+# single global PluginManager instance rather than building a second one.
+from core import plugin_manager as plugin_manager_module
 import paths
 
 
@@ -163,7 +177,15 @@ WAKE_WORDS = ["orion", "orien", "orian"]
 PRINT_LINE_THRESHOLD = 20
 PRINT_CHAR_THRESHOLD = 500
 AI_ROOT = _ROOT_DIR
-DIAGNOSIS_TIMEOUT = 10
+#: How long the diagnosis collector waits for the individual checks.
+#: The device commands behind them are slow — a battery broadcast or a Wi-Fi
+#: connection query takes several seconds on a loaded phone — so the budget
+#: has to be generous enough to be worth waiting for, and the whole snapshot
+#: still has to stay under the 15s the tool contract asks for.
+DIAGNOSIS_TIMEOUT = 13
+#: Extra grace period after the deadline, so a check that is about to answer
+#: still gets into the snapshot instead of being reported as a timeout.
+DIAGNOSIS_GRACE = 1
 
 
 def _safe_bool(val) -> bool:
@@ -482,7 +504,15 @@ TOOLS_DESCRIPTION = [
                 "Uses a headless Chromium browser (via Chrome DevTools Protocol) to "
                 "properly render JavaScript-heavy pages, single-page applications, and "
                 "dynamically loaded content. Supports CSS selectors to target specific "
-                "elements. Falls back to requests+BeautifulSoup if Chromium is unavailable."
+                "elements. Falls back to requests+BeautifulSoup if Chromium is unavailable. "
+                "The browser is closed again when the call returns; use the 'browser' tool "
+                "when you need to keep a page alive and interact with it over several calls. "
+                "By default a screenshot of the page is captured and attached to the reply "
+                "so a multimodal model can look at it. "
+                "Never guess click coordinates: add a 'find' action to list the page's "
+                "buttons, links and fields — each with the label a human would read and "
+                "a ready-to-use CSS selector — and then click by 'text' or 'index'. The "
+                "position is resolved in the live DOM, so nothing is guessed."
             ),
             "parameters": {
                 "type": "object",
@@ -502,31 +532,123 @@ TOOLS_DESCRIPTION = [
                         "minimum": 1000,
                         "maximum": 50000,
                     },
+                    "screenshot": {
+                        "type": "boolean",
+                        "description": (
+                            "Capture the page and attach the image to the reply so the "
+                            "model can see it. Default true."
+                        ),
+                        "default": True,
+                    },
+                    "extract_html": {
+                        "type": "boolean",
+                        "description": (
+                            "Also return the raw outerHTML of the page (or matched "
+                            "element(s)) so the model can inspect the DOM structure, "
+                            "attributes and data-* values. Default false."
+                        ),
+                        "default": False,
+                    },
                     "actions": {
                         "type": "array",
                         "description": (
                             "Optional list of actions to perform on the page before extraction. "
-                            "Each action is a dict with a 'type' field ('click', 'input', or 'wait'), "
-                            "a 'selector' field (CSS selector, required for click/input), "
-                            "a 'wait_after' field (seconds to wait after the action, default 1.0), "
-                            "and a 'text' field (text to type, required for input actions). "
-                            "Actions are best-effort; the fallback scraper may not support all action types."
+                            "Each action is a dict with a 'type' field ('click', 'input', 'wait', "
+                            "'scroll', 'press', 'select', 'evaluate' or 'find'), a 'selector' "
+                            "field (CSS selector for click/input/select), an 'x' field and 'y' "
+                            "field (raw viewport coordinates), a 'wait_after' field (seconds to "
+                            "wait after the action, default 1.0), a 'text' field (for 'input': "
+                            "the text to type; for 'click': the visible label of the element to "
+                            "click), a 'label' field (for 'input': the visible label of the field "
+                            "to type into), an 'index' field (for 'click': the 1-based index of "
+                            "an element from a 'find' listing), a 'query' field (for 'find': only "
+                            "list elements matching this word), a 'value' field (option to choose, "
+                            "for select), a 'key' field (key name, for press), an 'amount' field "
+                            "(pixels to scroll, for scroll) and an 'expression' field (JavaScript "
+                            "to evaluate, required for evaluate). Do NOT guess click coordinates: "
+                            "run a 'find' action first and then click by 'text' or 'index' — the "
+                            "element is located in the live DOM and clicked at its centre. "
+                            "Actions are best-effort; the fallback scraper may not support all "
+                            "action types."
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "type": {
                                     "type": "string",
-                                    "enum": ["click", "input", "wait"],
-                                    "description": "The action type: click, input, or wait.",
+                                    "enum": ["click", "input", "wait", "scroll",
+                                             "press", "select", "evaluate", "find"],
+                                    "description": "The action type to perform.",
                                 },
                                 "selector": {
                                     "type": "string",
-                                    "description": "CSS selector for the target element (required for click and input).",
+                                    "description": "CSS selector for the target element (required for click, input and select; click can also use x/y coordinates instead).",
+                                },
+                                "x": {
+                                    "type": "number",
+                                    "description": (
+                                        "Raw viewport X coordinate for a click. Only use it "
+                                        "when you mean that exact spot — prefer 'text' or "
+                                        "'index', which are resolved against the live DOM."
+                                    ),
+                                },
+                                "y": {
+                                    "type": "number",
+                                    "description": (
+                                        "Raw viewport Y coordinate for a click. Pair it with "
+                                        "'x'. Prefer 'text' or 'index' over guessing."
+                                    ),
+                                },
+                                "expression": {
+                                    "type": "string",
+                                    "description": "JavaScript expression to evaluate in the page context (required for evaluate actions).",
                                 },
                                 "text": {
                                     "type": "string",
-                                    "description": "Text to type into the element (required for input actions).",
+                                    "description": (
+                                        "For 'input': the text to type into the element. "
+                                        "For 'click': the visible label of the element to "
+                                        "click (e.g. 'Submit')."
+                                    ),
+                                },
+                                "label": {
+                                    "type": "string",
+                                    "description": (
+                                        "For 'input': the visible label of the field to type "
+                                        "into (e.g. 'Email'). The field is located in the "
+                                        "live DOM, so no selector is needed."
+                                    ),
+                                },
+                                "index": {
+                                    "type": "integer",
+                                    "description": (
+                                        "For 'click': the 1-based index of an element from a "
+                                        "'find' listing. The element is located in the live "
+                                        "DOM at the moment of the click."
+                                    ),
+                                },
+                                "query": {
+                                    "type": "string",
+                                    "description": (
+                                        "For 'find': only list elements whose label or "
+                                        "selector contains this word."
+                                    ),
+                                },
+                                "value": {
+                                    "type": "string",
+                                    "description": "Option value to choose (for select actions).",
+                                },
+                                "key": {
+                                    "type": "string",
+                                    "description": "Key to press, e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown' (for press actions).",
+                                },
+                                "amount": {
+                                    "type": "number",
+                                    "description": "Pixels to scroll by (for scroll actions), default 600.",
+                                },
+                                "direction": {
+                                    "type": "string",
+                                    "description": "Scroll direction: 'up', 'down', 'top' or 'bottom' (for scroll actions).",
                                 },
                                 "wait_after": {
                                     "type": "number",
@@ -538,6 +660,196 @@ TOOLS_DESCRIPTION = [
                     },
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser",
+            "description": (
+                "Drive a persistent browser session that stays alive between calls. "
+                "Open a page with action='open' and you get back a short session id "
+                "(for example 'b1'); pass that id back with every later call to keep "
+                "working on the same page — clicking buttons, typing into fields, "
+                "scrolling, pressing keys and choosing options all work on the live "
+                "page, with its cookies and form state intact. Use action='close' with "
+                "the id to shut the browser down when you are done. "
+                "action='list' shows the open sessions. "
+                "A screenshot of the page is captured and attached to the reply by "
+                "default, so a multimodal model can see what the page looks like. "
+                "To click something, do not guess coordinates: run a 'find' action to "
+                "list the page's buttons, links and fields with their labels and "
+                "ready-to-use CSS selectors, then click by 'text' or 'index' — the "
+                "element is located in the live DOM and clicked at its centre."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["open", "act", "navigate", "screenshot", "state",
+                                 "close", "list"],
+                        "description": (
+                            "open: launch a browser and open a URL. "
+                            "act: run actions in an open session. "
+                            "navigate: load a new URL in an open session. "
+                            "screenshot: capture the current viewport. "
+                            "state: report the URL, title and page text. "
+                            "close: shut the session down. "
+                            "list: list the open sessions."
+                        ),
+                        "default": "open",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to open (required for action='open' and action='navigate').",
+                    },
+                    "browser_id": {
+                        "type": "string",
+                        "description": (
+                            "The session id returned by a previous 'open' call, "
+                            "e.g. 'b1'. Required for every action except 'open' and 'list'."
+                        ),
+                    },
+                    "selector": {
+                        "type": "string",
+                        "description": "Optional CSS selector to filter the extracted text (e.g., 'main', 'article').",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters of text to return. Default 12000, max 50000.",
+                        "default": 12000,
+                        "minimum": 1000,
+                        "maximum": 50000,
+                    },
+                    "screenshot": {
+                        "type": "boolean",
+                        "description": (
+                            "Capture the page and attach the image to the reply so the "
+                            "model can see it. Default true."
+                        ),
+                        "default": True,
+                    },
+                    "extract_html": {
+                        "type": "boolean",
+                        "description": (
+                            "Also return the raw outerHTML of the page so the model can "
+                            "inspect the DOM structure, attributes and data-* values."
+                        ),
+                        "default": False,
+                    },
+                    "actions": {
+                        "type": "array",
+                        "description": (
+                            "Actions to run for action='act'. Each action is a dict with "
+                            "a 'type' field ('click', 'input', 'wait', 'scroll', 'press', "
+                            "'select', 'evaluate' or 'find'), a 'selector' field (CSS "
+                            "selector for click/input/select), an 'x' field and 'y' field "
+                            "(raw viewport coordinates), a 'wait_after' field (seconds to "
+                            "wait after the action, default 1.0), a 'text' field (for "
+                            "'input': the text to type; for 'click': the visible label of "
+                            "the element to click), a 'label' field (for 'input': the "
+                            "visible label of the field to type into), an 'index' field "
+                            "(for 'click': the 1-based index of an element from a 'find' "
+                            "listing), a 'query' field (for 'find': only list elements "
+                            "matching this word), a 'value' field (option to choose, for "
+                            "select), a 'key' field (key to press), an 'amount' field "
+                            "(pixels to scroll) and an 'expression' field (JavaScript to "
+                            "evaluate, for evaluate actions). Do NOT guess click "
+                            "coordinates: run a 'find' action first and then click by "
+                            "'text' or 'index' — the element is located in the live DOM "
+                            "and clicked at its centre."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["click", "input", "wait", "scroll",
+                                             "press", "select", "evaluate", "find"],
+                                    "description": "The action type to perform.",
+                                },
+                                "selector": {
+                                    "type": "string",
+                                    "description": "CSS selector for the target element (required for click, input and select; click can also use x/y coordinates instead).",
+                                },
+                                "x": {
+                                    "type": "number",
+                                    "description": (
+                                        "Raw viewport X coordinate for a click. Only use it "
+                                        "when you mean that exact spot — prefer 'text' or "
+                                        "'index', which are resolved against the live DOM."
+                                    ),
+                                },
+                                "y": {
+                                    "type": "number",
+                                    "description": (
+                                        "Raw viewport Y coordinate for a click. Pair it with "
+                                        "'x'. Prefer 'text' or 'index' over guessing."
+                                    ),
+                                },
+                                "expression": {
+                                    "type": "string",
+                                    "description": "JavaScript expression to evaluate in the page context (required for evaluate actions).",
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": (
+                                        "For 'input': the text to type into the element. "
+                                        "For 'click': the visible label of the element to "
+                                        "click (e.g. 'Submit')."
+                                    ),
+                                },
+                                "label": {
+                                    "type": "string",
+                                    "description": (
+                                        "For 'input': the visible label of the field to type "
+                                        "into (e.g. 'Email'). The field is located in the "
+                                        "live DOM, so no selector is needed."
+                                    ),
+                                },
+                                "index": {
+                                    "type": "integer",
+                                    "description": (
+                                        "For 'click': the 1-based index of an element from a "
+                                        "'find' listing. The element is located in the live "
+                                        "DOM at the moment of the click."
+                                    ),
+                                },
+                                "query": {
+                                    "type": "string",
+                                    "description": (
+                                        "For 'find': only list elements whose label or "
+                                        "selector contains this word."
+                                    ),
+                                },
+                                "value": {
+                                    "type": "string",
+                                    "description": "Option value to choose (for select actions).",
+                                },
+                                "key": {
+                                    "type": "string",
+                                    "description": "Key to press, e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown' (for press actions).",
+                                },
+                                "amount": {
+                                    "type": "number",
+                                    "description": "Pixels to scroll by (for scroll actions), default 600.",
+                                },
+                                "direction": {
+                                    "type": "string",
+                                    "description": "Scroll direction: 'up', 'down', 'top' or 'bottom' (for scroll actions).",
+                                },
+                                "wait_after": {
+                                    "type": "number",
+                                    "description": "Seconds to wait after the action (default 1.0).",
+                                    "default": 1.0,
+                                },
+                            },
+                        },
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -861,6 +1173,393 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    # ── Gmail (plugin: gmail) ──────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "send_gmail_message",
+            "description": (
+                "Send an email through the connected Gmail account. "
+                "Plain text only — attachments are not supported."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to":      {"type": "string", "description": "Recipient email address (comma-separated for several)."},
+                    "subject": {"type": "string", "description": "Subject line of the email."},
+                    "body":    {"type": "string", "description": "Body text of the email."},
+                    "cc":      {"type": "string", "description": "Optional CC recipients."},
+                    "bcc":     {"type": "string", "description": "Optional BCC recipients."},
+                },
+                "required": ["to", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gmail_messages",
+            "description": (
+                "List recent Gmail messages. Supports Gmail search syntax "
+                "(e.g. 'from:alice subject:invoice is:unread')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":      {"type": "string", "description": "Gmail search query. Empty = newest messages.", "default": ""},
+                    "max_results": {"type": "integer", "description": "How many messages to return (1-100, default 10).", "default": 10},
+                    "label_ids":  {"type": "string", "description": "Comma-separated label ids to restrict to (e.g. INBOX, UNREAD).", "default": ""},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_gmail",
+            "description": (
+                "Search Gmail and return matching messages with their snippets. "
+                "Use Gmail search syntax (e.g. 'from:bob has:attachment newer_than:7d')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":       {"type": "string", "description": "Gmail search query."},
+                    "max_results": {"type": "integer", "description": "How many matches to return (1-100, default 20).", "default": 20},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gmail_labels",
+            "description": "List the Gmail labels (folders) of the connected account.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_gmail_label",
+            "description": "Create a new Gmail label (folder).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Name of the new label."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_gmail_message",
+            "description": (
+                "Delete a Gmail message — by default it moves to the trash, "
+                "with permanent=true it is deleted for good."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The Gmail message id."},
+                    "permanent":  {"type": "boolean", "description": "Delete permanently instead of trashing. Default false.", "default": False},
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_gmail_message",
+            "description": (
+                "Read the full content of a single Gmail message by ID "
+                "(headers + body + attachments). Use this after listing or "
+                "searching Gmail to actually read a message's content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message_id": {"type": "string", "description": "The Gmail message id to read."},
+                    "format":     {"type": "string", "description": "'full' (headers + body) or 'metadata' (headers + snippet only). Default 'full'.", "default": "full"},
+                },
+                "required": ["message_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gmail_profile",
+            "description": (
+                "Show the connected Gmail account's profile: the Gmail "
+                "address, total message/thread counts, and history id."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    # ── Google Calendar (plugin: google_calendar) ────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "get_calendar_events",
+            "description": (
+                "List Google Calendar events of a calendar ('primary' by default). "
+                "Times are ISO-8601; leave them empty to list everything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "calendar_id": {"type": "string", "description": "Calendar id. 'primary' is the user's own calendar.", "default": "primary"},
+                    "time_min":    {"type": "string", "description": "Only events starting after this ISO-8601 time.", "default": ""},
+                    "time_max":    {"type": "string", "description": "Only events starting before this ISO-8601 time.", "default": ""},
+                    "max_results": {"type": "integer", "description": "How many events to return (1-250, default 25).", "default": 25},
+                    "query":       {"type": "string", "description": "Free-text filter on the event title.", "default": ""},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_calendar_event",
+            "description": (
+                "Create a Google Calendar event. 'start' and 'end' are ISO-8601 "
+                "times (e.g. 2026-03-04T15:00:00); a naive time is read as local time."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "calendar_id": {"type": "string", "description": "Calendar id. 'primary' by default.", "default": "primary"},
+                    "summary":     {"type": "string", "description": "Title of the event."},
+                    "start":       {"type": "string", "description": "Start time (ISO-8601)."},
+                    "end":         {"type": "string", "description": "End time (ISO-8601)."},
+                    "description": {"type": "string", "description": "Event description.", "default": ""},
+                    "location":    {"type": "string", "description": "Where the event happens.", "default": ""},
+                    "attendees":   {"type": "array", "items": {"type": "string"}, "description": "Email addresses of the guests.", "default": []},
+                },
+                "required": ["summary", "start", "end"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_calendar_event",
+            "description": (
+                "Update a Google Calendar event. Only the fields you pass are changed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id":    {"type": "string", "description": "The event id to update."},
+                    "calendar_id": {"type": "string", "description": "Calendar id. 'primary' by default.", "default": "primary"},
+                    "summary":     {"type": "string", "description": "New title.", "default": ""},
+                    "start":       {"type": "string", "description": "New start time (ISO-8601).", "default": ""},
+                    "end":         {"type": "string", "description": "New end time (ISO-8601).", "default": ""},
+                    "description": {"type": "string", "description": "New description.", "default": ""},
+                    "location":    {"type": "string", "description": "New location.", "default": ""},
+                    "attendees":   {"type": "array", "items": {"type": "string"}, "description": "New guest email addresses.", "default": []},
+                },
+                "required": ["event_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_calendar_event",
+            "description": "Delete a Google Calendar event.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id":    {"type": "string", "description": "The event id to delete."},
+                    "calendar_id": {"type": "string", "description": "Calendar id. 'primary' by default.", "default": "primary"},
+                },
+                "required": ["event_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_calendars",
+            "description": "List the Google Calendars the connected account can access.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
+    # ── Google Drive (plugin: google_drive) ──────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "list_drive_files",
+            "description": (
+                "List Google Drive files. 'query' uses Drive's query language, "
+                "e.g. \"name contains 'report' and trashed = false\"."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":     {"type": "string", "description": "Drive query string. Empty = all files.", "default": ""},
+                    "page_size": {"type": "integer", "description": "How many files to return (1-1000, default 25).", "default": 25},
+                    "order_by":  {"type": "string", "description": "Sort order, e.g. 'modifiedTime desc' or 'name'.", "default": "modifiedTime desc"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "upload_drive_file",
+            "description": "Upload a local file to Google Drive.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path":       {"type": "string", "description": "Path of the local file to upload."},
+                    "name":            {"type": "string", "description": "Name to store it under. Defaults to the file name.", "default": ""},
+                    "parent_folder_id": {"type": "string", "description": "Id of the Drive folder to upload into. Empty = My Drive.", "default": ""},
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "download_drive_file",
+            "description": (
+                "Download a Google Drive file to the device. "
+                "Without 'output_path' the file lands in workspace/downloads/."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_id":    {"type": "string", "description": "The Drive file id."},
+                    "output_path": {"type": "string", "description": "Where to save the file.", "default": ""},
+                },
+                "required": ["file_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_drive_file",
+            "description": "Delete a Google Drive file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_id": {"type": "string", "description": "The Drive file id."},
+                },
+                "required": ["file_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_drive_folder",
+            "description": "Create a folder in Google Drive.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name":             {"type": "string", "description": "Name of the folder."},
+                    "parent_folder_id": {"type": "string", "description": "Id of the parent folder. Empty = My Drive.", "default": ""},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "share_drive_file",
+            "description": "Share a Google Drive file with somebody by email.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_id":         {"type": "string", "description": "The Drive file id."},
+                    "email":           {"type": "string", "description": "Who to share it with."},
+                    "role":            {"type": "string", "enum": ["reader", "commenter", "writer"], "description": "Access level. Default 'reader'.", "default": "reader"},
+                    "permission_type": {"type": "string", "enum": ["user", "anyone"], "description": "Share with a person or with anyone who has the link. Default 'user'.", "default": "user"},
+                },
+                "required": ["file_id", "email"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_plugin",
+            "description": (
+                "Inspect and control Termux-AI plugins. Use this whenever the user "
+                "asks to turn a plugin on or off, asks whether a plugin is working, "
+                "or wants to connect Gmail, Google Calendar or Google Drive. "
+                "Actions: 'list' shows every plugin with its state, 'status' covers "
+                "one plugin, 'enable' turns a plugin on, 'disable' turns it off. "
+                "Enabling a plugin also starts whatever it needs to run (the "
+                "Termux-WP node gateway for WhatsApp) and puts its tools into my "
+                "tool context right away — so after 'enable' I can use them in the "
+                "same turn instead of asking the user to repeat the request. "
+                "For WhatsApp, 'setup' is the pairing step: the session is paired "
+                "by scanning a code, and that code is only ever drawn on the "
+                "user's screen when they ask for it — it is never printed on its "
+                "own. If the session is already linked, 'setup' stops the gateway "
+                "and switches the plugin off instead (a pairing code is only "
+                "wanted for a re-link), so say that before calling it. "
+                "Enabling an account plugin (gmail, google_calendar, google_drive) "
+                "is not enough on its own — the Google account must grant access "
+                "first. 'setup' (or 'enable') starts that permission request and "
+                "returns a URL the user has to open; after they confirm they "
+                "approved it, call the tool again with 'finish' to complete the "
+                "connection. 'disconnect' revokes the stored Google access. "
+                "If the user approves on another device, pass the copied redirect "
+                "URL as 'code' with action 'finish'. The Google OAuth client must "
+                "be of application type 'Desktop app'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "status", "enable", "disable", "setup",
+                                 "finish", "disconnect"],
+                        "description": "What to do. Default 'list'.",
+                        "default": "list",
+                    },
+                    "plugin": {
+                        "type": "string",
+                        "description": (
+                            "Plugin name: 'gmail', 'google_calendar', "
+                            "'google_drive' or 'whatsapp'. Required for every "
+                            "action except 'list'."
+                        ),
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": (
+                            "Optional: the redirect URL (or authorization code) "
+                            "the user copied from the browser after approving the "
+                            "request on another device. Used with action 'finish'."
+                        ),
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -941,6 +1640,55 @@ TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
+            "name": "retrieve_archive",
+            "description": (
+                "Retrieve the raw content of a compressed context segment by its "
+                "archive ID (e.g. 'A3'). When the context outgrew the model's "
+                "window, older reasoning details, tool calls and tool outputs "
+                "were replaced by a digest; this reads the original text back "
+                "so the work can continue from where it stopped. The content "
+                "is paged: pass offset/limit to read the next slice."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "archive_id": {
+                        "type": "string",
+                        "description": "The archive ID shown in the [Compressed context ...] marker, e.g. 'A3'."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Character offset to start reading from. Default 0.",
+                        "default": 0
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum characters to return. Default 20000.",
+                        "default": 20000
+                    }
+                },
+                "required": ["archive_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_archives",
+            "description": (
+                "List compressed context segments archived in this session, with "
+                "their IDs, sizes and one-line descriptions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_diagnosis",
             "description": "Run a system diagnosis to check battery, weather, storage, memory, network, and datetime info.",
             "parameters": {
@@ -954,7 +1702,15 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "delegate_subtask",
             "description": (
-                "Delegate a subtask to a sub-AI model and receive its structured report back. "
+                "Delegate a subtask to a sub-AI and receive its structured report back. "
+                "Pick the sub-AI by INTELLIGENCE LEVEL, not by model id: 'high' routes to "
+                "the largest reasoning-capable FREE models (Gemini 3.8 Flash, MiniMax "
+                "M3.1 Flash, Qwen3.8-27B, Nemotron 3.5 Super VL, Nemotron 3 Ultra, "
+                "Mistral Large 4), 'medium' to a step down "
+                "(GPT-OSS 120B, Poolside Laguna XS, Nemotron 3 Super, Gemma 4 31B), and "
+                "'low' to the cheap and fast end (Gemini 2.5 Flash, Gemini Flash-Lite, Gemma 4, "
+                "Cohere North Mini Code). Every route is free — no paid model is ever "
+                "used — and only tool-calling capable models are in the pool. "
                 "The sub-AI can use tools provided by the parent agent to gather information "
                 "and perform actions during task execution."
             ),
@@ -970,21 +1726,27 @@ TOOLS_DESCRIPTION = [
                         "description": "All background information, raw data, or snippets needed.",
                         "default": "",
                     },
-                    "model": {
+                    "intelligence": {
                         "type": "string",
-                        "description": "Sub-AI model to delegate the subtask to (e.g. 'cohere/north-mini-code:free', 'google/gemma-4-26b-a4b-it:free', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', 'openai/gpt-oss-120b'). Never use 'openrouter/free'.",
-                        "default": "cohere/north-mini-code:free",
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "description": "Maximum tokens the sub-AI may generate.",
-                        "default": 2048,
-                        "minimum": 256,
-                        "maximum": 8192,
+                        "enum": ["low", "medium", "high"],
+                        "description": (
+                            "Intelligence level of the sub-AI that runs the task. "
+                            "high = largest reasoning models for hard, multi-step work; "
+                            "medium = balanced models for normal engineering tasks; "
+                            "low = fastest/cheapest models for lookups, summaries and mechanical edits."
+                        ),
+                        "default": "medium",
                     },
                     "available_tools": {
                         "type": "array",
-                        "description": "List of tool names the sub-AI is allowed to use. If omitted, all available tools are provided.",
+                        "description": (
+                            "List of tool names the sub-AI is allowed to use. "
+                            "If omitted, the sub-AI gets the core delegation toolkit "
+                            "(shell, read_file, write_file, find_replace, list_directory, "
+                            "search_files, search_in_files, index_files, browse_web, "
+                            "http_request, get_datetime). Pass an explicit list to widen "
+                            "or narrow it."
+                        ),
                         "items": {"type": "string"},
                     },
                     "tool_call_iterations": {
@@ -1007,7 +1769,25 @@ TOOLS_DESCRIPTION = [
         "type": "function",
         "function": {
             "name": "generate_image",
-            "description": "Generate an image from a text prompt using Google Gemini native image generation.",
+            "description": (
+                "Generate an image from a text prompt. "
+                "Provider 'google' uses Gemini native image generation "
+                "(Nano Banana); provider 'nvidia' uses NVIDIA's free FLUX "
+                "endpoints; provider 'auto' tries Google first and falls back "
+                "to NVIDIA. The finished picture is attached to the reply so "
+                "a multimodal model can look at it. "
+                "NVIDIA models available on the hosted free API: "
+                "black-forest-labs/flux-3-image-klein, "
+                "black-forest-labs/flux.2-klein-4b, "
+                "black-forest-labs/flux.1-dev, "
+                "black-forest-labs/flux.1-schnell and "
+                "black-forest-labs/flux.1-kontext-dev (the last one edits an "
+                "input image). "
+                "NVIDIA also lists qwen/qwen-image, qwen/qwen-image-edit, "
+                "nvidia/qwen-image-edit-nvpcb-ovsl2sl and "
+                "stabilityai/stable-diffusion-3.5-large, but those are "
+                "self-hosted NIMs and are not served from the hosted API."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1018,12 +1798,94 @@ TOOLS_DESCRIPTION = [
                     "quality": {
                         "type": "string",
                         "enum": ["flash", "pro"],
-                        "description": "Quality tier. Default 'flash'.",
+                        "description": (
+                            "Quality tier. 'flash' is the fast distilled model, "
+                            "'pro' the highest-fidelity one. Default 'flash'."
+                        ),
                         "default": "flash",
                     },
                     "filename": {
                         "type": "string",
                         "description": "Base filename without extension.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["auto", "google", "nvidia"],
+                        "description": (
+                            "Which image backend to use. "
+                            "'auto' tries Google then NVIDIA. Default 'auto'."
+                        ),
+                        "default": "auto",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Pin an exact image model id, e.g. "
+                            "'gemini-3.1-flash-image-preview' or "
+                            "'black-forest-labs/flux.2-klein-4b'. "
+                            "Overrides provider/quality selection."
+                        ),
+                    },
+                    "width": {
+                        "type": "integer",
+                        "description": (
+                            "Output width in pixels. Every NVIDIA endpoint "
+                            "accepts only a fixed set of literals, so the "
+                            "value is snapped onto the model's grid "
+                            "(flux-3 / flux.2-klein: 512-1568 in steps of 16; "
+                            "flux.1-dev / schnell: 768-1344 in steps of 64; "
+                            "kontext: seventeen literals from 672 to 1568) "
+                            "and kept under the 1062400 pixel budget."
+                        ),
+                        "minimum": 64,
+                        "maximum": 4096,
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": (
+                            "Output height in pixels, snapped the same way as "
+                            "the width."
+                        ),
+                        "minimum": 64,
+                        "maximum": 4096,
+                    },
+                    "seed": {
+                        "type": "integer",
+                        "description": (
+                            "Random seed for reproducible output. "
+                            "0 (default) means random."
+                        ),
+                        "minimum": 0,
+                    },
+                    "steps": {
+                        "type": "integer",
+                        "description": (
+                            "Diffusion steps. NVIDIA models accept 1-50 "
+                            "(flux.2-klein-4b and flux.1-schnell: 1-4, "
+                            "flux.1-dev and kontext: 5-100); out-of-range "
+                            "values are clamped."
+                        ),
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "cfg_scale": {
+                        "type": "number",
+                        "description": (
+                            "Prompt adherence. NVIDIA models accept 1-20 "
+                            "(flux.2-klein-4b is capped at 1, flux.1-schnell "
+                            "at 1, flux.1-dev and kontext 1-9); out-of-range "
+                            "values are clamped."
+                        ),
+                        "minimum": 0,
+                        "maximum": 20,
+                    },
+                    "negative_prompt": {
+                        "type": "string",
+                        "description": (
+                            "What the image should avoid. Only the models "
+                            "that support it (flux-3-image-klein) use it; the "
+                            "others ignore it rather than failing."
+                        ),
                     },
                 },
                 "required": ["prompt"],
@@ -1572,13 +2434,15 @@ TOOLS_DESCRIPTION = [
 ]
 
 def log_write(msg: str) -> None:
-    try:
-        os.makedirs(paths.LOGS_DIR, exist_ok=True)
-        with open(paths.HISTORY_FILE, "a", encoding="utf-8") as f:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{ts}] {msg}\n")
-    except Exception:
-        pass
+    """Append a line to the live session log (``logs/log.txt``).
+
+    Every tool that wants to record what it is about to do calls this.  The
+    write is flushed immediately, so the log shows the call while it is still
+    running — not after the turn has finished.  That is what makes the log
+    useful for recovering a session that was cut short: the last line tells
+    you what the runtime was doing when it died.
+    """
+    runtime_log.log_line(f"[{runtime_log.stamp()}] {msg}")
 
 
 def wa_log_write(direction: str, sender_id: str, sender_name: str, message: str) -> None:
@@ -2100,13 +2964,17 @@ def _send_cdp(ws, method: str, params: dict | None = None, msg_id: int = 1, time
     return {"error": {"message": "timeout waiting for CDP response"}}
 
 
-def _wait_for_load(ws, timeout: float = 12.0, msg_id: int = 4) -> bool:
+def _wait_for_load(ws, timeout: float = 12.0, msg_id: int = 4) -> tuple:
     """
     Poll document.readyState until 'complete' or timeout.
 
     When the page is *already* 'complete' (typical after a click action where
     navigation hasn't been detected yet), the function briefly waits and re-checks
     so that a navigation triggered by the click is properly caught.
+
+    Returns ``(loaded, next_msg_id)``.  Every poll gets its own DevTools
+    message id: the protocol matches a response to its command by id, so
+    reusing one would let a command pick up somebody else's answer.
     """
     deadline = time.monotonic() + timeout
     was_complete = False
@@ -2116,24 +2984,25 @@ def _wait_for_load(ws, timeout: float = 12.0, msg_id: int = 4) -> bool:
             "expression": "document.readyState",
             "returnByValue": True
         }, msg_id)
+        msg_id += 1
         result = resp.get("result", {}).get("result", {})
         val = result.get("value", "loading")
         if val == "complete":
             if was_complete:
                 # Stayed complete throughout — page is stable
-                return True
+                return True, msg_id
             # First time seeing complete. Give a brief window for navigation
             # to start (click may have triggered a delayed navigation).
             was_complete = True
             if time.monotonic() > recheck_deadline:
-                return True
+                return True, msg_id
             time.sleep(0.2)
             continue
         else:
             was_complete = False
             recheck_deadline = time.monotonic() + 2.0
         time.sleep(0.3)
-    return False
+    return False, msg_id
 
 
 def _evaluate_js(ws, js: str, msg_id: int = 6, timeout: float = 10) -> tuple:
@@ -2152,7 +3021,15 @@ def _evaluate_js(ws, js: str, msg_id: int = 6, timeout: float = 10) -> tuple:
 
     if result_wrapper.get("exceptionDetails"):
         exc = result_wrapper.get("exceptionDetails", {})
-        return None, f"JS exception: {exc.get('text', 'unknown')}"
+        # "Uncaught" on its own tells nobody anything -- the real reason
+        # (SyntaxError, ReferenceError, ...) sits in the exception's
+        # description.
+        detail = ""
+        exception = exc.get("exception") or {}
+        if isinstance(exception, dict):
+            detail = exception.get("description") or exception.get("value") or ""
+        message = detail or exc.get("text", "unknown")
+        return None, f"JS exception: {message}"
 
     if result.get("type") == "string":
         return result.get("value", ""), None
@@ -2162,33 +3039,403 @@ def _evaluate_js(ws, js: str, msg_id: int = 6, timeout: float = 10) -> tuple:
 
 
 
-def _get_element_bounds(ws, selector: str, msg_id: int) -> tuple:
+def _locate_element(ws, selector: str, msg_id: int) -> dict:
     """
-    Get the bounding box of an element via CDP.
-    Returns (x, y, width, height) or (None, None, None, None) if not found.
+    Find an element in the live page and report where it actually is.
+
+    The element is scrolled into view *first*.  An element below the fold has
+    a rectangle that lies outside the viewport, and a click aimed at it lands
+    on nothing at all while still looking like it worked -- the tool would
+    report a click that never reached the button.
+
+    The rectangle is in CSS pixels relative to the viewport, which is exactly
+    the coordinate space the DevTools mouse events use, so no scroll offset
+    and no device-pixel scaling has to be applied to it.
+
+    Returns a dict:
+      found       -- the element exists on the page
+      hidden      -- it exists but is not rendered (display:none, visibility:hidden)
+      x, y        -- top-left corner of the element
+      width, height
+      vwidth, vheight -- the viewport size, or None if the page did not say
     """
-    safe_selector = selector.replace("'", "\\'")
+    # json.dumps gives a properly escaped JS string literal -- a selector
+    # containing a quote or a backslash would otherwise break the script.
     js = (
         "(function() {"
-        "var el = document.querySelector('" + safe_selector + "');"
-        "if (!el) return null;"
+        "var el = document.querySelector(" + json.dumps(selector) + ");"
+        "if (!el) return {found: false};"
+        "var cs = null;"
+        "try { cs = window.getComputedStyle(el); } catch (e) {}"
+        "if (cs && (cs.display === 'none' || cs.visibility === 'hidden'"
+        " || cs.visibility === 'collapse')) {"
+        "  return {found: true, hidden: true};"
+        "}"
+        "try { el.scrollIntoView({block: 'center', inline: 'center',"
+        " behavior: 'instant'}); }"
+        "catch (e) { try { el.scrollIntoView(); } catch (e2) {} }"
         "var rect = el.getBoundingClientRect();"
-        "return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};"
+        "if (!rect) return {found: true, hidden: true};"
+        "if (!rect.width && !rect.height) {"
+        "  return {found: true, hidden: true, x: rect.x, y: rect.y,"
+        "          width: rect.width, height: rect.height};"
+        "}"
+        "return {found: true, hidden: false, x: rect.x, y: rect.y,"
+        "        width: rect.width, height: rect.height,"
+        "        vwidth: window.innerWidth, vheight: window.innerHeight};"
         "})()"
     )
     result, err = _evaluate_js(ws, js, msg_id=msg_id)
     if err or result is None:
-        return (None, None, None, None)
+        return {"found": False}
     try:
-        # _evaluate_js returns JSON string for objects, parse it
         if isinstance(result, str):
-            import json
             result = json.loads(result)
-        return (float(result.get("x", 0)), float(result.get("y", 0)),
-                float(result.get("width", 0)), float(result.get("height", 0)))
+        # A page that has no such element answers with a null, which parses
+        # into None -- calling .get() on that would raise AttributeError and
+        # take the whole tool call down with it.
+        if not isinstance(result, dict):
+            return {"found": False}
     except (ValueError, TypeError, json.JSONDecodeError):
-        return (None, None, None, None)
+        return {"found": False}
 
+    # A payload without an explicit 'found' flag but carrying a rectangle
+    # still means the element was located.
+    if "found" in result:
+        found = bool(result.get("found"))
+    else:
+        found = (result.get("x") is not None
+                 or result.get("width") is not None)
+    info = {"found": found, "hidden": bool(result.get("hidden"))}
+    for key in ("x", "y", "width", "height", "vwidth", "vheight"):
+        value = result.get(key)
+        if value is None:
+            info[key] = None
+            continue
+        try:
+            info[key] = float(value)
+        except (ValueError, TypeError):
+            info[key] = None
+    return info
+
+
+def _get_element_bounds(ws, selector: str, msg_id: int) -> tuple:
+    """
+    Get the bounding box of an element via CDP.
+    Returns (x, y, width, height) or (None, None, None, None) if not found
+    or not visible.
+    """
+    info = _locate_element(ws, selector, msg_id)
+    if not info.get("found") or info.get("hidden"):
+        return (None, None, None, None)
+    return (info.get("x") or 0.0, info.get("y") or 0.0,
+            info.get("width") or 0.0, info.get("height") or 0.0)
+
+
+
+# ── ELEMENT DISCOVERY ─────────────────────────────────────────────────────────
+#
+# A model that can only click by coordinates has to guess where the button
+# is.  A model that can click by CSS selector has to guess the *selector*
+# instead -- and a wrong guess costs a tool round every single time.  The
+# page itself knows where its buttons are and what they are called, so the
+# page is asked.
+#
+# ``_enumerate_interactive()`` returns every visible clickable thing on the
+# page together with the label a human would read ("Submit"), a CSS
+# selector that is unique on that page, and the element's live rectangle.
+# A click can then be aimed by name or by the index from the listing, and
+# it is resolved against the live DOM at the moment the click happens --
+# no pixel guessing, no stale coordinates.
+
+_INTERACTIVE_SELECTOR = (
+    "button, a[href], input, textarea, select, [role=button], [role=link], "
+    "[role=checkbox], [role=radio], [role=tab], [role=menuitem], "
+    "[onclick], [contenteditable]"
+)
+
+_JS_ENUMERATE_INTERACTIVE = r"""
+(function () {
+  function q(v) {
+    return '"' + String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  }
+  function escIdent(v) {
+    try { if (window.CSS && CSS.escape) { return CSS.escape(v); } } catch (e) {}
+    return String(v).replace(/([^a-zA-Z0-9_-])/g, '\\$1');
+  }
+  function isUnique(sel) {
+    try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; }
+  }
+  function attrSel(tag, attr, value) {
+    return tag + '[' + attr + '=' + q(value) + ']';
+  }
+  function pathFor(el) {
+    var parts = [];
+    var node = el;
+    var depth = 0;
+    while (node && node.nodeType === 1 && depth < 12) {
+      var tag = node.tagName.toLowerCase();
+      var seg = tag;
+      var parent = node.parentElement;
+      if (parent) {
+        var same = 0, pos = 0;
+        for (var i = 0; i < parent.children.length; i++) {
+          if (parent.children[i].tagName === node.tagName) {
+            same++;
+            if (parent.children[i] === node) { pos = same; }
+          }
+        }
+        if (same > 1) { seg += ':nth-of-type(' + pos + ')'; }
+      }
+      parts.unshift(seg);
+      node = parent;
+      depth++;
+    }
+    return parts.join(' > ');
+  }
+  function selectorFor(el) {
+    var tag = el.tagName.toLowerCase();
+    var tries = [];
+    if (el.id) { tries.push('#' + escIdent(el.id)); }
+    var testid = el.getAttribute('data-testid') || el.getAttribute('data-test-id')
+              || el.getAttribute('data-cy') || el.getAttribute('data-qa');
+    if (testid) { tries.push(attrSel(tag, 'data-testid', testid)); }
+    var nm = el.getAttribute('name');
+    if (nm) { tries.push(attrSel(tag, 'name', nm)); }
+    var aria = el.getAttribute('aria-label');
+    if (aria) { tries.push(attrSel(tag, 'aria-label', aria)); }
+    tries.push(pathFor(el));
+    for (var i = 0; i < tries.length; i++) {
+      if (isUnique(tries[i])) { return tries[i]; }
+    }
+    return tries[tries.length - 1];
+  }
+  function labelFor(el) {
+    var parts = [];
+    var aria = el.getAttribute('aria-label');
+    if (aria) { parts.push(aria); }
+    var labelledby = el.getAttribute('aria-labelledby');
+    if (labelledby) {
+      try {
+        var ref = document.getElementById(labelledby);
+        if (ref) { parts.push((ref.innerText || ref.textContent || '').trim()); }
+      } catch (e) {}
+    }
+    if (!parts.length && el.tagName === 'INPUT') {
+      var fid = el.getAttribute('id');
+      if (fid) {
+        try {
+          var lab = document.querySelector('label[for=' + q(fid) + ']');
+          if (lab) { parts.push((lab.innerText || lab.textContent || '').trim()); }
+        } catch (e) {}
+      }
+    }
+    if (!parts.length && el.closest) {
+      var own = el.closest('label');
+      if (own) { parts.push((own.innerText || own.textContent || '').trim()); }
+    }
+    if (!parts.length) {
+      var text = (el.innerText || el.textContent || '').trim();
+      if (text) { parts.push(text); }
+    }
+    if (!parts.length) {
+      var val = el.getAttribute('value');
+      if (val) { parts.push(val); }
+    }
+    if (!parts.length) {
+      var ph = el.getAttribute('placeholder');
+      if (ph) { parts.push(ph); }
+    }
+    if (!parts.length) {
+      var title = el.getAttribute('title');
+      if (title) { parts.push(title); }
+    }
+    if (!parts.length) {
+      var alt = el.getAttribute('alt');
+      if (alt) { parts.push(alt); }
+    }
+    var label = parts.join(' ').replace(/\s+/g, ' ').trim();
+    if (label.length > 120) { label = label.slice(0, 117) + '...'; }
+    return label;
+  }
+  function isVisible(el) {
+    var cs = null;
+    try { cs = window.getComputedStyle(el); } catch (e) {}
+    if (cs) {
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') { return false; }
+      if (parseFloat(cs.opacity) === 0) { return false; }
+    }
+    var rect = el.getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) { return false; }
+    return true;
+  }
+  var out = [];
+  var nodes = document.querySelectorAll(__SELECTOR__);
+  for (var i = 0; i < nodes.length; i++) {
+    var el = nodes[i];
+    if (!isVisible(el)) { continue; }
+    var rect = el.getBoundingClientRect();
+    out.push({
+      tag: el.tagName.toLowerCase(),
+      type: el.getAttribute('type') || '',
+      role: el.getAttribute('role') || '',
+      name: labelFor(el),
+      selector: selectorFor(el),
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      cx: Math.round(rect.x + rect.width / 2),
+      cy: Math.round(rect.y + rect.height / 2),
+      in_viewport: (rect.bottom > 0 && rect.right > 0
+                    && rect.top < (window.innerHeight || 0)
+                    && rect.left < (window.innerWidth || 0))
+    });
+  }
+  return {elements: out, vwidth: window.innerWidth, vheight: window.innerHeight};
+})()
+"""
+
+
+def _enumerate_interactive(ws, msg_id: int) -> tuple[list[dict], int]:
+    """
+    Ask the live page which things on it can be clicked.
+
+    Returns ``(elements, next_msg_id)``.  Every element carries the label a
+    human would read, a CSS selector that is unique on this page, and its
+    live viewport rectangle.  Hidden elements are left out -- there is no
+    point offering a button nobody can see.
+    """
+    js = _JS_ENUMERATE_INTERACTIVE.replace(
+        "__SELECTOR__", json.dumps(_INTERACTIVE_SELECTOR))
+    result, err = _evaluate_js(ws, js, msg_id=msg_id)
+    if err or result is None:
+        return [], msg_id + 1
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (ValueError, TypeError):
+            return [], msg_id + 1
+    if not isinstance(result, dict):
+        return [], msg_id + 1
+
+    raw = result.get("elements")
+    elements: list[dict] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            selector = str(item.get("selector") or "").strip()
+            if not selector:
+                continue
+            elements.append({
+                "tag": str(item.get("tag") or ""),
+                "type": str(item.get("type") or ""),
+                "role": str(item.get("role") or ""),
+                "name": str(item.get("name") or ""),
+                "selector": selector,
+                "x": item.get("x"),
+                "y": item.get("y"),
+                "width": item.get("width"),
+                "height": item.get("height"),
+                "cx": item.get("cx"),
+                "cy": item.get("cy"),
+                "in_viewport": bool(item.get("in_viewport")),
+            })
+    return elements, msg_id + 1
+
+
+def _format_elements(elements: list[dict], query: str = "") -> str:
+    """Render the element listing the model acts on."""
+    if not elements:
+        if query:
+            return ("no interactive element matches " + repr(query)
+                    + " — try a shorter word, or a 'find' without a query")
+        return ("no interactive elements found on this page "
+                "(no visible buttons, links or form fields)")
+
+    lines = ["--- interactive elements (%d) ---" % len(elements)]
+    for i, el in enumerate(elements, 1):
+        label = el.get("name") or el.get("type") or el.get("role") or "(no label)"
+        bits = ["  [%d]" % i, el.get("tag") or "?"]
+        if el.get("type"):
+            bits.append("type=" + str(el["type"]))
+        if el.get("role"):
+            bits.append("role=" + str(el["role"]))
+        bits.append('"%s"' % str(label))
+        bits.append("selector=" + str(el.get("selector") or ""))
+        bits.append("at (%s, %s)" % (el.get("cx"), el.get("cy")))
+        if not el.get("in_viewport"):
+            bits.append("(outside the viewport — it is scrolled to on click)")
+        lines.append(" ".join(bits))
+    lines.append('Click one with {"type": "click", "index": N} '
+                 'or {"type": "click", "text": "<label>"} '
+                 'or {"type": "click", "selector": "<selector>"}.')
+    return "\n".join(lines)
+
+
+def _candidate_hint(elements: list[dict], limit: int = 8) -> str:
+    """One line naming what is actually on the page, for a failed lookup."""
+    if not elements:
+        return "no interactive elements were found on the page"
+    parts = []
+    for i, el in enumerate(elements[:limit], 1):
+        label = el.get("name") or el.get("type") or el.get("role") or "(no label)"
+        parts.append('[%d] %s "%s" (%s)' % (i, el.get("tag") or "?", label,
+                                            el.get("selector") or ""))
+    if len(elements) > limit:
+        parts.append("... and %d more" % (len(elements) - limit))
+    return "available: " + "; ".join(parts)
+
+
+def _match_element_by_text(elements: list[dict], needle: str) -> tuple:
+    """
+    Find the element a human would call *needle*.
+
+    Returns ``(element, status)``:
+
+      "exact"     -- one element carries exactly that label
+      "partial"   -- one element's label contains it
+      "ambiguous" -- several elements match; the element is None
+      "none"      -- nothing matched; the element is None
+
+    An ambiguous match is never resolved by guessing: clicking the wrong
+    button is worse than asking once more.
+    """
+    want = str(needle or "").strip().lower()
+    if not want:
+        return None, "none"
+
+    def label_of(el):
+        return str(el.get("name") or "").strip().lower()
+
+    exact = [el for el in elements if label_of(el) == want]
+    if len(exact) == 1:
+        return exact[0], "exact"
+    if len(exact) > 1:
+        return None, "ambiguous"
+
+    starts = [el for el in elements if label_of(el).startswith(want)]
+    if len(starts) == 1:
+        return starts[0], "partial"
+    if len(starts) > 1:
+        return None, "ambiguous"
+
+    contains = [el for el in elements if want in label_of(el)]
+    if len(contains) == 1:
+        return contains[0], "partial"
+    if len(contains) > 1:
+        return None, "ambiguous"
+
+    typed = [el for el in elements
+             if want == str(el.get("type") or "").strip().lower()
+             or want == str(el.get("role") or "").strip().lower()]
+    if len(typed) == 1:
+        return typed[0], "exact"
+    if len(typed) > 1:
+        return None, "ambiguous"
+
+    return None, "none"
 
 
 def _click_element(ws, x: float, y: float, msg_id: int) -> bool:
@@ -2223,57 +3470,280 @@ def _type_text(ws, text: str, msg_id: int) -> bool:
 
 def _perform_actions(ws, actions: list, start_msg_id: int) -> tuple:
     """
-    Perform a sequence of actions (click, wait, input).
-    Returns (success: bool, error_msg: str, final_msg_id: int).
+    Perform a sequence of actions (click, input, wait, scroll, press, select,
+    evaluate).
+
+    Returns ``(success, error_msg, final_msg_id, results)`` where *results*
+    is a list of human-readable strings -- one per action -- describing what
+    happened (e.g. the return value of an ``evaluate`` action).
     """
     msg_id = start_msg_id
+    results: list[str] = []
     for i, action in enumerate(actions):
         action_type = action.get("type", "click")
         selector = action.get("selector", "")
         wait_after = float(action.get("wait_after", 1.0))
-        
+
         if action_type == "click":
-            if not selector:
-                return (False, "Click action requires a selector", msg_id)
-            x, y, w, h = _get_element_bounds(ws, selector, msg_id)
-            if x is None or y is None:
-                return (False, f"Element not found for selector: {selector}", msg_id)
-            # Click at center of element
-            cx, cy = x + w / 2, y + h / 2
-            if not _click_element(ws, cx, cy, msg_id + 1):
-                return (False, f"Failed to click element: {selector}", msg_id)
+            # Four ways to aim a click, ordered by how much the caller has to
+            # know in advance:
+            #   x/y       -- raw viewport pixels ("click exactly there")
+            #   text      -- the visible label of the element ("click Submit")
+            #   index     -- a 1-based index from a 'find' listing
+            #   selector  -- a CSS selector, resolved against the live DOM
+            # The label and the index are resolved by asking the page what it
+            # actually has, so no coordinates are ever guessed.
+            x_coord = action.get("x")
+            y_coord = action.get("y")
+            label = str(action.get("text") or "").strip()
+            index = action.get("index")
+            if x_coord is not None and y_coord is not None:
+                cx, cy = float(x_coord), float(y_coord)
+            else:
+                if label or index is not None:
+                    elements, msg_id = _enumerate_interactive(ws, msg_id)
+                    if not elements:
+                        return (False,
+                                "no interactive elements found on the page"
+                                + (f" — nothing to click for {label!r}" if label else ""),
+                                msg_id, results)
+                    if index is not None:
+                        try:
+                            position = int(index)
+                        except (TypeError, ValueError):
+                            return (False,
+                                    f"click index {index!r} is not a number",
+                                    msg_id, results)
+                        if position < 1 or position > len(elements):
+                            return (False,
+                                    f"click index {position} is out of range — the "
+                                    f"listing is 1-based and holds {len(elements)} "
+                                    f"element(s). " + _candidate_hint(elements),
+                                    msg_id, results)
+                        chosen = elements[position - 1]
+                    else:
+                        chosen, status = _match_element_by_text(elements, label)
+                        if status == "ambiguous":
+                            return (False,
+                                    f"{label!r} matches several elements — pick one "
+                                    f"by index. " + _candidate_hint(elements),
+                                    msg_id, results)
+                        if chosen is None:
+                            return (False,
+                                    f"no element is labelled {label!r}. "
+                                    + _candidate_hint(elements),
+                                    msg_id, results)
+                    selector = str(chosen.get("selector") or selector)
+                if not selector:
+                    return (False,
+                            "Click action requires a selector, a label, an index "
+                            "or x/y coordinates",
+                            msg_id, results)
+                info = _locate_element(ws, selector, msg_id)
+                msg_id += 1  # the lookup used one id
+                if not info.get("found"):
+                    # Name what *is* on the page, so the next attempt is
+                    # informed instead of another blind guess.
+                    hints, msg_id = _enumerate_interactive(ws, msg_id)
+                    return (False,
+                            "Element not found for selector: " + str(selector)
+                            + ". " + _candidate_hint(hints),
+                            msg_id, results)
+                if info.get("hidden"):
+                    return (False, "Element is not visible on the page: " + str(selector),
+                            msg_id, results)
+                cx = (info.get("x") or 0.0) + (info.get("width") or 0.0) / 2
+                cy = (info.get("y") or 0.0) + (info.get("height") or 0.0) / 2
+                # The element was scrolled into view, so its centre ought to
+                # be inside the viewport.  When it is not, the click would
+                # land on empty space -- saying so is better than reporting
+                # a click that never reached anything.
+                vw, vh = info.get("vwidth"), info.get("vheight")
+                if vw and vh and not (0 <= cx <= vw and 0 <= cy <= vh):
+                    return (False,
+                            "Element is outside the viewport at ("
+                            + str(int(cx)) + ", " + str(int(cy)) + "): "
+                            + str(selector),
+                            msg_id, results)
+            # A click is two CDP commands (press + release), so it has to
+            # start at the current id -- starting one higher would reuse the
+            # release id for the next command.
+            if not _click_element(ws, cx, cy, msg_id):
+                label = " (selector=" + str(selector) + ")" if selector else ""
+                return (False, "Failed to click at (" + str(cx) + ", " + str(cy) + ")" + label,
+                        msg_id, results)
             msg_id += 2
-            # After clicking, give the browser a brief moment to start any
-            # navigation before polling readyState, so _wait_for_load can
-            # catch the loading->complete transition.
-            
+            label = " -- selector=" + selector if selector else ""
+            results.append("clicked at (" + str(int(cx)) + ", " + str(int(cy)) + ")" + label)
+
         elif action_type == "input":
+            # A field can be addressed by its visible label ("Email") as
+            # well as by a selector, so the model does not need to know the
+            # markup to fill a form in.
+            field_label = str(action.get("label") or "").strip()
+            if not selector and field_label:
+                elements, msg_id = _enumerate_interactive(ws, msg_id)
+                chosen, _status = _match_element_by_text(elements, field_label)
+                if chosen is None:
+                    return (False,
+                            f"no field is labelled {field_label!r}. "
+                            + _candidate_hint(elements),
+                            msg_id, results)
+                selector = str(chosen.get("selector") or "")
             if not selector:
-                return (False, "Input action requires a selector", msg_id)
-            # First click to focus
-            x, y, w, h = _get_element_bounds(ws, selector, msg_id)
-            if x is None or y is None:
-                return (False, f"Input element not found: {selector}", msg_id)
-            cx, cy = x + w / 2, y + h / 2
-            _click_element(ws, cx, cy, msg_id + 1)
+                return (False, "Input action requires a selector or a label",
+                        msg_id, results)
+            # First click to focus.  The lookup scrolls the field into view
+            # on the way, so the focus click lands on it even when the field
+            # is below the fold.
+            info = _locate_element(ws, selector, msg_id)
+            msg_id += 1  # the lookup used one id
+            if not info.get("found"):
+                return (False, "Input element not found: " + str(selector),
+                        msg_id, results)
+            if info.get("hidden"):
+                return (False,
+                        "Input element is not visible on the page: " + str(selector),
+                        msg_id, results)
+            cx = (info.get("x") or 0.0) + (info.get("width") or 0.0) / 2
+            cy = (info.get("y") or 0.0) + (info.get("height") or 0.0) / 2
+            # The focus click takes two ids (press + release), the typing
+            # starts right after them -- otherwise the two would share an id.
+            _click_element(ws, cx, cy, msg_id)
             # Type the text
             text = action.get("text", "")
             _type_text(ws, text, msg_id + 2)
             msg_id += 2 + len(text)
-            
+            results.append("typed into " + selector + ": " + repr(text))
+
         elif action_type == "wait":
             # Just wait
-            pass
-        
+            results.append("waited")
+
+        elif action_type == "scroll":
+            # Scroll the viewport: by a delta, to an absolute position, or to
+            # the very bottom/top of the document.
+            to = action.get("to")
+            amount = action.get("amount", action.get("delta", 600))
+            direction = str(action.get("direction", "down")).lower()
+            if to is not None:
+                try:
+                    js = "window.scrollTo(0, %d);" % int(float(to))
+                except (TypeError, ValueError):
+                    js = "window.scrollTo(0, 0);"
+            elif direction in ("bottom", "end"):
+                js = "window.scrollTo(0, document.body.scrollHeight);"
+            elif direction in ("top", "start"):
+                js = "window.scrollTo(0, 0);"
+            else:
+                try:
+                    delta = float(amount)
+                except (TypeError, ValueError):
+                    delta = 600.0
+                if direction == "up":
+                    delta = -abs(delta)
+                elif direction not in ("down", "bottom"):
+                    delta = abs(delta)
+                js = "window.scrollBy(0, %d);" % int(delta)
+            _evaluate_js(ws, js, msg_id=msg_id)
+            msg_id += 1
+            results.append("scrolled")
+
+        elif action_type == "press":
+            # Send a real key press (Enter, Tab, Escape, arrows, etc.)
+            key = str(action.get("key", "Enter"))
+            codes = {
+                "Enter": (13, "Enter", "\r"),
+                "Tab": (9, "Tab", ""),
+                "Escape": (27, "Escape", ""),
+                "Backspace": (8, "Backspace", ""),
+                "ArrowDown": (40, "ArrowDown", ""),
+                "ArrowUp": (38, "ArrowUp", ""),
+                "ArrowLeft": (37, "ArrowLeft", ""),
+                "ArrowRight": (39, "ArrowRight", ""),
+                "PageDown": (34, "PageDown", ""),
+                "PageUp": (33, "PageUp", ""),
+            }
+            vk, code, text = codes.get(key, (0, key, ""))
+            params = {
+                "type": "keyDown",
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+                "nativeVirtualKeyCode": vk,
+            }
+            if text:
+                params["text"] = text
+                params["unmodifiedText"] = text
+            _send_cdp(ws, "Input.dispatchKeyEvent", params, msg_id)
+            _send_cdp(ws, "Input.dispatchKeyEvent", {
+                "type": "keyUp", "key": key, "code": code,
+                "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk,
+            }, msg_id + 1)
+            msg_id += 2
+            results.append("pressed key: " + key)
+
+        elif action_type == "select":
+            # Choose an option in a <select> and fire its change event.
+            if not selector:
+                return (False, "Select action requires a selector", msg_id, results)
+            value = str(action.get("value", action.get("text", "")))
+            safe_selector = selector.replace("'", "\\'")
+            safe_value = value.replace("'", "\\'")
+            js = (
+                "(function(){var el=document.querySelector('" + safe_selector + "');"
+                "if(!el) return 'not found';"
+                "el.value='" + safe_value + "';"
+                "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                "return 'ok';})()"
+            )
+            result, err = _evaluate_js(ws, js, msg_id=msg_id)
+            msg_id += 1
+            if err:
+                results.append("select error: " + str(err))
+            else:
+                results.append("selected " + selector + " = " + value)
+
+        elif action_type == "evaluate":
+            # Run arbitrary JavaScript and surface the result.
+            expr = action.get("expression", "")
+            if not expr:
+                return (False,
+                        "Evaluate action requires an 'expression' field",
+                        msg_id, results)
+            result, err = _evaluate_js(ws, expr, msg_id=msg_id)
+            msg_id += 1
+            if err:
+                results.append("evaluate error: " + str(err))
+            else:
+                display = str(result) if result is not None else ""
+                if len(display) > 500:
+                    display = display[:500] + " ...[truncated]"
+                results.append("evaluate: " + display)
+
+        elif action_type in ("find", "elements", "inspect"):
+            # List what the page can be clicked.  The model picks a label or
+            # an index from the listing instead of guessing pixels.
+            query = str(action.get("query") or "").strip()
+            elements, msg_id = _enumerate_interactive(ws, msg_id)
+            if query:
+                needle = query.lower()
+                elements = [el for el in elements
+                            if needle in str(el.get("name") or "").lower()
+                            or needle in str(el.get("selector") or "").lower()
+                            or needle == str(el.get("type") or "").lower()
+                            or needle == str(el.get("role") or "").lower()]
+            results.append(_format_elements(elements, query))
+
         else:
-            return (False, f"Unknown action type: {action_type}", msg_id)
-        
+            return (False, "Unknown action type: " + str(action_type), msg_id, results)
+
         if wait_after > 0:
             time.sleep(wait_after)
             # Wait for any navigation/load triggered by the action
-            _wait_for_load(ws, timeout=10)
-    
-    return (True, "", msg_id)
+            _loaded, msg_id = _wait_for_load(ws, timeout=10, msg_id=msg_id)
+
+    return (True, "", msg_id, results)
 
 
 def _cleanup_chrome(proc) -> None:
@@ -2291,6 +3761,176 @@ def _cleanup_chrome(proc) -> None:
                     proc.wait(timeout=3)
                 except Exception:
                     pass
+
+
+# ── visibility filtering (used by the no-JS fallback) ─────────────────────────
+
+# Tags that never hold readable page text.
+_NON_TEXT_TAGS = (
+    "script", "style", "noscript", "template", "iframe", "object", "embed",
+    "canvas", "audio", "video", "map", "link", "meta",
+)
+
+# An inline style that takes the element out of the visible page.
+_HIDDEN_STYLE_RE = re.compile(
+    r"(?:^|;)\s*(?:display\s*:\s*none\b|visibility\s*:\s*(?:hidden|collapse)\b)",
+    re.I,
+)
+
+# A CSS rule: a selector list followed by a declaration block.
+_CSS_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.S)
+
+# A declaration block that hides whatever the rule selects.
+_HIDE_DECL_RE = re.compile(
+    r"(?:display\s*:\s*none\b|visibility\s*:\s*(?:hidden|collapse)\b)", re.I)
+
+
+def _hidden_css_selectors(css_text: str) -> list:
+    """Pull out the selectors of every rule that hides what it selects."""
+    selectors = []
+    for match in _CSS_RULE_RE.finditer(css_text or ""):
+        selector_text = match.group(1).strip()
+        declarations = match.group(2)
+        if not selector_text or not _HIDE_DECL_RE.search(declarations):
+            continue
+        # '@media ...' is a keyword, not a selector.  The rule regex above
+        # already peels the inner rule out of a media block, so whatever is
+        # left starting with '@' cannot be matched against the soup.
+        if selector_text.startswith("@"):
+            continue
+        selectors.append(selector_text)
+    return selectors
+
+
+def _drop_elements(elements) -> None:
+    """Remove a set of elements, skipping ones already taken apart."""
+    for element in elements:
+        try:
+            if getattr(element, "decomposed", False):
+                continue
+            element.decompose()
+        except Exception:
+            continue
+
+
+def _strip_hidden_content(soup, base_url: str = "", headers: dict = None) -> None:
+    """
+    Remove everything a sighted visitor would not see.
+
+    A page fetched without a browser still carries every translation, every
+    closed dialog and every collapsed menu in its markup, because the script
+    that hides them never ran.  Dumping that markup verbatim is how a scraper
+    ends up reporting six languages at once for a page that shows one.
+
+    Three kinds of hiding are handled:
+      * the ``hidden`` attribute,
+      * inline styles (``display:none`` / ``visibility:hidden``),
+      * stylesheet rules that hide the elements they select -- including
+        same-origin stylesheets linked from the page, because the class that
+        hides a translation is usually defined there and nowhere else.
+    """
+    # The stylesheets have to be read before the <style> tags are removed.
+    css_texts = [style.get_text() for style in soup.find_all("style")]
+    for link in soup.find_all("link"):
+        rel = link.get("rel") or []
+        if isinstance(rel, str):
+            rel = [rel]
+        if "stylesheet" not in [str(r).lower() for r in rel]:
+            continue
+        href = link.get("href")
+        if not href:
+            continue
+        url = urljoin(base_url, href) if base_url else href
+        if not url.startswith(("http://", "https://")):
+            continue
+        try:
+            response = requests.get(url, headers=headers or {}, timeout=6)
+            if response.status_code == 200:
+                css_texts.append(response.text)
+        except Exception:
+            continue
+
+    selectors = []
+    for css_text in css_texts:
+        selectors.extend(_hidden_css_selectors(css_text))
+
+    # Tags that are never page text.
+    _drop_elements(soup.find_all(_NON_TEXT_TAGS))
+    _drop_elements(soup.find_all(["nav", "footer", "header"]))
+
+    # The 'hidden' attribute.
+    _drop_elements(soup.find_all(attrs={"hidden": True}))
+
+    # Inline styles that hide the element.
+    for element in soup.find_all(style=True):
+        if _HIDDEN_STYLE_RE.search(element.get("style") or ""):
+            _drop_elements([element])
+
+    # Stylesheet rules that hide the elements they select.
+    for selector in selectors:
+        try:
+            matched = soup.select(selector)
+        except Exception:
+            continue
+        _drop_elements(matched)
+
+
+def _fallback_selector(el) -> str:
+    """A best-effort CSS selector for an element of a page fetched raw."""
+    if el.get("id"):
+        return "#" + str(el["id"])
+    name = el.get("name")
+    if name:
+        return '%s[name="%s"]' % (el.name, name)
+    classes = el.get("class")
+    if classes:
+        first = str(classes).split()[0]
+        return "%s.%s" % (el.name, first)
+    return str(el.name)
+
+
+def _fallback_label(el) -> str:
+    """The text a human would read for a raw element."""
+    text = el.get_text(separator=" ", strip=True)
+    if not text:
+        text = (el.get("value") or el.get("placeholder")
+                or el.get("aria-label") or el.get("title") or "")
+    return str(text).strip()[:80]
+
+
+def _fallback_interactive(soup) -> list:
+    """The clickable things in a page that was fetched without a browser."""
+    found = []
+    for el in soup.select("button, a[href], input, textarea, select, "
+                          "[role=button], [onclick]"):
+        if el.has_attr("disabled"):
+            continue
+        found.append({
+            "tag": str(el.name),
+            "text": _fallback_label(el),
+            "selector": _fallback_selector(el),
+        })
+    return found
+
+
+def _fallback_match_text(soup, label):
+    """Find a raw element by the label a human would read."""
+    want = str(label or "").strip().lower()
+    if not want:
+        return None
+    exact, partial = [], []
+    for el in soup.select("button, a[href], input, textarea, select, "
+                          "[role=button], [onclick]"):
+        text = _fallback_label(el).lower()
+        if text == want:
+            exact.append(el)
+        elif want in text:
+            partial.append(el)
+    if len(exact) == 1:
+        return exact[0]
+    if len(partial) == 1:
+        return partial[0]
+    return None
 
 
 def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000, actions: list = None) -> str:
@@ -2327,11 +3967,29 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
                 resp.raise_for_status()
                 soup = BeautifulSoup(resp.text, "html.parser")
 
+                if atype == "find":
+                    # List the clickable things, so a click can be aimed by
+                    # label instead of by guessed coordinates.
+                    elements = _fallback_interactive(soup)
+                    if not elements:
+                        action_notes.append("[interactive elements] none found")
+                    else:
+                        lines = ["[interactive elements]"]
+                        for idx, el in enumerate(elements, 1):
+                            lines.append('  [%d] %s "%s" (%s)' % (
+                                idx, el["tag"], el["text"], el["selector"]))
+                        action_notes.append("\n".join(lines))
+                    continue
+
                 if atype == "input":
                     # Find the input element and submit its enclosing form
-                    el = soup.select_one(aselect)
+                    el = soup.select_one(aselect) if aselect else None
+                    if el is None and action.get("label"):
+                        el = _fallback_match_text(soup, action.get("label"))
                     if el is None:
-                        action_notes.append(f"[WARNING] Input element not found: {aselect}")
+                        action_notes.append(
+                            f"[WARNING] Input element not found: "
+                            f"{aselect or action.get('label') or '(no target given)'}")
                         continue
                     # Look for an enclosing <form>
                     form = el.find_parent("form") if el else None
@@ -2377,9 +4035,13 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
 
                 if atype == "click":
                     # Try to follow links
-                    el = soup.select_one(aselect)
+                    el = soup.select_one(aselect) if aselect else None
+                    if el is None and atext:
+                        el = _fallback_match_text(soup, atext)
                     if el is None:
-                        action_notes.append(f"[WARNING] Click target not found: {aselect}")
+                        action_notes.append(
+                            f"[WARNING] Click target not found: "
+                            f"{aselect or repr(atext)}")
                         continue
 
                     # Check if it's a link or a button
@@ -2403,7 +4065,7 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
                         time.sleep(min(aw, 3.0))
                     continue
 
-                if atype not in ("click", "input", "wait"):
+                if atype not in ("click", "input", "wait", "find"):
                     action_notes.append(f"[WARNING] Unknown action type: {atype}")
 
         # Final fetch and extraction — use the last response from the actions loop
@@ -2417,8 +4079,10 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        for s in soup(["script", "style", "nav", "footer", "header"]):
-            s.decompose()
+        # Drop everything a visitor would not see before pulling the text
+        # out.  Without this the output contains every translation and every
+        # collapsed panel on the page, as if all of them were visible at once.
+        _strip_hidden_content(soup, base_url=url, headers=headers)
 
         if selector:
             target = soup.select(selector)
@@ -2436,39 +4100,178 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
         return f"[ERROR] Web scrape failed: {e}"
 
 
-def browse_web(url: str, selector: str = "", max_chars: int = 12000, actions: list = None) -> str:
+
+
+
+def _format_action_results(results: list[str]) -> str:
+    """Render per-action results as a readable block for the model."""
+    if not results:
+        return ""
+    lines = ["--- action results ---"]
+    for i, r in enumerate(results, 1):
+        lines.append("  " + str(i) + ". " + r)
+    return "\n".join(lines)
+
+# ── PERSISTENT BROWSER SESSIONS ──────────────────────────────────────────────
+# A browser session owns a Chromium process plus its DevTools websocket.  The
+# session outlives a single tool call, so the model can open a page, click
+# through it, and keep the same page state — the scroll position, the
+# cookies, and anything already typed into a form.
+#
+# Sessions are addressed by a short id ("b1", "b2", …) that the open call
+# returns and every later call has to pass back.
+
+_BROWSER_SESSIONS: dict[str, dict] = {}
+_BROWSER_SESSION_SEQ = 0
+_BROWSER_LOCK = threading.Lock()
+
+# A session nobody has touched for this long is reaped, so an abandoned
+# browser cannot leak a Chromium process forever.
+_BROWSER_IDLE_TIMEOUT = 300.0
+
+# Screenshots are downscaled before they reach the model: a full-resolution
+# PNG easily reaches a megabyte, which would eat a large slice of the
+# context window for no extra understanding.
+_SCREENSHOT_MAX_WIDTH = 1024
+_SCREENSHOT_MAX_HEIGHT = 1024
+_SCREENSHOT_QUALITY = 70
+
+# The browser keeps its profile directories and screenshots under the
+# project workspace: /tmp is not writable on Termux and does not exist on
+# Windows, so a hardcoded temp path is not portable.
+_BROWSER_DIR = os.path.join(paths.WORKSPACE_DIR, ".browser")
+_SCREENSHOT_DIR = os.path.join(paths.WORKSPACE_DIR, "screenshots")
+
+
+# ── IMAGE ATTACHMENTS (tool → model) ─────────────────────────────────────────
+# A tool cannot hand an image back through its normal string return value, so
+# tools that produce one (a browser screenshot, a generated image) queue it
+# here.  core/llm_client.py drains the queue after every tool call and
+# attaches the images to the next request — that is how a multimodal model
+# actually *sees* them.
+
+_IMAGE_ATTACHMENTS: list[dict] = []
+_IMAGE_ATTACHMENT_LOCK = threading.Lock()
+
+# path -> (mtime, data URI).  Screenshots are re-encoded for every request
+# that still references them, so the encoded form is cached.
+_IMAGE_DATA_URI_CACHE: dict[str, tuple] = {}
+
+
+def queue_image_attachment(path: str, label: str = "") -> str:
+    """Queue an image file so the next LLM request can include it.
+
+    Returns the absolute path that was queued, or "" when the file does not
+    exist (a missing screenshot must never break the tool call that produced
+    it).
     """
-    Fetch a URL and convert readable content into structured text.
+    if not path:
+        return ""
+    try:
+        if not os.path.isfile(path):
+            return ""
+        absolute = os.path.abspath(path)
+    except Exception:
+        return ""
+    with _IMAGE_ATTACHMENT_LOCK:
+        _IMAGE_ATTACHMENTS.append({
+            "path": absolute,
+            "label": label or os.path.basename(absolute),
+        })
+    return absolute
 
-    Uses a headless Chromium browser via the Chrome DevTools Protocol to
-    properly render JavaScript-heavy pages, single-page applications, and
-    dynamically loaded content. Supports CSS selectors to target specific
-    elements and a sequence of actions (click, wait, input) for interaction.
-    Falls back to requests+BeautifulSoup if Chromium is unavailable.
 
-    Args:
-        url:       The URL to fetch.
-        selector:  Optional CSS selector to target specific element(s) for extraction.
-        max_chars: Maximum characters of extracted text (default 12000, max 50000).
-        actions:   Optional list of actions to perform before extraction.
-                   Each action is a dict with:
-                   - type: "click" | "wait" | "input"
-                   - selector: CSS selector (required for click/input)
-                   - wait_after: seconds to wait after action (default 1.0)
-                   - text: text to type (required for input)
+def pop_image_attachments() -> list[dict]:
+    """Return and clear the queued image attachments."""
+    with _IMAGE_ATTACHMENT_LOCK:
+        pending = list(_IMAGE_ATTACHMENTS)
+        _IMAGE_ATTACHMENTS.clear()
+    return pending
+
+
+def image_to_data_uri(path: str, max_bytes: int = 900_000) -> str | None:
+    """Read an image file and return it as a base64 data URI.
+
+    A file above ``max_bytes`` is rejected instead of silently truncated: a
+    partial image is useless to the model and an unbounded one would blow
+    the context budget.
+
+    The result is cached, because the same screenshot is encoded again for
+    every request that still carries it in the history.
     """
-    max_chars = max(1000, min(50000, int(max_chars)))
+    try:
+        if not os.path.isfile(path):
+            return None
+        mtime = os.path.getmtime(path)
+    except Exception:
+        return None
 
-    chrome_path = _find_chrome()
-    if not chrome_path:
-        return _web_scrape_fallback(url, selector, max_chars, actions)
+    cached = _IMAGE_DATA_URI_CACHE.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
 
-    port = _find_free_port()
-    if not port:
-        return _web_scrape_fallback(url, selector, max_chars, actions)
+    try:
+        if os.path.getsize(path) > max_bytes:
+            return None
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    if raw[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif raw[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        mime = "image/jpeg"
+    uri = f"data:{mime};base64," + base64.b64encode(raw).decode()
 
-    user_data_dir = f'/tmp/orion_chrome_{port}_{os.getpid()}'
-    chrome_args = [
+    if len(_IMAGE_DATA_URI_CACHE) >= 16:
+        _IMAGE_DATA_URI_CACHE.clear()
+    _IMAGE_DATA_URI_CACHE[path] = (mtime, uri)
+    return uri
+
+
+def _browser_session_list() -> str:
+    """Human-readable list of the currently open browser sessions."""
+    with _BROWSER_LOCK:
+        sessions = list(_BROWSER_SESSIONS.values())
+    if not sessions:
+        return "No browser sessions are open."
+    lines = []
+    for s in sessions:
+        age = int(time.time() - s.get("last_used", time.time()))
+        lines.append(
+            f"  {s.get('id')}  url={s.get('url', '?')}  "
+            f"title={s.get('title', '?')!r}  idle={age}s  "
+            f"screenshots={s.get('screenshots', 0)}"
+        )
+    return "Open browser sessions:\n" + "\n".join(lines)
+
+
+def _browser_session_health(session: dict) -> dict:
+    """Probe whether a session's Chromium process is still alive."""
+    proc = session.get("proc")
+    alive = True
+    if proc is not None:
+        alive = proc.poll() is None
+    return {
+        "process_alive": alive,
+        "created": session.get("created", 0),
+        "last_used": session.get("last_used", 0),
+        "url": session.get("url", ""),
+        "title": session.get("title", ""),
+        "port": session.get("port", 0),
+        "screenshots": session.get("screenshots", 0),
+    }
+
+
+def _browser_launch_args(chrome_path: str, port: int, user_data_dir: str) -> list:
+    """Chromium command line for a headless, scriptable session."""
+    return [
         chrome_path,
         '--headless=new',
         '--no-sandbox',
@@ -2484,100 +4287,622 @@ def browse_web(url: str, selector: str = "", max_chars: int = 12000, actions: li
         '--disable-default-apps',
         '--hide-scrollbars',
         '--disable-features=PrivacySandboxSettings4',
+        '--window-size=1024,768',
         f'--remote-debugging-port={port}',
         '--remote-allow-origins=*',
         f'--user-data-dir={user_data_dir}',
         'about:blank',
     ]
 
-    proc = None
-    ws = None
+
+def _browser_update_state(session: dict) -> None:
+    """Refresh the session's cached URL and page title."""
+    ws = session.get("ws")
+    if not ws:
+        return
+    mid = session["msg_id"]
+    session["msg_id"] = mid + 1
+    js = ("(function(){return {url: location.href, "
+          "title: document.title};})()")
+    value, err = _evaluate_js(ws, js, msg_id=mid)
+    if err or not value:
+        return
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except (ValueError, TypeError):
+        return
+    if isinstance(data, dict):
+        session["url"] = data.get("url") or session.get("url", "")
+        session["title"] = data.get("title") or session.get("title", "")
+
+
+def _browser_extract_text(session: dict, selector: str = "") -> str:
+    """Pull the readable text out of the page, optionally via a selector."""
+    ws = session.get("ws")
+    if not ws:
+        return "[ERROR] Browser session has no DevTools connection."
+    mid = session["msg_id"]
+    session["msg_id"] = mid + 1
+    if selector:
+        safe_selector = selector.replace("'", "\\'")
+        js = (
+            f"(function() {{ var els = document.querySelectorAll('{safe_selector}');"
+            f"if (!els || els.length === 0) {{ return '[WARNING] Selector \"{safe_selector}\" matched no elements'; }}"
+            f"var texts = [];"
+            f"for (var i = 0; i < els.length; i++) {{"
+            f"  var el = els[i];"
+            f"  var t = el.innerText || el.textContent || '';"
+            # A form control's current value is not part of its text, so it
+            # has to be asked for separately — otherwise reading back a field
+            # the model just typed into returns nothing at all.
+            f"  if (el.value !== undefined && el.value !== null && el.value !== '') {{"
+            f"    t = (t ? t + '\\n' : '') + '[value: ' + el.value + ']';"
+            f"  }}"
+            f"  texts.push(t);"
+            f"}}"
+            f"return texts.join('\\n'); }})()"
+        )
+    else:
+        js = (
+            "(function() { var body = document.body;"
+            "if (!body) { return document.documentElement.innerText || document.documentElement.textContent || ''; }"
+            "return body.innerText || body.textContent || ''; }())"
+        )
+    text, err = _evaluate_js(ws, js, msg_id=mid)
+    if err:
+        return f"[ERROR] JS extraction failed: {err}"
+    return text if isinstance(text, str) else (str(text) if text else "")
+
+
+def _browser_extract_html(session: dict, selector: str = "") -> str:
+    """Pull the raw HTML from the live page, optionally via a selector.
+
+    Unlike ``_browser_extract_text`` (which normalises to readable text),
+    this returns ``outerHTML`` so the caller can see the actual DOM structure
+    -- tags, attributes, form values, data-* values, etc.
+    """
+    ws = session.get("ws")
+    if not ws:
+        return "[ERROR] Browser session has no DevTools connection."
+    mid = session["msg_id"]
+    session["msg_id"] = mid + 1
+    if selector:
+        safe_selector = selector.replace("'", "\\'")
+        js = (
+            "(function(){var els=document.querySelectorAll('" + safe_selector + "');"
+            + "if(!els||els.length===0){return '[WARNING] Selector \""
+            + safe_selector + "\" matched no elements';}"
+            + "var hs=[];for(var i=0;i<els.length;i++){hs.push(els[i].outerHTML);}"
+            # The newline has to survive as the two characters \n: a raw
+            # newline inside a JS string literal is a syntax error, which
+            # used to break every selector-scoped HTML extraction.
+            + "return hs.join('\\n');})()"
+        )
+    else:
+        js = "document.documentElement.outerHTML.toString()"
+    text, err = _evaluate_js(ws, js, msg_id=mid)
+    if err:
+        return f"[ERROR] HTML extraction failed: {err}"
+    return text if isinstance(text, str) else (str(text) if text else "")
+
+
+# Screenshots are only useful for the turn that captured them (and the few
+# turns after it), so the oldest ones are pruned instead of filling the
+# device storage.
+_SCREENSHOT_KEEP = 60
+
+
+def _prune_screenshots() -> None:
+    """Delete the oldest screenshots once the retention limit is exceeded."""
+    try:
+        entries = [
+            os.path.join(_SCREENSHOT_DIR, n)
+            for n in os.listdir(_SCREENSHOT_DIR)
+            if n.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+        ]
+    except OSError:
+        return
+    if len(entries) <= _SCREENSHOT_KEEP:
+        return
+    try:
+        entries.sort(key=os.path.getmtime)
+    except OSError:
+        return
+    for stale in entries[:len(entries) - _SCREENSHOT_KEEP]:
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+
+
+def _browser_screenshot(session: dict, label: str = "screenshot") -> str | None:
+    """Capture the current viewport and return the path of the saved file."""
+    ws = session.get("ws")
+    if not ws:
+        return None
+    mid = session["msg_id"]
+    session["msg_id"] = mid + 1
+    resp = _send_cdp(ws, "Page.captureScreenshot",
+                     {"format": "jpeg", "quality": _SCREENSHOT_QUALITY},
+                     mid, timeout=25)
+    data = resp.get("result", {}).get("data")
+    if not data:
+        return None
+    try:
+        raw = base64.b64decode(data)
+    except Exception:
+        return None
+    if not raw:
+        return None
+
+    os.makedirs(_SCREENSHOT_DIR, exist_ok=True)
+    safe_label = "".join(c for c in (label or "screenshot") if c.isalnum()
+                         or c in "-_") or "screenshot"
+    name = f"{safe_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    path = os.path.join(_SCREENSHOT_DIR, name + ".jpg")
+    _prune_screenshots()
+
+    # Downscale so the picture stays small enough to put in a prompt.
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        img.thumbnail((_SCREENSHOT_MAX_WIDTH, _SCREENSHOT_MAX_HEIGHT))
+        img.save(path, "JPEG", quality=_SCREENSHOT_QUALITY, optimize=True)
+    except Exception:
+        with open(path, "wb") as fh:
+            fh.write(raw)
+
+    session["screenshots"] = session.get("screenshots", 0) + 1
+    return path
+
+
+def _browser_destroy(session: dict) -> None:
+    """Tear a session down: close the socket, kill Chromium, drop the profile."""
+    ws = session.get("ws")
+    if ws:
+        try:
+            ws.close()
+        except Exception:
+            pass
+        session["ws"] = None
+    _cleanup_chrome(session.get("proc"))
+    session["proc"] = None
+    user_data_dir = session.get("user_data_dir")
+    if user_data_dir and os.path.exists(user_data_dir):
+        shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
+def _browser_close(browser_id: str) -> str:
+    """Close one browser session by id."""
+    if not browser_id:
+        return "[ERROR] browser(action='close') requires a browser_id."
+    with _BROWSER_LOCK:
+        session = _BROWSER_SESSIONS.pop(browser_id, None)
+    if not session:
+        return (f"[ERROR] No open browser session with id '{browser_id}'. "
+                "Call browser(action='list') to see the open sessions.")
+    _browser_destroy(session)
+    return f"Closed browser session '{browser_id}'."
+
+
+def _browser_close_all() -> None:
+    """Close every open session (used on interpreter shutdown)."""
+    with _BROWSER_LOCK:
+        sessions = list(_BROWSER_SESSIONS.values())
+        _BROWSER_SESSIONS.clear()
+    for session in sessions:
+        try:
+            _browser_destroy(session)
+        except Exception:
+            pass
+
+
+def _browser_reap_idle() -> None:
+    """Close sessions that have been idle for longer than the timeout."""
+    now = time.time()
+    stale = []
+    with _BROWSER_LOCK:
+        for bid, session in list(_BROWSER_SESSIONS.items()):
+            if now - session.get("last_used", now) > _BROWSER_IDLE_TIMEOUT:
+                stale.append(_BROWSER_SESSIONS.pop(bid))
+    for session in stale:
+        try:
+            _browser_destroy(session)
+        except Exception:
+            pass
+
+
+try:  # pragma: no cover - interpreter shutdown hook
+    import atexit as _atexit
+    _atexit.register(_browser_close_all)
+except Exception:
+    pass
+
+
+def _browser_get(browser_id: str) -> dict | None:
+    """Look up a live session, reaping it if Chromium died on its own."""
+    if not browser_id:
+        return None
+    with _BROWSER_LOCK:
+        session = _BROWSER_SESSIONS.get(browser_id)
+    if not session:
+        return None
+    proc = session.get("proc")
+    if proc is not None and proc.poll() is not None:
+        _browser_close(browser_id)
+        return None
+    session["last_used"] = time.time()
+    return session
+
+
+def _browser_start(url: str = "") -> tuple[dict | None, str]:
+    """Launch Chromium, attach to its tab and optionally navigate.
+
+    Returns ``(session, error_message)``; exactly one of the two is set.
+    """
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        return None, ("[ERROR] Chromium/Chrome was not found on this system. "
+                      "Install it (pkg install chromium) to use the browser tools.")
+    port = _find_free_port()
+    if not port:
+        return None, "[ERROR] Could not find a free TCP port for Chromium."
 
     try:
+        os.makedirs(_BROWSER_DIR, exist_ok=True)
+    except Exception as exc:
+        return None, f"[ERROR] Could not create the browser profile directory: {exc}"
+    user_data_dir = os.path.join(_BROWSER_DIR, f"session_{port}_{os.getpid()}")
+
+    proc = None
+    ws = None
+    try:
         proc = subprocess.Popen(
-            chrome_args,
+            _browser_launch_args(chrome_path, port, user_data_dir),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        if not _wait_for_port(port, timeout=20):
+            _cleanup_chrome(proc)
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+            return None, (f"[ERROR] Chrome did not start listening on port "
+                          f"{port} within 20s")
 
-        if not _wait_for_port(port, timeout=15):
-            if proc.poll() is not None:
-                return _web_scrape_fallback(url, selector, max_chars, actions)
-            return f"[ERROR] Chrome did not start listening on port {port} within 15s"
+        # The tab list can be empty for a moment right after the port opens
+        # (and the first entry is not always the page we want), so poll for
+        # a usable page target instead of failing on the first look.
+        tabs_json = []
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline:
+            try:
+                tabs_json = requests.get(
+                    f'http://127.0.0.1:{port}/json', timeout=8).json() or []
+            except Exception:
+                tabs_json = []
+            if any(t.get("webSocketDebuggerUrl") for t in tabs_json):
+                break
+            time.sleep(0.3)
 
-        tabs_json = requests.get(f'http://127.0.0.1:{port}/json', timeout=5).json()
-        if not tabs_json:
-            return "[ERROR] Chrome started but has no tabs"
-        tab_ws_url = tabs_json[0]['webSocketDebuggerUrl']
+        pages = [t for t in tabs_json if t.get("webSocketDebuggerUrl")]
+        if not pages:
+            _cleanup_chrome(proc)
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+            return None, "[ERROR] Chrome started but exposed no page target"
+        # Prefer a real "page" target over devtools/background entries.
+        pages.sort(key=lambda t: t.get("type") != "page")
 
-        try:
-            import websocket as _ws_module
-            ws = _ws_module.create_connection(tab_ws_url, timeout=30)
-        except ImportError:
-            return _web_scrape_fallback(url, selector, max_chars, actions)
+        import websocket as _ws_module
+        ws = _ws_module.create_connection(pages[0]['webSocketDebuggerUrl'],
+                                          timeout=30)
+    except ImportError:
+        _cleanup_chrome(proc)
+        shutil.rmtree(user_data_dir, ignore_errors=True)
+        return None, ("[ERROR] The browser tools need the 'websocket-client' "
+                      "package (pip install websocket-client).")
+    except Exception as exc:
+        _cleanup_chrome(proc)
+        shutil.rmtree(user_data_dir, ignore_errors=True)
+        return None, f"[ERROR] Could not start the browser: {exc}"
 
-        _send_cdp(ws, "Runtime.enable", {}, 1)
-        _send_cdp(ws, "Page.enable", {}, 2)
+    session = {
+        "id": "", "proc": proc, "port": port, "ws": ws,
+        "user_data_dir": user_data_dir, "url": url, "title": "",
+        "created": time.time(), "last_used": time.time(),
+        "msg_id": 4, "screenshots": 0,
+    }
+    _send_cdp(ws, "Runtime.enable", {}, 1)
+    _send_cdp(ws, "Page.enable", {}, 2)
 
-        nav = _send_cdp(ws, "Page.navigate", {"url": url}, 3)
+    if url:
+        nav = _send_cdp(ws, "Page.navigate", {"url": url}, session["msg_id"])
+        session["msg_id"] += 1
         if "error" in nav:
             err = nav.get("error", {})
             err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
-            return f"[ERROR] Navigation to {url} failed: {err_msg}"
+            _browser_destroy(session)
+            return None, f"[ERROR] Navigation to {url} failed: {err_msg}"
+        _loaded, session["msg_id"] = _wait_for_load(
+            ws, timeout=15, msg_id=session["msg_id"])
+        time.sleep(0.8)
 
-        _wait_for_load(ws, timeout=12)
+    _browser_update_state(session)
+    return session, ""
 
-        time.sleep(1.0)
 
-        # Perform actions if provided
+def _browser_header(session: dict, screenshot_path: str | None = None) -> str:
+    """The status line every browser result starts with."""
+    lines = [f"[Browser {session.get('id')}] {session.get('url') or 'about:blank'}"]
+    title = session.get("title")
+    if title:
+        lines[0] += f" — {title}"
+    if screenshot_path:
+        lines.append(f"[Screenshot saved to {screenshot_path} — "
+                     "attached to this reply as an image]")
+    return "\n".join(lines)
+
+
+def browser(
+    action: str = "open",
+    url: str = "",
+    browser_id: str = "",
+    selector: str = "",
+    actions: list | None = None,
+    max_chars: int = 12000,
+    screenshot: bool = True,
+    extract_html: bool = False,
+) -> str:
+    """Drive a persistent, reusable browser session.
+
+    A browser session is a real Chromium process that stays alive between
+    tool calls, so the model can open a page, click through it, and keep the
+    same page state.  The session is addressed by the short id returned by
+    the ``open`` action.
+
+    Actions:
+      * ``open``      -- launch a browser, navigate to ``url``, return the id.
+      * ``act``       -- run ``actions`` (click/input/wait/scroll/press/select/
+                        evaluate/find) in an existing session and return the new
+                        page state.  Click can target an element by its visible
+                        label (``text``), by its index in a ``find`` listing, by
+                        a CSS selector **or** by raw ``x``/``y`` viewport
+                        coordinates.  A ``find`` action lists the page's
+                        buttons, links and fields with their labels and
+                        ready-to-use selectors, so a click never has to guess
+                        a position.
+      * ``navigate``  -- load a new URL in an existing session.
+      * ``screenshot``-- capture the current viewport.
+      * ``state``     -- report URL, title, session health and page text.
+      * ``close``     -- terminate the browser and free its resources.
+      * ``list``      -- list the open sessions.
+
+    When ``screenshot`` is true the viewport is captured and the picture is
+    attached to the reply, so a multimodal model can look at the page.
+
+    When ``extract_html`` is true the raw ``outerHTML`` of the page (or of the
+    element matched by ``selector``) is also returned, so the model can see
+    the actual DOM structure, attributes and data-* values.
+    """
+    global _BROWSER_SESSION_SEQ
+
+    action = (action or "open").strip().lower()
+    max_chars = max(1000, min(50000, int(max_chars or 12000)))
+    selector = selector or ""
+
+    if action == "list":
+        return _browser_session_list()
+
+    if action == "open":
+        url = (url or "").strip()
+        if not url:
+            return "[ERROR] browser(action='open') requires a url."
+        session, err = _browser_start(url)
+        if not session:
+            return err
+        with _BROWSER_LOCK:
+            _BROWSER_SESSION_SEQ += 1
+            session["id"] = "b" + str(_BROWSER_SESSION_SEQ)
+            _BROWSER_SESSIONS[session["id"]] = session
+        action_results: list[str] = []
         if actions:
-            success, err_msg, msg_id = _perform_actions(ws, actions, 10)
-            if not success:
-                return f"[ERROR] Action failed: {err_msg}"
+            ok, msg, mid, action_results = _perform_actions(
+                session["ws"], actions, session["msg_id"])
+            session["msg_id"] = mid
+            if not ok:
+                return "[ERROR] Action failed: " + msg
+        _browser_update_state(session)
+        text = _browser_extract_text(session, selector)
+        shot = _browser_screenshot(session, label=session["id"]) if screenshot else None
+        if shot:
+            queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
+        if len(text) > max_chars:
+            text = text[:max_chars]
+        html_text = ""
+        if extract_html:
+            html_text = _browser_extract_html(session, selector)
+        out = (_browser_header(session, shot)
+               + "\n--- page text ---\n" + text
+               + ("\n--- page html ---\n" + html_text if extract_html else "")
+               + (_format_action_results(action_results) if action_results else "")
+               + ("\n[Keep using browser_id='" + session["id"]
+                  + "' to interact with this page.]"
+                  if session.get("id") else ""))
+        return out
+
+    if action in ("act", "interact", "navigate", "screenshot", "state", "close"):
+        if action == "close":
+            return _browser_close(browser_id)
+
+        session = _browser_get(browser_id)
+        if not session:
+            return ("[ERROR] No open browser session with id '" + str(browser_id)
+                    + "'. Use browser(action='open', url=...) first, or "
+                    "browser(action='list') to see the open sessions.")
+
+        action_results: list[str] = []
+
+        if action == "navigate":
+            url = (url or "").strip()
+            if not url:
+                return "[ERROR] browser(action='navigate') requires a url."
+            nav = _send_cdp(session["ws"], "Page.navigate", {"url": url},
+                            session["msg_id"])
+            session["msg_id"] += 1
+            if "error" in nav:
+                err = nav.get("error", {})
+                err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+                return "[ERROR] Navigation to " + url + " failed: " + err_msg
+            _wait_for_load(session["ws"], timeout=15)
+            time.sleep(0.6)
+
+        elif action == "screenshot":
+            shot = _browser_screenshot(session, label=browser_id)
+            if not shot:
+                return "[ERROR] Screenshot capture failed."
+            queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
+            return _browser_header(session, shot)
+
+        elif action == "state":
+            # Report session health, optionally with screenshot, text and HTML.
+            health = _browser_session_health(session)
+            lines = [
+                "session: " + str(session.get("id", "?")),
+                "process: " + ("alive" if health["process_alive"] else "DEAD"),
+                "url: " + str(health["url"] or "?"),
+                "title: " + str(health["title"] or "(untitled)"),
+                "port: " + str(health["port"]),
+                "screenshots taken: " + str(health["screenshots"]),
+            ]
+            from datetime import datetime as _dt
+            if health["created"]:
+                lines.append("created: " + _dt.fromtimestamp(health["created"]).isoformat())
+            if health["last_used"]:
+                lines.append("idle: " + str(int(time.time() - health["last_used"])) + "s ago")
+            if screenshot:
+                shot = _browser_screenshot(session, label=browser_id)
+                if shot:
+                    queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
+                    lines.append(_browser_header(session, shot))
+            text = _browser_extract_text(session, selector)
+            if len(text) > max_chars:
+                text = text[:max_chars]
+            lines.append("\n--- page text ---\n" + text)
+            if extract_html:
+                html_text = _browser_extract_html(session, selector)
+                lines.append("\n--- page html ---\n" + html_text)
+            return "\n".join(lines)
+
         else:
-            msg_id = 10
+            # act / interact: perform the actions, then show the updated
+            # page state.  The action results have to travel with the page
+            # text -- an evaluate action's return value lives there.
+            if not actions:
+                return ("[ERROR] browser(action='act') requires an actions list "
+                        "(click/input/wait/scroll/press/select/evaluate).")
+            ok, msg, mid, action_results = _perform_actions(
+                session["ws"], actions, session["msg_id"])
+            session["msg_id"] = mid
+            if not ok:
+                return "[ERROR] Action failed: " + msg
 
-        if selector:
-            safe_selector = selector.replace("'", "\\'")
-            js = (
-                f"(function() {{ var els = document.querySelectorAll('{safe_selector}');"
-                f"if (!els || els.length === 0) {{ return '[WARNING] Selector \"{safe_selector}\" matched no elements'; }}"
-                f"var texts = [];"
-                f"for (var i = 0; i < els.length; i++) {{ texts.push(els[i].innerText || els[i].textContent || ''); }}"
-                f"return texts.join('\\n'); }})()"
-            )
-        else:
-            js = (
-                "(function() { var body = document.body;"
-                "if (!body) { return document.documentElement.innerText || document.documentElement.textContent || ''; }"
-                "return body.innerText || body.textContent || ''; }())"
-            )
+        # The page state that 'act' and 'navigate' share: where the browser
+        # is now, what it says, and what the actions did.  Both actions end
+        # here -- falling out of the branch instead would report the action
+        # as unknown even though it had already been carried out.
+        _browser_update_state(session)
+        text = _browser_extract_text(session, selector)
+        shot = _browser_screenshot(session, label=browser_id) if screenshot else None
+        if shot:
+            queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
+        if len(text) > max_chars:
+            text = text[:max_chars]
+        html_text = ""
+        if extract_html:
+            html_text = _browser_extract_html(session, selector)
+        return (_browser_header(session, shot)
+                + "\n--- page text ---\n" + text
+                + ("\n--- page html ---\n" + html_text if extract_html else "")
+                + (_format_action_results(action_results) if action_results else ""))
 
-        text, err = _evaluate_js(ws, js, msg_id=msg_id)
+    return ("[ERROR] Unknown browser action '" + str(action) + "'. "
+            "Use one of: open, act, navigate, screenshot, state, close, list.")
 
-        if err:
-            return f"[ERROR] JS extraction failed: {err}"
+def browse_web(url: str, selector: str = "", max_chars: int = 12000,
+               actions: list = None, screenshot: bool = True,
+               extract_html: bool = False) -> str:
+    """
+    Fetch a URL and convert readable content into structured text.
 
-        if not isinstance(text, str):
-            text = str(text) if text else ""
+    Uses a headless Chromium browser via the Chrome DevTools Protocol to
+    properly render JavaScript-heavy pages, single-page applications, and
+    dynamically loaded content. Supports CSS selectors to target specific
+    elements and a sequence of actions (click, wait, input, scroll, press,
+    select, evaluate, find) for interaction.  The ``find`` action lists the
+    page's clickable elements with their labels and ready-to-use selectors, so
+    a click can be aimed by name or by index instead of by guessed
+    coordinates. Falls back to requests+BeautifulSoup if
+    Chromium is unavailable.
 
+    The browser is closed again when the call finishes.  To keep a page
+    alive across calls — and to click through it step by step — use the
+    ``browser`` tool instead, which hands back a session id.
+
+    Args:
+        url:          The URL to fetch.
+        selector:     Optional CSS selector to target specific element(s).
+        max_chars:    Maximum characters of extracted text (default 12000).
+        actions:      Optional list of actions to perform before extraction.
+        screenshot:   Capture the viewport and attach it to the reply so a
+                      multimodal model can look at the page (default True).
+        extract_html: Also return the raw outerHTML of the page or matched
+                      element(s) so the model can see the DOM structure
+                      (default False).
+    """
+    max_chars = max(1000, min(50000, int(max_chars or 12000)))
+
+    session, err = _browser_start((url or "").strip())
+    if not session:
+        # Chromium is unavailable or refused to start: fall back to the
+        # plain HTTP scraper rather than failing the call outright.
+        return _web_scrape_fallback(url, selector, max_chars, actions)
+
+    try:
+        action_results: list[str] = []
+        if actions:
+            ok, msg, mid, action_results = _perform_actions(
+                session["ws"], actions, session["msg_id"])
+            session["msg_id"] = mid
+            if not ok:
+                return f"[ERROR] Action failed: {msg}"
+
+        _browser_update_state(session)
+        text = _browser_extract_text(session, selector)
         if len(text) > max_chars:
             text = text[:max_chars]
 
-        return text
+        shot = _browser_screenshot(session, label="browse") if screenshot else None
+        if shot:
+            queue_image_attachment(shot, f"screenshot of {url}")
 
-    except Exception as e:
-        return f"[ERROR] Browse web failed: {e}"
+        html_text = ""
+        if extract_html:
+            html_text = _browser_extract_html(session, selector)
+
+        header = f"[{session.get('title') or url}] {session.get('url') or url}"
+        if shot:
+            header += (f"\n[Screenshot saved to {shot} — attached to this "
+                       "reply as an image]")
+        out = f"{header}\n--- page text ---\n{text}"
+        if extract_html:
+            out += f"\n--- page html ---\n{html_text}"
+        if action_results:
+            out += _format_action_results(action_results)
+        return out
+    except Exception as exc:
+        return f"[ERROR] Browse web failed: {exc}"
     finally:
-        if ws:
-            try:
-                ws.close()
-            except Exception:
-                pass
-        _cleanup_chrome(proc)
-        if os.path.exists(user_data_dir):
-            shutil.rmtree(user_data_dir, ignore_errors=True)
+        _browser_destroy(session)
 
 
 # ── SUB-AI DELEGATION ──────────────────────────────────────────────────────────
@@ -2594,28 +4919,130 @@ Rules:
 - Do not pad your response with pleasantries or meta-commentary.
 """
 
-# Fallback model list for delegate_subtask.  Populated lazily from
-# core.models.AGENT_MODEL_SLOTS so it stays in sync with the canonical
-# model registry.  ``base_url`` is resolved from ``PROVIDERS``.
-_DELEGATE_MODELS: list[dict] = []
+# The sub-AI is selected by *intelligence level*, not by model id.  The routing
+# table lives in core/models.py (SUBAGENT_TIERS); every model in it was verified
+# live to accept a `tools` payload and answer with a tool call, so the sub-AI
+# can always use the tools it is given.
+#
+# Output-budget handling — the delegate tool deliberately has no max_tokens
+# argument any more, because a caller-chosen cap silently cuts a long answer
+# in the middle.  Instead:
+#   * a route whose provider is happy without the field does not send it
+#     (Google, NVIDIA and Ollama were verified to answer until they are
+#     done — finish_reason "stop" — when the field is missing),
+#   * a route that needs the field sends the ceiling registered for it in
+#     core/models.py (Groq silently truncates at 3072 tokens when the field
+#     is missing; OpenRouter's credit check rejects requests without it),
+#   * when OpenRouter answers "requires more credits, or fewer max_tokens",
+#     the ceiling is halved and the same route is retried,
+#   * and a truncated answer is never thrown away: the partial content is
+#     carried into the next model with a "continue" instruction.
+_SUBAGENT_REQUEST_TIMEOUT = 240.0     # seconds allowed for one provider call
+_SUBAGENT_MIN_OUTPUT_BUDGET = 1024    # never shrink the ceiling below this
+_SUBAGENT_MAX_BUDGET_HALVINGS = 4     # retries for a "budget too large" error
+_SUBAGENT_MAX_TOOL_RESULT = 10000     # characters of a tool result kept in context
+
+# The toolkit a delegated sub-AI gets when the caller does not name one.
+#
+# Advertising every tool of the system (73 schemas, ~46 KB of JSON) pushes
+# several providers over their request-size limit before the sub-AI even reads
+# the task — Groq answers "413 Request too large ... on tokens per minute" and
+# OpenRouter charges for the schema on every round.  This core set covers the
+# work a delegated subtask actually needs (files, shell, web, HTTP) and costs
+# ~12 KB.  A caller that wants a wider set passes it explicitly through
+# available_tools.
+_SUBAGENT_DEFAULT_TOOLS: list[str] = [
+    "shell", "read_file", "write_file", "find_replace",
+    "list_directory", "search_files", "search_in_files", "index_files",
+    "browse_web", "http_request", "get_datetime",
+]
 
 
-def _ensure_delegate_models() -> None:
-    """Lazily populate ``_DELEGATE_MODELS`` from core.models."""
-    if _DELEGATE_MODELS:
-        return
-    try:
-        from core.models import PROVIDERS, AGENT_MODEL_SLOTS
-    except Exception:
-        from llm_client import PROVIDERS, AGENT_MODEL_SLOTS
-    _DELEGATE_MODELS.extend(
-        {
-            "provider_id": slot["provider_id"],
-            "name": slot["name"],
-            "base_url": PROVIDERS[slot["provider_id"]]["base_url"],
-            "max_tokens": slot.get("max_tokens"),
-        }
-        for slot in AGENT_MODEL_SLOTS
+def _delegate_request_kwargs(entry: dict, messages: list[dict], budget: int | None) -> dict:
+    """Build the provider-specific request payload for one sub-AI route."""
+    pid = entry["provider_id"]
+    kwargs: dict = {"model": entry["name"], "messages": messages}
+    if budget:
+        kwargs["max_tokens"] = budget
+    if entry.get("reasoning"):
+        if pid == "openrouter":
+            # Reasoning runs but stays in the provider's own reasoning fields,
+            # which is also what makes the cross-model reasoning carry work.
+            kwargs["extra_body"] = {"reasoning": {"enabled": True}}
+        elif pid == "nvidia":
+            # NVIDIA gates the Nemotron/GLM reasoning models on this flag.
+            kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": True}}
+        elif pid in ("groq", "ollama", "ollama-local"):
+            kwargs["reasoning_effort"] = "high"
+    return kwargs
+
+
+def _is_output_budget_error(exc: Exception) -> bool:
+    """True when the provider refused the request because the output ceiling
+    was too large for the account (OpenRouter's credit check)."""
+    text = str(exc)
+    return "402" in text and ("max_tokens" in text or "credit" in text.lower())
+
+
+def _is_empty_balance_error(exc: Exception) -> bool:
+    """True when the account has no credit left at all.
+
+    OpenRouter's credit check answers "You requested up to N tokens, but your
+    balance is only $0.00" in that case — no smaller budget will ever be
+    accepted, so the route must be abandoned instead of burning one request
+    per halving on it.
+    """
+    text = str(exc).lower()
+    if "insufficient credits" in text:
+        return True
+    # "$0" / "$0.00" — but not "$0.02": a small balance can still be made to
+    # fit by halving the requested output ceiling.
+    return re.search(r"balance is only \$0(?:\.0+)?(?![.\d])", text) is not None
+
+
+def _is_restricted_key_error(exc: Exception) -> bool:
+    """True when *this key's* organization is blocked (not the whole provider).
+
+    Groq answers "Organization has been restricted" when the organization that
+    owns the key is restricted.  The restriction belongs to the key, not to the
+    provider: probing all five configured Groq keys live on 2026-10-30 showed
+    four of them restricted while the fifth answered normally.  Blocking the
+    whole provider on this error would throw away the one key that works, so
+    only the offending key is retired.
+    """
+    text = str(exc).lower()
+    return "organization has been restricted" in text
+
+
+def _next_free_route(rotation: list[dict], ind: int) -> int | None:
+    """Index of the next route that works without paid credits.
+
+    Used when a paid route is refused for lack of credit: walking through the
+    remaining paid routes of the same provider would only repeat the refusal.
+    """
+    for offset in range(1, len(rotation)):
+        candidate = rotation[(ind + offset) % len(rotation)]
+        if candidate.get("free"):
+            return (ind + offset) % len(rotation)
+    return None
+
+
+def _cap_sub_tool_result(text: str, limit: int = _SUBAGENT_MAX_TOOL_RESULT) -> str:
+    """Shorten a tool result before it goes back into the sub-AI's context.
+
+    A delegated worker has no context compressor, and a provider refuses a
+    request that is too large ("Request too large for model ...").  The head
+    and the tail of the result are kept: the head carries the beginning of
+    the data, the tail usually carries the summary line the worker needs.
+    """
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    head = int(limit * 0.7)
+    tail = limit - head
+    return (
+        text[:head]
+        + f"\n\n... [tool result truncated: {len(text) - limit} characters omitted] ...\n\n"
+        + text[-tail:]
     )
 
 
@@ -2640,16 +5067,86 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
     return f"[TOOL ERROR] Tool '{name}' is not supported in the sub-AI delegation environment."
 
 
+def _delegate_reasoning_text(reasoning, reasoning_details) -> str:
+    """Flatten a sub-AI's reasoning into printable text.
+
+    OpenRouter reports chain-of-thought as ``reasoning_details`` (a list of
+    typed blocks) and leaves ``reasoning`` empty, so reading only the plain
+    field hid the sub-AI's thinking completely — it reached the log but never
+    reached the screen.  The main agent's display already handles both
+    shapes; this is the same flattening for the delegation path.
+    """
+    if reasoning:
+        text = str(reasoning).strip()
+        if text:
+            return text
+    if isinstance(reasoning_details, list):
+        parts = []
+        for item in reasoning_details:
+            if isinstance(item, dict):
+                chunk = (item.get("text") or item.get("summary")
+                         or item.get("content") or "")
+                if chunk:
+                    parts.append(str(chunk))
+            elif item:
+                parts.append(str(item))
+        return "\n".join(parts).strip()
+    if reasoning_details:
+        return str(reasoning_details).strip()
+    return ""
+
+
+def _print_delegate_request(
+    task: str,
+    context: str,
+    level: str,
+    tools: list[str],
+    iterations: int,
+    system_prompt: str | None,
+) -> None:
+    """Print the manager's full delegation command.
+
+    In the collapsed view only the one-line ``[DELEGATE]`` header is shown.
+    In the expanded view the whole command is printed — the task, the context
+    the manager supplied, the tools the sub-AI may use, the iteration budget
+    and the system prompt — so nothing about the hand-over is hidden.
+    """
+    def _block(label: str, text: str) -> None:
+        if not text:
+            return
+        print(f"{GRAY}[DELEGATE {label}]{RESET}")
+        for line in str(text).splitlines():
+            # A blank line stays blank — padding it would leave trailing
+            # whitespace on the terminal.
+            print(f"{GRAY}    {line}{RESET}" if line.strip() else "")
+
+    print(f"{GRAY}[DELEGATE COMMAND] intelligence={level} "
+          f"iterations={iterations}{RESET}")
+    _block("TASK", task)
+    _block("CONTEXT", context)
+    if tools:
+        print(f"{GRAY}[DELEGATE TOOLS] {', '.join(tools)}{RESET}")
+    else:
+        print(f"{GRAY}[DELEGATE TOOLS] (none — text-only sub-AI){RESET}")
+    _block("SYSTEM PROMPT", system_prompt or "")
+
+
 def delegate_subtask(
     task: str,
     context: str = "",
-    model: str = "cohere/north-mini-code:free",
-    max_tokens: int = 2048,
+    intelligence: str = "medium",
     available_tools: list[str] | None = None,
     tool_call_iterations: int = 5,
     system_prompt: str | None = None,
 ) -> str:
-    """Delegate a subtask to a sub-AI, with reasoning-preserving failover.
+    """Delegate a subtask to a sub-AI, routed by intelligence level.
+
+    The caller picks an *intelligence level* ("high", "medium" or "low")
+    instead of a model id; core/models.py maps that level onto a list of
+    tool-calling capable models, ordered by capability.  The first model of
+    the tier that answers wins; when a model fails the rotation moves on to
+    the next one, and when the whole tier is exhausted it degrades to the
+    tiers below it before it ever climbs back up.
 
     When an OpenRouter model produces reasoning (chain-of-thought) but the
     response is truncated or the call fails, the reasoning is carried to the
@@ -2663,73 +5160,63 @@ def delegate_subtask(
     Args:
         task: Task description (imperative instruction).
         context: Optional background information.
-        model: Target model ID (e.g. "cohere/north-mini-code:free").
-        max_tokens: Max tokens for generation (256-8192).
+        intelligence: "high", "medium" or "low" — which tier of sub-AI models
+            runs the task.  Unknown values fall back to the default tier.
         available_tools: List of tool names the sub-AI is allowed to use.
-            If None, all tools from TOOLS_DESCRIPTION are provided.
-            If empty list, no tools are provided (text-only).
+            If None, the core delegation toolkit (``_SUBAGENT_DEFAULT_TOOLS``)
+            is provided — the full tool set is far too large for several
+            providers' request limits.  If empty list, no tools are provided
+            (text-only).
         tool_call_iterations: Max tool-calling rounds (0 disables tools).
         system_prompt: Override for the sub-AI system prompt.
     """
-    log_write(f"[delegate_subtask] model:{model} max_tokens:{max_tokens} task:{task[:80]}")
-    print(f"{GRAY}[DELEGATE] → {model} | {task[:72]}{'...' if len(task) > 72 else ''}{RESET}")
+    level = normalize_intelligence_level(intelligence)
+    # The expanded/collapsed preference decides how much of the delegation
+    # is shown on screen.  It is read once here so the whole delegation
+    # (request, sub-AI tool calls, their results, the final report) is
+    # rendered consistently.
+    expanded = display_state.is_expanded()
+    log_write(f"[delegate_subtask] intelligence:{level} task:{task[:80]}")
+    print(f"{GRAY}[DELEGATE] → {level} | {task[:72]}{'...' if len(task) > 72 else ''}{RESET}")
 
-    max_tokens = max(256, min(8192, int(max_tokens)))
     tool_call_iterations = max(0, int(tool_call_iterations))
 
     user_message = f"## Task\n{task.strip()}"
     if context and context.strip():
         user_message += f"\n\n## Context\n{context.strip()}"
 
-    def _infer_provider(m: str) -> tuple[str, str]:
-        # Base URLs come from core/models.py PROVIDERS — the single source of
-        # truth.  Hardcoding them here silently diverged from the provider
-        # table (e.g. the Ollama cloud endpoint fix).
-        if (
-            m.startswith("openrouter")
-            or m.startswith("cohere/")
-            or m.startswith("google/")
-            or m.startswith("nvidia/")
-            or m.startswith("poolside/")
-            or m.startswith("thinkingmachines/")
-            or m.startswith("z-ai/")
-            or m.startswith("minimax/")
-            or m.startswith("inclusionai/")
-            or m.startswith("liquid/")
-            or m.startswith("deepseek/")
-            or m.startswith("qwen/")
-            or "/" in m
-        ):
-            pid = "openrouter"
-        elif m.startswith("gemini") or m.startswith("gemma"):
-            pid = "google"
-        elif "llama" in m or "mixtral" in m or "qwen" in m or "gpt" in m:
-            pid = "groq"
-        elif "nvidia" in m or "nemotron" in m or "deepseek" in m:
-            pid = "nvidia"
-        else:
-            pid = "google"
-        return pid, PROVIDERS[pid]["base_url"]
-
-    primary_pid, primary_url = _infer_provider(model)
     from llm_client import API_KEYS, _sanitize_messages_for_provider
-    _ensure_delegate_models()
+
+    # Build the rotation: every model of the requested tier first, then the
+    # tiers below it (degrade).  The ladder never climbs — a "medium" request
+    # must not be served by a frontier model the caller did not ask for.  Each
+    # model is tried with the provider's own keys before moving on.
     rotation: list[dict] = []
-    for k in API_KEYS.get(primary_pid, []):
-        rotation.append({"key": k, "model": model, "base_url": primary_url, "pid": primary_pid})
-    for slot in _DELEGATE_MODELS:
-        pid = slot["provider_id"]
-        fb_model = slot["name"]
-        if fb_model == model: continue
+    for entry in get_subagent_rotation(level):
+        pid = entry["provider_id"]
+        base_url = PROVIDERS.get(pid, {}).get("base_url")
+        if not base_url:
+            continue
         for k in API_KEYS.get(pid, []):
-            rotation.append({"key": k, "model": fb_model, "base_url": slot["base_url"], "pid": pid})
+            route = dict(entry)
+            route.update({"key": k, "base_url": base_url, "pid": pid})
+            rotation.append(route)
 
     if not rotation:
         return "[ERROR] No API keys configured for any sub-AI provider."
 
     ind = 0
     attempts = 0
-    max_attempts = len(rotation) * 2
+    max_attempts = len(rotation)
+    # Keys whose organization is blocked (e.g. Groq's "Organization has been
+    # restricted").  The refusal belongs to the key, not to the provider, so
+    # only that key is retired — the other keys of the same provider still get
+    # their turn.
+    blocked_keys: set[tuple[str, str]] = set()
+    # Output ceiling learned per provider: when an account refuses a budget,
+    # the next key of the same provider starts lower instead of rediscovering
+    # the same refusal.
+    provider_budget_ceiling: dict[str, int] = {}
 
     sys_p = system_prompt if system_prompt is not None else _DELEGATE_SYS_PROMPT
 
@@ -2748,9 +5235,10 @@ def delegate_subtask(
     # Only tools that _dispatch_sub_tool can actually execute are advertised —
     # otherwise the sub-AI is offered a tool whose dispatch would reject it.
     sub_tools = None
+    sub_tool_names: set[str] = set()
     if tool_call_iterations > 0:
         if available_tools is None:
-            sub_tool_names = set(_SUB_TOOL_FUNCS)
+            sub_tool_names = set(_SUBAGENT_DEFAULT_TOOLS) & set(_SUB_TOOL_FUNCS)
         else:
             sub_tool_names = set(available_tools) & set(_SUB_TOOL_FUNCS)
         if sub_tool_names:
@@ -2759,10 +5247,48 @@ def delegate_subtask(
                 if t.get("function", {}).get("name") in sub_tool_names
             ]
 
+    # The full command the manager AI handed over is always logged.  On
+    # screen it is shown in full only when the details are expanded — the
+    # collapsed view keeps the single header line printed above.
+    granted_tools = sorted(sub_tool_names)
+    runtime_log.log_delegate_request(
+        task=task,
+        context=context,
+        intelligence=level,
+        tools=granted_tools,
+        iterations=tool_call_iterations,
+        system_prompt=sys_p,
+    )
+    if expanded:
+        _print_delegate_request(
+            task, context, level, granted_tools, tool_call_iterations, sys_p
+        )
+
     while attempts < max_attempts:
         cfg = rotation[ind]
+        if (cfg["pid"], cfg["key"]) in blocked_keys:
+            if all((r["pid"], r["key"]) in blocked_keys for r in rotation):
+                break
+            ind = (ind + 1) % len(rotation)
+            continue
         headers = {"HTTP-Referer": "https://github.com/opsonusdh/Termux-AI", "X-Title": "Termux-AI"} if cfg["pid"] == "openrouter" else None
-        client = OpenAI(api_key=cfg["key"], base_url=cfg["base_url"], default_headers=headers)
+        client = OpenAI(
+            api_key=cfg["key"],
+            base_url=cfg["base_url"],
+            default_headers=headers,
+            timeout=_SUBAGENT_REQUEST_TIMEOUT,
+            max_retries=0,
+        )
+
+        # The output ceiling registered for this route.  It is a ceiling, not
+        # a target: it is only lowered when the provider says the account
+        # cannot afford it.  A ceiling learned earlier in this delegation for
+        # the same provider wins over the registered one.
+        budget = cfg.get("max_tokens")
+        learned = provider_budget_ceiling.get(cfg["pid"])
+        if learned and (not budget or learned < budget):
+            budget = learned
+        halvings = 0
 
         # Inject carried reasoning from a prior OpenRouter model as a synthetic
         # assistant message so the new model can continue the chain-of-thought.
@@ -2770,7 +5296,7 @@ def delegate_subtask(
             carried_reasoning is not None
             and cfg["pid"] == "openrouter"
             and carried_reasoning.get("provider") == "openrouter"
-            and carried_reasoning.get("model") != cfg["model"]
+            and carried_reasoning.get("model") != cfg["name"]
         ):
             carry_msg: dict = {
                 "role": "assistant",
@@ -2797,30 +5323,55 @@ def delegate_subtask(
         # OpenRouter models.
         same_model = (
             carried_reasoning is not None
-            and carried_reasoning.get("model") == cfg["model"]
+            and carried_reasoning.get("model") == cfg["name"]
             and carried_reasoning.get("provider") == cfg["pid"]
         )
         clean_messages = _sanitize_messages_for_provider(
             messages,
             cfg["pid"],
-            model_name=cfg["model"],
+            model_name=cfg["name"],
             preserve_native_reasoning=same_model,
             reasoning_carry_provider="openrouter" if cfg["pid"] == "openrouter" else None,
         )
 
         try:
-            create_kwargs: dict = {
-                "model": cfg["model"],
-                "messages": clean_messages,
-                "max_tokens": max_tokens,
-            }
+            create_kwargs = _delegate_request_kwargs(cfg, clean_messages, budget)
             if sub_tools:
                 create_kwargs["tools"] = sub_tools
                 create_kwargs["tool_choice"] = "auto"
-            if cfg["pid"] == "openrouter":
-                create_kwargs["extra_body"] = {"reasoning": {"enabled": True}}
 
-            resp = client.chat.completions.with_raw_response.create(**create_kwargs)
+            # The account may not be able to afford the registered output
+            # ceiling (OpenRouter checks the requested budget against the
+            # balance).  Halve it and retry the very same route before giving
+            # up on the model.
+            while True:
+                try:
+                    resp = client.chat.completions.with_raw_response.create(**create_kwargs)
+                    break
+                except Exception as exc:
+                    if not (
+                        _is_output_budget_error(exc)
+                        and budget
+                        and halvings < _SUBAGENT_MAX_BUDGET_HALVINGS
+                        and not _is_empty_balance_error(exc)
+                    ):
+                        raise
+                    new_budget = max(_SUBAGENT_MIN_OUTPUT_BUDGET, budget // 2)
+                    if new_budget >= budget:
+                        raise
+                    budget = new_budget
+                    halvings += 1
+                    # Remember what the account could not afford so the next
+                    # key of this provider starts at the lower ceiling.
+                    previous = provider_budget_ceiling.get(cfg["pid"])
+                    if not previous or new_budget < previous:
+                        provider_budget_ceiling[cfg["pid"]] = new_budget
+                    create_kwargs = _delegate_request_kwargs(cfg, clean_messages, budget)
+                    if sub_tools:
+                        create_kwargs["tools"] = sub_tools
+                        create_kwargs["tool_choice"] = "auto"
+                    print(f"{GRAY}[DELEGATE] output ceiling too large for the account — retrying with {budget}{RESET}")
+
             response = resp.parse()
             raw_json = json.loads(resp.text)
             msg = response.choices[0].message
@@ -2840,10 +5391,27 @@ def delegate_subtask(
             if reasoning or reasoning_details:
                 carried_reasoning = {
                     "provider": cfg["pid"],
-                    "model": cfg["model"],
+                    "model": cfg["name"],
                     "reasoning": reasoning,
                     "reasoning_details": reasoning_details,
                 }
+                # The sub-AI's thinking is logged the moment it arrives, so
+                # a delegation that is cut short still shows what the
+                # sub-AI was working on.
+                reasoning_text = _delegate_reasoning_text(
+                    reasoning, reasoning_details
+                )
+                runtime_log.log_reasoning(
+                    cfg["pid"], cfg["name"], reasoning_text
+                )
+                # ``reasoning_details`` counts too: OpenRouter leaves the
+                # plain ``reasoning`` field empty, and the expanded view used
+                # to show nothing at all for those models.
+                if expanded and reasoning_text:
+                    print(f"{GRAY}[DELEGATE REASONING] "
+                          f"{cfg['pid']}/{cfg['name']}{RESET}")
+                    for line in reasoning_text.splitlines():
+                        print(f"{GRAY}    {line}{RESET}")
 
             finish_reason = response.choices[0].finish_reason
 
@@ -2876,32 +5444,40 @@ def delegate_subtask(
                     tool_name = tc.function.name
                     tool_args = tc.function.arguments
                     print(f"{GRAY}[DELEGATE TOOL] {tool_name}{RESET}")
+                    # The sub-AI's tool call is logged with its arguments
+                    # *before* it runs, and its result right after — the same
+                    # real-time contract the main agent's tools follow.
+                    runtime_log.log_delegate_tool_call(tool_name, tool_args)
+                    if expanded:
+                        args_text = runtime_log.format_args(tool_args)
+                        if args_text:
+                            for line in args_text.splitlines():
+                                print(f"{GRAY}    {line}{RESET}")
                     t_res = _dispatch_sub_tool(tool_name, tool_args)
+                    runtime_log.log_delegate_tool_result(tool_name, t_res)
+                    if expanded:
+                        print(f"{GRAY}[DELEGATE RESULT] {tool_name}{RESET}")
+                        for line in str(t_res).splitlines():
+                            print(f"{GRAY}    {line}{RESET}")
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": t_res,
+                        "content": _cap_sub_tool_result(t_res),
                     })
 
                 # Re-sanitize for provider and make next API call
                 clean_messages = _sanitize_messages_for_provider(
                     messages,
                     cfg["pid"],
-                    model_name=cfg["model"],
+                    model_name=cfg["name"],
                     preserve_native_reasoning=same_model,
                     reasoning_carry_provider="openrouter" if cfg["pid"] == "openrouter" else None,
                 )
 
-                followup_kwargs = {
-                    "model": cfg["model"],
-                    "messages": clean_messages,
-                    "max_tokens": max_tokens,
-                }
+                followup_kwargs = _delegate_request_kwargs(cfg, clean_messages, budget)
                 if sub_tools:
                     followup_kwargs["tools"] = sub_tools
                     followup_kwargs["tool_choice"] = "auto"
-                if cfg["pid"] == "openrouter":
-                    followup_kwargs["extra_body"] = {"reasoning": {"enabled": True}}
 
                 resp2 = client.chat.completions.with_raw_response.create(**followup_kwargs)
                 response = resp2.parse()
@@ -2911,8 +5487,12 @@ def delegate_subtask(
             # ── END TOOL-CALLING LOOP ────────────────────────────────────────
 
             if content and finish_reason != "length":
+                runtime_log.log_delegate_report(
+                    content.strip(), cfg["name"], str(cfg.get("tier", level))
+                )
                 header = (
-                    f"[Sub-AI Report | model={cfg['model']} | "
+                    f"[Sub-AI Report | intelligence={cfg.get('tier', level)} | "
+                    f"model={cfg['name']} | "
                     f"task={task[:60].strip()}{'...' if len(task) > 60 else ''}]\n"
                     f"{'-' * 60}\n"
                 )
@@ -2943,10 +5523,26 @@ def delegate_subtask(
             err = str(e).upper()
             is_transient = any(x in err for x in ("429", "RESOURCE_EXHAUSTED", "RATE LIMIT", "503", "UNAVAILABLE", "OVERLOADED"))
             if is_transient:
-                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] Rate-limited/overloaded. Trying next...{RESET}")
+                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['name']}] Rate-limited/overloaded. Trying next...{RESET}")
                 time.sleep(2)
             else:
-                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['model']}] Error: {str(e)[:120]}{RESET}")
+                print(f"{RED}[ERROR][{cfg['pid']}/{cfg['name']}] Error: {str(e)[:120]}{RESET}")
+
+            # The organization behind *this key* is blocked.  The other keys
+            # of the provider belong to other organizations and may still
+            # work, so only this key is retired.
+            if _is_restricted_key_error(e):
+                blocked_keys.add((cfg["pid"], cfg["key"]))
+                print(f"{RED}[ERROR][{cfg['pid']}] key organization blocked — skipping this key only{RESET}")
+
+            # A paid route refused for lack of credit: skip ahead to a route
+            # that works without paid credits instead of walking through every
+            # other paid route of the same provider first.
+            if _is_output_budget_error(e) and not cfg.get("free", True):
+                nxt = _next_free_route(rotation, ind)
+                if nxt is not None:
+                    print(f"{GRAY}[DELEGATE] paid route refused for credit — switching to the free route {rotation[nxt]['provider_id']}/{rotation[nxt]['name']}{RESET}")
+                    ind = nxt
 
             # When switching away from OpenRouter to a different provider,
             # reasoning carry from OpenRouter no longer applies.
@@ -2961,7 +5557,10 @@ def delegate_subtask(
         ind = (ind + 1) % len(rotation)
         attempts += 1
 
-    return "[ERROR] All sub-AI providers and keys failed after multiple attempts."
+    return (
+        f"[ERROR] No sub-AI could serve the task at intelligence level '{level}' "
+        f"after {attempts} attempt(s) across {len(rotation)} route(s)."
+    )
 
 
 # ── GENERATE IMAGE ─────────────────────────────────────────────────────────────
@@ -2986,6 +5585,450 @@ _NANO_BANANA_QUALITY_ALIAS = {
 _NANO_BANANA_BASE_URL = PROVIDERS["google"]["base_url"]
 
 _DATA_URI_RE = re.compile(r"data:image/\w+;base64,([A-Za-z0-9+/=]+)")
+
+
+# ── NVIDIA IMAGE GENERATION (Visual Design endpoints) ──────────────────────────
+#
+# NVIDIA serves its FLUX image models from a *different* host than the chat
+# endpoint in PROVIDERS["nvidia"]: image inference lives at
+#
+#     POST {base_url}/genai/{model}          base_url = ai.api.nvidia.com/v1
+#
+# The published NVIDIA reference pages disagree with the running service in
+# several places, so every envelope below was verified against the live free
+# endpoints rather than copied from the docs:
+#
+#   black-forest-labs/flux.3-image-klein  -> 404.  The live slug uses a
+#       hyphen: "flux-3-image-klein".
+#   black-forest-labs/flux-3-image-klein  -> OK.  `mode` accepts only the
+#       literals "t2i"/"i2i" (not "Image Generation"/"Image Editing" as
+#       documented); cfg_scale 1..20; steps 1..50; max 1,062,400 pixels.
+#   black-forest-labs/flux.2-klein-4b     -> OK.  cfg_scale must be exactly 1;
+#       steps 1..4; the endpoint rejects a "mode" key outright.
+#   black-forest-labs/flux.1-dev          -> OK.  cfg_scale > 1 and <= 9;
+#       steps 5..100; sending "mode" crashes the backend with a 500.
+#   black-forest-labs/flux.1-schnell      -> consistently 504 (gateway
+#       timeout after 300s) on the free endpoint — deliberately excluded.
+#   black-forest-labs/flux.1-kontext-dev  -> image *editing* model; it needs
+#       an input image and times out on a text-only request — out of scope
+#       for a text-to-image tool.
+#
+# Response shape (identical for every model):
+#   {"artifacts": [{"base64": "<JPEG bytes>", "finishReason": "SUCCESS",
+#                   "seed": 123456}]}
+
+_NVIDIA_IMAGE_PROVIDER_ID = "nvidia-images"
+
+# Width/height values the NVIDIA image endpoints accept.
+_NVIDIA_IMAGE_SIZE_ENUM = (768, 832, 896, 960, 1024, 1088, 1152, 1216, 1280, 1344)
+
+# Quality tier -> preferred NVIDIA model.  "flash" is the 4-step distilled
+# model; "pro" is the full FLUX.1-dev model.
+_NVIDIA_IMAGE_QUALITY_ALIAS = {
+    "flash": "black-forest-labs/flux.2-klein-4b",
+    "pro":   "black-forest-labs/flux-3-image-klein",
+}
+
+# Request timeout for a single NVIDIA image call.  The healthy endpoints
+# answer in 2-15s, so this is a generous ceiling for a cold start.  It is not
+# a safety margin, it is a cost control: a hung endpoint (flux.1-dev has been
+# observed timing out entirely) must not stall the whole rotation for
+# minutes before the next model gets its turn.
+_NVIDIA_IMAGE_TIMEOUT = 60
+
+# ── NVIDIA endpoint health ───────────────────────────────────────────────────
+# A hung endpoint must not eat the whole request budget.  With several models
+# in the rotation, one dead endpoint used to cost minutes before the next
+# model got its turn.  An endpoint that fails at the transport level is
+# therefore remembered and skipped for a while; the cooldown grows with the
+# number of consecutive failures.
+_NVIDIA_IMAGE_HEALTH: dict[str, dict] = {}
+_NVIDIA_IMAGE_HEALTH_BASE_COOLDOWN = 300.0
+_NVIDIA_IMAGE_HEALTH_MAX_COOLDOWN = 1800.0
+
+
+def _nvidia_image_is_healthy(model_name: str) -> bool:
+    """False when the endpoint failed recently enough to be worth skipping."""
+    entry = _NVIDIA_IMAGE_HEALTH.get(model_name)
+    if not entry:
+        return True
+    cooldown = min(
+        _NVIDIA_IMAGE_HEALTH_BASE_COOLDOWN * max(1, entry.get("fails", 1)),
+        _NVIDIA_IMAGE_HEALTH_MAX_COOLDOWN,
+    )
+    return (time.time() - entry.get("last_fail", 0)) >= cooldown
+
+
+def _nvidia_image_mark_failure(model_name: str) -> None:
+    """Remember that an endpoint just failed at the transport level."""
+    entry = _NVIDIA_IMAGE_HEALTH.setdefault(model_name, {"fails": 0})
+    entry["fails"] = entry.get("fails", 0) + 1
+    entry["last_fail"] = time.time()
+
+
+def _nvidia_image_mark_success(model_name: str) -> None:
+    """Forget a previous failure — the endpoint answered again."""
+    _NVIDIA_IMAGE_HEALTH.pop(model_name, None)
+
+
+def _nvidia_image_slots() -> list[dict]:
+    """NVIDIA image-model slots straight from the canonical registry."""
+    return [s for s in IMAGE_MODEL_SLOTS
+            if s.get("provider_id") == _NVIDIA_IMAGE_PROVIDER_ID]
+
+
+def _image_slot_by_name(model_name: str) -> dict | None:
+    """Resolve a model id (full or bare slug) to its registry slot."""
+    if not model_name:
+        return None
+    wanted = model_name.strip()
+    bare = wanted.rsplit("/", 1)[-1]
+    for slot in IMAGE_MODEL_SLOTS:
+        if slot["name"] == wanted or slot["name"].rsplit("/", 1)[-1] == bare:
+            return slot
+    return None
+
+
+def _snap_nvidia_dim(value, default: int = 1024, enum=None) -> int:
+    """Snap an arbitrary pixel value onto the model's supported size grid.
+
+    The grid is per model: FLUX.1 accepts 768..1344 in steps of 64, while
+    FLUX.3 and FLUX.2 Klein accept 512..1568 in steps of 16 and Kontext has
+    its own set of seventeen literals.
+    """
+    grid = tuple(enum) if enum else _NVIDIA_IMAGE_SIZE_ENUM
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        v = default
+    return min(grid, key=lambda s: (abs(s - v), s))
+
+
+def _nvidia_image_size(width, height, max_pixels: int, enum=None) -> tuple[int, int]:
+    """Pick the largest supported size that fits the model's pixel budget.
+
+    The NVIDIA image endpoints reject any request whose width*height exceeds
+    1,062,400 pixels ("Requested image size N exceeds supported image size
+    1062400"), so a requested size has to be snapped *and* budgeted.
+    """
+    grid = tuple(enum) if enum else _NVIDIA_IMAGE_SIZE_ENUM
+    w_req = _snap_nvidia_dim(width, 1024, grid)
+    h_req = _snap_nvidia_dim(height, 1024, grid)
+    target_ratio = w_req / float(h_req)
+
+    candidates = [
+        (w, h) for w in grid for h in grid
+        if not max_pixels or (w * h) <= max_pixels
+    ]
+    if not candidates:
+        return 1024, 1024
+
+    best = min(candidates, key=lambda wh: (
+        abs((wh[0] / wh[1]) - target_ratio),
+        abs((wh[0] * wh[1]) - (w_req * h_req)),
+    ))
+    return best
+
+
+def _clamp_nvidia_cfg_scale(value, spec: dict) -> float:
+    """Clamp cfg_scale into the model's accepted range."""
+    default = float(spec.get("default", 1.0))
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    lo = float(spec.get("min", v))
+    hi = float(spec.get("max", v))
+    if spec.get("exclusive_min"):
+        # e.g. flux.1-dev requires cfg_scale strictly greater than 1.
+        lo = lo + 1e-3
+        if v <= lo:
+            v = lo
+    elif v < lo:
+        v = lo
+    if v > hi:
+        v = hi
+    return v
+
+
+def _clamp_nvidia_steps(value, spec: dict) -> int:
+    """Clamp the diffusion step count into the model's accepted range."""
+    default = int(spec.get("default", 1))
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    lo = int(spec.get("min", v))
+    hi = int(spec.get("max", v))
+    return max(lo, min(hi, v))
+
+
+def _clamp_nvidia_seed(value) -> int:
+    """Normalise a seed into a non-negative integer (0 = random)."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(0, int(float(str(value).strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_nvidia_image_body(
+    slot: dict,
+    prompt: str,
+    width=None,
+    height=None,
+    seed=None,
+    steps=None,
+    cfg_scale=None,
+    negative_prompt=None,
+) -> dict:
+    """Build a request body that satisfies the model's live parameter envelope."""
+    max_px = int(slot.get("size_max_pixels", 0) or 0)
+    w, h = _nvidia_image_size(width, height, max_px, slot.get("size_enum"))
+
+    prompt_max = int(slot.get("prompt_max_len", 10000) or 10000)
+    text = (prompt or "")[:prompt_max]
+
+    body: dict = {
+        "prompt": text,
+        "width": w,
+        "height": h,
+        "cfg_scale": _clamp_nvidia_cfg_scale(cfg_scale, slot.get("cfg_scale") or {}),
+        "steps": _clamp_nvidia_steps(steps, slot.get("steps") or {}),
+        "samples": 1,
+        "seed": _clamp_nvidia_seed(seed),
+    }
+    # `negative_prompt` is only accepted by some of the models — sending it
+    # to flux.2-klein-4b is answered with an explicit "not supported" error.
+    if negative_prompt and slot.get("supports_negative_prompt"):
+        body["negative_prompt"] = str(negative_prompt)[:1000]
+
+    # NOTE: `mode` is deliberately never sent.
+    #   flux.2-klein-4b rejects it as an extra field (422),
+    #   flux.1-kontext-dev rejects it as an extra field (422),
+    #   and flux-3-image-klein defaults to text-to-image anyway.
+    # The accepted literals per model are recorded in the registry for
+    # reference: flux-3 't2i'|'i2i', flux.1-dev 'base'|'canny'|'depth',
+    # flux.1-schnell 'base'.
+    return body
+
+
+def _extract_nvidia_artifacts(payload) -> tuple[bytes | None, str, int | None]:
+    """Pull the first successful image out of an NVIDIA artifacts response.
+
+    Returns ``(image_bytes, finish_reason, seed)``.  ``image_bytes`` is None
+    when the payload carried no usable image.
+    """
+    if not isinstance(payload, dict):
+        return None, "MALFORMED_RESPONSE", None
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        return None, "NO_ARTIFACTS", None
+
+    reasons: list[str] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        reason = str(artifact.get("finishReason") or "UNKNOWN")
+        reasons.append(reason)
+        if reason != "SUCCESS":
+            continue
+        encoded = artifact.get("base64") or ""
+        if not encoded:
+            continue
+        try:
+            raw = base64.b64decode(encoded)
+        except Exception:
+            continue
+        if not raw:
+            continue
+        seed = artifact.get("seed")
+        return raw, reason, seed if isinstance(seed, int) else None
+
+    return None, (reasons[0] if reasons else "NO_ARTIFACTS"), None
+
+
+# Magic-byte signatures for the image formats the providers actually return.
+# NVIDIA's FLUX endpoints hand back JPEG while Gemini hands back PNG, so the
+# file extension has to follow the bytes instead of a hardcoded guess —
+# otherwise Android receives a ".png" name for JPEG data and opens it with the
+# wrong MIME type (the share sheet and Gallery then show a broken file).
+_IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"\xff\xd8\xff", ".jpg"),
+)
+
+
+def _detect_image_extension(data: bytes) -> str:
+    """Return the file extension that matches the image's actual format."""
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return ".png"
+    data = bytes(data)
+    for signature, ext in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return ".png"
+
+
+def _write_image_file(out_base: str, data: bytes) -> str:
+    """Write image bytes next to ``out_base`` using a matching extension.
+
+    ``out_base`` is a path *without* an extension — the real file name is
+    decided from the bytes themselves, so JPEG output is never stored as
+    ".png".  Returns the path of the file that was written.
+    """
+    out_path = f"{out_base}{_detect_image_extension(data)}"
+    with open(out_path, "wb") as f:
+        f.write(data)
+    return out_path
+
+
+def _nvidia_generate_image(
+    prompt: str,
+    slots: list[dict],
+    out_base: str,
+    width=None,
+    height=None,
+    seed=None,
+    steps=None,
+    cfg_scale=None,
+    negative_prompt=None,
+    respect_health: bool = False,
+) -> tuple[str | None, list[str]]:
+    """Try the NVIDIA FLUX endpoints in order.
+
+    ``respect_health`` makes the rotation skip an endpoint that recently
+    failed, so a dead model does not cost the full timeout on every call.
+    It is off by default: a caller that hands over an explicit list of
+    models — a pinned model, or a test — wants those models tried.
+
+    Returns ``(success_message, errors)`` — exactly one of the two is set.
+    """
+    from llm_client import API_KEYS
+
+    nvidia_keys = API_KEYS.get("nvidia", [])
+    if not nvidia_keys:
+        return None, ["nvidia: no NVIDIA API key found in api.keys."]
+
+    base_url = PROVIDERS[_NVIDIA_IMAGE_PROVIDER_ID]["base_url"].rstrip("/")
+    errors: list[str] = []
+    filtered = 0
+    # How many models were actually *tried*.  Models that were skipped
+    # because they are self-hosted or need an input image do not count:
+    # they never saw the prompt.
+    attempted_models = 0
+
+    for slot in slots:
+        model_name = slot["name"]
+
+        # A model NVIDIA lists in its catalogue but does not serve from the
+        # hosted free API would only burn a request on a 404.
+        if not slot.get("hosted_available", True):
+            errors.append(
+                f"{model_name}: {slot.get('hosted_note', 'not served by the hosted API')}"
+            )
+            continue
+
+        # The image-editing models want an NVIDIA asset id, which the hosted
+        # API will not accept as a local file or a URL.
+        if slot.get("requires_image"):
+            errors.append(
+                f"{model_name}: image-editing model — it needs an input image "
+                "supplied as an NVIDIA asset id, which the hosted API does "
+                "not accept from a local file."
+            )
+            continue
+
+        # An endpoint that just timed out is very likely still down; skip it
+        # instead of paying the timeout again on the next call.  Only the
+        # automatic rotation skips — a pinned model is always tried.
+        if respect_health and not _nvidia_image_is_healthy(model_name):
+            errors.append(
+                f"{model_name}: skipped, the endpoint failed recently"
+            )
+            continue
+
+        body = _build_nvidia_image_body(
+            slot, prompt, width=width, height=height,
+            seed=seed, steps=steps, cfg_scale=cfg_scale,
+            negative_prompt=negative_prompt,
+        )
+        url = f"{base_url}/genai/{model_name}"
+
+        for key in nvidia_keys:
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "accept": "application/json",
+                "content-type": "application/json",
+            }
+            attempted_models += 1
+            try:
+                resp = requests.post(url, headers=headers, json=body,
+                                     timeout=_NVIDIA_IMAGE_TIMEOUT)
+            except Exception as exc:
+                errors.append(f"{model_name}: request failed: {str(exc)[:200]}")
+                # A transport failure (read timeout, connection reset) is a
+                # property of the *endpoint*, not of the key — a bad key
+                # comes back as an HTTP 401/403/429, never as a socket hang.
+                # Retrying the next key would only repeat the same stall, so
+                # move straight on to the next model.
+                _nvidia_image_mark_failure(model_name)
+                break
+
+            if resp.status_code != 200:
+                detail = resp.text[:200].replace("\n", " ").strip()
+                errors.append(
+                    f"{model_name}: HTTP {resp.status_code}"
+                    f"{': ' + detail if detail else ''}"
+                )
+                if resp.status_code >= 500:
+                    _nvidia_image_mark_failure(model_name)
+                continue
+
+            try:
+                payload = resp.json()
+            except Exception:
+                errors.append(f"{model_name}: response was not valid JSON")
+                continue
+
+            img_bytes, reason, used_seed = _extract_nvidia_artifacts(payload)
+            if img_bytes:
+                out_path = _write_image_file(out_base, img_bytes)
+                seed_note = f" (seed {used_seed})" if used_seed is not None else ""
+                _nvidia_image_mark_success(model_name)
+                return (
+                    f"Successfully generated image and saved to {out_path} "
+                    f"[nvidia/{model_name}{seed_note}]",
+                    errors,
+                )
+
+            errors.append(f"{model_name}: no image returned (finishReason={reason})")
+            if reason == "CONTENT_FILTERED":
+                filtered += 1
+
+    # Every model that was actually tried rejected the prompt on content
+    # grounds — say so plainly.  Without this the user sees a wall of
+    # near-identical per-model lines and has no way to tell that the
+    # *prompt* is the problem, not the service.
+    if filtered and attempted_models and filtered == attempted_models:
+        return None, [
+            "NVIDIA's safety filter rejected this prompt "
+            "(finishReason=CONTENT_FILTERED) on every model tried. "
+            "Rephrase it — some subjects (for example translucent or "
+            "glowing organic bodies) trip the filter."
+        ] + errors
+
+    return None, errors
 
 
 def _extract_image_bytes(response) -> bytes | None:
@@ -3024,37 +6067,30 @@ def _extract_image_bytes(response) -> bytes | None:
     return None
 
 
-def generate_image(
+def _google_generate_image(
     prompt: str,
-    quality: str = "flash",
-    filename: str | None = None,
-) -> str:
-    log_write(f"[generate_image] quality:{quality} filename:{filename} prompt:{prompt[:80]}")
-    print(f"{GRAY}[IMAGE GEN] Nano Banana {quality} | {prompt[:68]}{'...' if len(prompt) > 68 else ''}{RESET}")
+    model_order: list[str],
+    out_base: str,
+) -> tuple[str | None, list[str]]:
+    """Try the Google Nano Banana models in order.
 
-    preferred = _NANO_BANANA_QUALITY_ALIAS.get(quality)
-    model_order = _NANO_BANANA_MODELS.copy()
-    if preferred and preferred in model_order:
-        model_order.remove(preferred)
-        model_order.insert(0, preferred)
-
-    images_dir = os.path.join(paths.WORKSPACE_DIR, "images")
-    os.makedirs(images_dir, exist_ok=True)
-
-    if not filename or not filename.strip():
-        filename = "image_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.splitext(filename.strip())[0]
-    out_path = os.path.join(images_dir, filename + ".png")
-
+    Returns ``(success_message, errors)`` — exactly one of the two is set.
+    """
     from llm_client import API_KEYS
+
     google_keys = API_KEYS.get("google", [])
     if not google_keys:
-        return "[generate_image ERROR] No Google API key found in api.keys."
+        return None, ["google: no Google API key found in api.keys."]
+
+    # Base URLs come from core/models.py PROVIDERS — the single source of
+    # truth.  Resolved at call time so an endpoint fix in the provider table
+    # propagates without a restart.
+    base_url = PROVIDERS["google"]["base_url"]
 
     errors: list[str] = []
     for model_name in model_order:
         for key in google_keys:
-            client = OpenAI(api_key=key, base_url=_NANO_BANANA_BASE_URL)
+            client = OpenAI(api_key=key, base_url=base_url)
             try:
                 response = client.chat.completions.create(
                     model=model_name,
@@ -3063,15 +6099,160 @@ def generate_image(
 
                 img_bytes = _extract_image_bytes(response)
                 if img_bytes:
-                    with open(out_path, "wb") as f:
-                        f.write(img_bytes)
-                    return f"Successfully generated image and saved to {out_path}"
+                    out_path = _write_image_file(out_base, img_bytes)
+                    return (
+                        f"Successfully generated image and saved to {out_path} "
+                        f"[google/{model_name}]",
+                        errors,
+                    )
 
                 errors.append(
                     f"{model_name}: response contained no inline image data"
                 )
             except Exception as e:
                 errors.append(f"{model_name}: {str(e)[:200]}")
+
+    return None, errors
+
+
+def _attach_generated_image(message: str) -> str:
+    """Queue a freshly generated image so the model can look at it.
+
+    The tool result is a string, so the picture itself is handed over
+    through the attachment queue that core/llm_client.py drains after every
+    tool call.
+    """
+    marker = "saved to "
+    idx = message.find(marker)
+    if idx == -1:
+        return message
+    path = message[idx + len(marker):].split()[0].strip()
+    queue_image_attachment(path, "generated image")
+    return message
+
+
+def generate_image(
+    prompt: str,
+    quality: str = "flash",
+    filename: str | None = None,
+    provider: str = "auto",
+    model: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    seed: int | None = None,
+    steps: int | None = None,
+    cfg_scale: float | None = None,
+    negative_prompt: str | None = None,
+) -> str:
+    """Generate an image from a text prompt.
+
+    Providers:
+      * ``google`` — Gemini native image generation ("Nano Banana").  The image
+        comes back inline in the OpenAI-compatible chat response.
+      * ``nvidia`` — NVIDIA's free FLUX endpoints on the Visual Design API.
+        The image comes back as ``artifacts[].base64`` (JPEG).
+      * ``auto``   — Google first, NVIDIA as a fallback.
+
+    An explicit ``model`` pins the call to a single image model and implies
+    its provider, e.g. ``black-forest-labs/flux.2-klein-4b``.
+
+    The finished picture is queued as an attachment, so a multimodal model
+    can look at what it just generated and judge the result.
+    """
+    prompt = (prompt or "").strip()
+    quality = (quality or "flash").strip().lower()
+    provider = (provider or "auto").strip().lower()
+
+    log_write(
+        f"[generate_image] provider:{provider} quality:{quality} "
+        f"model:{model} filename:{filename} prompt:{prompt[:80]}"
+    )
+    print(f"{GRAY}[IMAGE GEN] {provider}/{quality} | {prompt[:68]}"
+          f"{'...' if len(prompt) > 68 else ''}{RESET}")
+
+    if not prompt:
+        return "[generate_image ERROR] Prompt must not be empty."
+
+    if provider not in ("auto", "google", "nvidia"):
+        return (f"[generate_image ERROR] Unknown provider '{provider}'. "
+                "Use 'google', 'nvidia' or 'auto'.")
+
+    images_dir = os.path.join(paths.WORKSPACE_DIR, "images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    if not filename or not filename.strip():
+        filename = "image_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.splitext(filename.strip())[0]
+    # The extension is decided from the returned bytes (see
+    # _write_image_file), so the output path is built without one here.
+    out_base = os.path.join(images_dir, filename)
+
+    # ── Resolve which model(s) to try ──────────────────────────────────────
+    google_order: list[str] = []
+    nvidia_slots: list[dict] = []
+    pinned_slot = _image_slot_by_name(model) if model else None
+
+    if pinned_slot is not None:
+        if pinned_slot.get("api") == "nvidia-genai":
+            nvidia_slots = [pinned_slot]
+        else:
+            google_order = [pinned_slot["name"]]
+    else:
+        if model:
+            return (f"[generate_image ERROR] Unknown image model '{model}'. "
+                    "Known models: "
+                    + ", ".join(s["name"] for s in IMAGE_MODEL_SLOTS))
+
+        preferred = _NANO_BANANA_QUALITY_ALIAS.get(quality)
+        google_order = _NANO_BANANA_MODELS.copy()
+        if preferred and preferred in google_order:
+            google_order.remove(preferred)
+            google_order.insert(0, preferred)
+
+        nvidia_slots = _nvidia_image_slots()
+        nvidia_preferred = _NVIDIA_IMAGE_QUALITY_ALIAS.get(quality)
+        if nvidia_preferred:
+            nvidia_slots = [s for s in nvidia_slots if s["name"] == nvidia_preferred] \
+                + [s for s in nvidia_slots if s["name"] != nvidia_preferred]
+
+    # ── Run the rotation ───────────────────────────────────────────────────
+    # An explicitly pinned model overrides the provider filter — asking for
+    # "flux.2-klein-4b" with provider="google" is a contradiction, and the
+    # pinned model is the more specific instruction.
+    run_google = bool(google_order) and (pinned_slot is not None or provider in ("auto", "google"))
+    run_nvidia = bool(nvidia_slots) and (pinned_slot is not None or provider in ("auto", "nvidia"))
+
+    errors: list[str] = []
+    attempted = False
+
+    if run_google:
+        attempted = True
+        message, google_errors = _google_generate_image(
+            prompt, google_order, out_base)
+        errors.extend(google_errors)
+        if message:
+            _attach_generated_image(message)
+            return message
+
+    if run_nvidia:
+        attempted = True
+        message, nvidia_errors = _nvidia_generate_image(
+            prompt, nvidia_slots, out_base,
+            width=width, height=height, seed=seed,
+            steps=steps, cfg_scale=cfg_scale,
+            negative_prompt=negative_prompt,
+            # The automatic rotation skips an endpoint that just failed; a
+            # pinned model is always tried, because the caller asked for it
+            # by name and it may have recovered.
+            respect_health=(pinned_slot is None),
+        )
+        errors.extend(nvidia_errors)
+        if message:
+            _attach_generated_image(message)
+            return message
+
+    if not attempted:
+        return "[generate_image ERROR] No image model was available to try."
 
     if not errors:
         return "[generate_image ERROR] Failed to generate image: no model was attempted."
@@ -3546,13 +6727,11 @@ def speak(text: str, block: bool = False) -> None:
 
 def sleep_mode() -> str:
     CONFIG_PATH = paths.CONFIG_FILE
-    DEFAULT_CONFIG = {
-        "stt_path":    os.path.join(paths.ROOT, "Termux-STT"),
-        "tts_enabled": False,
-        "use_groq":    False,
-        "show_details": False,
-        "autonomous":  False,
-    }
+    # The canonical default set lives in core/app_config.py.  This copy used
+    # to lag behind the interface's and never learned about the "notify"
+    # flag, so a config.json created here was missing a key the rest of the
+    # runtime expected.
+    DEFAULT_CONFIG = dict(app_config.DEFAULT_CONFIG)
     if not os.path.exists(CONFIG_PATH):
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
@@ -3617,7 +6796,8 @@ def intermediate_print(text: str, voice: bool = False) -> None:
         speak(render_for_voice(text))
 
 
-def _check_battery() -> dict:
+def _check_battery(quiet: bool = False) -> dict:
+    """Battery state.  ``quiet`` silences the wrapper's command trace."""
     try:
         if sys.platform == "win32":
             cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Battery | Select-Object EstimatedChargeRemaining, BatteryStatus"]
@@ -3625,25 +6805,39 @@ def _check_battery() -> dict:
             return {"raw": res.stdout.strip()}
         else:
             try:
-                from tools.wrapper_termux_battery_status import get_battery_status
-                return get_battery_status()
-            except Exception:
-                result = subprocess.run(
-                    ["termux-battery-status"],
-                    capture_output=True, text=True, timeout=8
-                )
-                data = json.loads(result.stdout)
-                return {
-                    "level_pct":    data.get("percentage"),
-                    "status":       data.get("status"),
-                    "temperature_c": data.get("temperature"),
-                    "plugged":      data.get("plugged"),
-                }
+                # The module-level name is the wrapper itself (loaded by path
+                # at import time).  Importing "tools.wrapper_…" here depends
+                # on the sys.path order — the "tools" name is shadowed by this
+                # very module in some launch paths — and then fell through to
+                # the raw subprocess call without saying so.
+                status = get_battery_status(quiet=quiet)
+                if isinstance(status, dict):
+                    return status
+            except Exception as e:
+                # The wrapper already spent its whole command budget on
+                # ``termux-battery-status``; the fallback below runs the very
+                # same binary, so retrying it would only double the wait
+                # (the battery broadcast is slow enough to time out on its
+                # own).  Report the timeout instead.
+                if "timed out" in str(e).lower():
+                    return {"error": str(e)}
+            result = subprocess.run(
+                ["termux-battery-status"],
+                capture_output=True, text=True, timeout=8
+            )
+            data = json.loads(result.stdout)
+            return {
+                "level_pct":    data.get("percentage"),
+                "status":       data.get("status"),
+                "temperature_c": data.get("temperature"),
+                "plugged":      data.get("plugged"),
+            }
     except Exception as e:
         return {"error": str(e)}
 
 
-def _check_weather() -> dict:
+def _check_weather(quiet: bool = False) -> dict:
+    """Weather forecast.  ``quiet`` is accepted for uniformity."""
     try:
         import urllib.request
         url = "https://wttr.in/?format=j1"
@@ -3701,7 +6895,8 @@ def _check_weather() -> dict:
         return {"error": str(e)}
 
 
-def _check_storage() -> dict:
+def _check_storage(quiet: bool = False) -> dict:
+    """Disk usage.  ``quiet`` is accepted for uniformity."""
     try:
         import shutil
         total, used, free = shutil.disk_usage(os.path.expanduser("~"))
@@ -3719,7 +6914,8 @@ def _check_storage() -> dict:
         return {"error": str(e)}
 
 
-def _check_memory() -> dict:
+def _check_memory(quiet: bool = False) -> dict:
+    """RAM usage.  ``quiet`` is accepted for uniformity."""
     try:
         if sys.platform == "win32":
             ps_code = "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize, (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"
@@ -3756,42 +6952,66 @@ def _check_memory() -> dict:
         return {"error": str(e)}
 
 
-def _check_network() -> dict:
+def _check_network(quiet: bool = False) -> dict:
+    """Network state.  ``quiet`` silences the wrapper's command trace."""
     try:
         if sys.platform == "win32":
             cmd = ["netsh", "wlan", "show", "interfaces"]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
             return {"raw": res.stdout.strip()[:500]}
         else:
+            # The connected access point first.  ``termux-wifi-connectioninfo``
+            # describes the link the phone is actually on and answers in a
+            # fraction of the time a full scan takes; a scan on a busy radio
+            # costs seconds and can hang outright when the Wi-Fi radio is
+            # off.  It also reports the truth — whether the phone is
+            # connected at all — where a scan only lists what is nearby.
             try:
-                from tools.wrapper_termux_wifi_scaninfo import get_wifi_scan_info
-                networks = get_wifi_scan_info()
+                result = subprocess.run(
+                    ["termux-wifi-connectioninfo"],
+                    capture_output=True, text=True, timeout=10
+                )
+                data = json.loads(result.stdout)
+                ssid = data.get("ssid")
+                connected = bool(ssid) and ssid != "<unknown ssid>"
+                return {
+                    "ssid":           ssid,
+                    "connected":      connected,
+                    "state":          data.get("supplicant_state"),
+                    "link_speed_mbps": data.get("link_speed_mbps"),
+                    "rssi_dbm":       data.get("rssi"),
+                    "ip":             data.get("ip"),
+                    "source":         "connection-info",
+                }
+            except Exception as e:
+                # A timed-out query has already spent the command budget;
+                # the scan below is slower still, so there is no point in
+                # starting it — report the timeout instead.
+                if "timed out" in str(e).lower():
+                    return {"error": str(e)}
+            # Fallback: a scan at least names the networks that are around.
+            try:
+                # Module-level re-export again — see _check_battery.
+                networks = get_wifi_scan_info(quiet=quiet)
                 if networks:
                     best = networks[0]
                     return {
                         "ssid":           best.get("ssid"),
+                        "connected":      False,
                         "link_speed_mbps": "N/A",
                         "rssi_dbm":       best.get("rssi"),
                         "ip":             "N/A",
+                        "source":         "wifi-scan",
                     }
             except Exception:
                 pass
-            result = subprocess.run(
-                ["termux-wifi-connectioninfo"],
-                capture_output=True, text=True, timeout=8
-            )
-            data = json.loads(result.stdout)
-            return {
-                "ssid":           data.get("ssid"),
-                "link_speed_mbps": data.get("link_speed_mbps"),
-                "rssi_dbm":       data.get("rssi"),
-                "ip":             data.get("ip"),
-            }
+            return {"error": "no network information available"}
     except Exception as e:
         return {"error": str(e)}
 
 
-def _check_datetime() -> dict:
+def _check_datetime(quiet: bool = False) -> dict:
+    """Clock state.  ``quiet`` is accepted for uniformity."""
     now = datetime.now()
     return {
         "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -3810,10 +7030,29 @@ CHECKS = {
 }
 
 
-def run_diagnosis() -> dict:
+def run_diagnosis(quiet: bool = False) -> dict:
+    """Collect a snapshot of the device state.
+
+    ``quiet=True`` keeps the platform wrappers behind the checks from
+    printing their ``[EXECUTING]`` / ``[OUT]`` trace.  The startup probe
+    uses it: that probe runs on a background thread while the chat prompt is
+    already on screen, and a trace printed there lands in the middle of the
+    user's line — in the raw-mode fallback input path it even staircases
+    across the screen, because a bare "\\n" no longer returns the cursor to
+    column 0.
+
+    The snapshot is bounded twice over: every check carries its own command
+    timeout, and the collector gives up after ``DIAGNOSIS_TIMEOUT`` (plus a
+    short grace period).  A device command that wedges — a Wi-Fi scan with the
+    radio off, a battery broadcast that never arrives — must never turn a
+    diagnostic into a stall, and it must never turn into an exception either:
+    the caller always gets a dict.
+    """
     results = {}
-    with ThreadPoolExecutor(max_workers=len(CHECKS)) as executor:
-        futures = {executor.submit(fn): name for name, fn in CHECKS.items()}
+    executor = ThreadPoolExecutor(max_workers=len(CHECKS))
+    stuck = False
+    try:
+        futures = {executor.submit(fn, quiet): name for name, fn in CHECKS.items()}
         try:
             for future in as_completed(futures, timeout=DIAGNOSIS_TIMEOUT):
                 name = futures[future]
@@ -3822,15 +7061,42 @@ def run_diagnosis() -> dict:
                 except Exception as e:
                     results[name] = {"error": str(e)}
         except TimeoutError:
-            # Cancel all pending futures
+            stuck = True
+            # Cancel whatever has not started yet, then give the running
+            # checks a brief moment to report before the snapshot goes out.
             for future in futures:
                 future.cancel()
-            # Wait briefly for cancellation to take effect
-            for future in as_completed(futures, timeout=2):
-                name = futures[future]
+            try:
+                for future in as_completed(futures, timeout=DIAGNOSIS_GRACE):
+                    name = futures[future]
+                    if name not in results:
+                        results[name] = {"error": "timeout"}
+            except TimeoutError:
+                # The grace period ran out too.  The checks that are still
+                # running are reported as timeouts instead of being waited
+                # for: a wedged device command must not hold the caller
+                # hostage, and this collector must never raise — the caller
+                # always gets a dict.
+                pass
+            for future, name in futures.items():
                 if name not in results:
                     results[name] = {"error": "timeout"}
+    finally:
+        # ``wait=False`` on the stuck path: the executor's context manager
+        # would otherwise block until every wedged command returned, which is
+        # exactly what the deadline above exists to prevent.
+        executor.shutdown(wait=not stuck, cancel_futures=True)
     return results
+
+
+def run_background_diagnosis() -> dict:
+    """Ambient diagnostics for the startup probe — no terminal output.
+
+    The result is handed to the model as a system message (see
+    core/interface.py::_get_diag_history), so the command trace would be
+    pure noise on the user's screen.
+    """
+    return run_diagnosis(quiet=True)
 
 
 # ── WHATSAPP CORE TOOLS ────────────────────────────────────────────────────────
@@ -3874,8 +7140,20 @@ def get_whatsapp_status() -> str:
         pending_str = "\nNo pending messages in queue."
         
     busy_status = "ENABLED" if whatsapp_manager.is_busy else "DISABLED"
+
+    # The pairing state answers the question the service state cannot:
+    # "is the session linked, or does it still need a pairing code?"
+    pairing_raw = whatsapp_manager.gateway_state().get("state", "UNKNOWN")
+    pairing = {
+        "READY": "LINKED — the session is paired with this device",
+        "QR_REQUIRED": "NOT PAIRED — a pairing code is needed "
+                       "(manage_plugin action='setup')",
+        "UNKNOWN": "UNKNOWN — the gateway did not answer",
+    }.get(pairing_raw, pairing_raw)
+
     out = (
         f"WhatsApp Service State: {state}\n"
+        f"Pairing State: {pairing}\n"
         f"Busy Auto-Reply Mode: {busy_status}\n"
         f"Busy Instruction: \"{whatsapp_manager.busy_instruction}\""
         f"{pending_str}"
@@ -4191,6 +7469,424 @@ def get_whatsapp_report(clear: bool = False) -> str:
         return f"[ERROR] Failed to read WhatsApp report: {e}"
 
 
+# ── GOOGLE PLUGIN TOOLS (Gmail / Calendar / Drive) ────────────────────────────
+#
+# These tools are advertised to the model only while their plugin is enabled
+# *and* connected (see core/plugin_manager.py).  Every function therefore
+# assumes a valid token and only has to deal with API-level failures — a
+# missing connection is caught earlier, in the dispatcher.
+
+def _google_fail(exc) -> str:
+    """Format an API failure for the model."""
+    return f"[ERROR] {exc}"
+
+
+def get_gmail_messages(query: str = "", max_results: int = 10,
+                       label_ids: str = "") -> str:
+    """List recent Gmail messages (optionally filtered by a Gmail query).
+
+    Each entry shows sender, subject and date so a message can be picked by
+    content, not just by ID.  Use read_gmail_message with a message id to
+    read the full body.
+    """
+    log_write(f"[get_gmail_messages] query:{query} max:{max_results}")
+    try:
+        data = google_api.gmail_list_messages(query=query,
+                                               max_results=max_results,
+                                               label_ids=label_ids)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    messages = data.get("messages", [])
+    if not messages:
+        return (f"No Gmail messages matched"
+                f"{' query ' + query if query else ''}.")
+
+    lines = [f"Gmail messages ({len(messages)} of ~{data.get('estimate', len(messages))}):"]
+    for msg in messages:
+        lines.append(
+            f"  - id={msg.get('id','')}  "
+            f"from={msg.get('from','')!r}  "
+            f"subject={msg.get('subject','')!r}  "
+            f"date={msg.get('date','')!r}"
+        )
+        snippet = (msg.get("snippet") or "").strip()
+        if snippet:
+            lines.append(f"      {snippet}")
+    lines.append("\nUse read_gmail_message with a message id to read the full content.")
+    return "\n".join(lines)
+
+
+def search_gmail(query: str, max_results: int = 20) -> str:
+    """Search Gmail with Gmail's own search syntax.
+
+    Each entry shows sender, subject and date.  Use read_gmail_message with a
+    message id to read the full body.
+    """
+    log_write(f"[search_gmail] query:{query}")
+    if not query:
+        return "[ERROR] A search query is required."
+    try:
+        data = google_api.gmail_list_messages(query=query,
+                                               max_results=max_results)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    messages = data.get("messages", [])
+    if not messages:
+        return f"No Gmail messages matched '{query}'."
+
+    lines = [f"Gmail search '{query}' — {len(messages)} match(es):"]
+    for msg in messages:
+        lines.append(
+            f"  - id={msg.get('id','')}  "
+            f"from={msg.get('from','')!r}  "
+            f"subject={msg.get('subject','')!r}  "
+            f"date={msg.get('date','')!r}"
+        )
+        snippet = (msg.get("snippet") or "").strip()
+        if snippet:
+            lines.append(f"      {snippet}")
+    return "\n".join(lines)
+
+
+def get_gmail_labels() -> str:
+    """List the Gmail labels of the connected account."""
+    log_write("[get_gmail_labels]")
+    try:
+        data = google_api.gmail_list_labels()
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    labels = data.get("labels", [])
+    if not labels:
+        return "No Gmail labels found."
+    lines = [f"Gmail labels ({len(labels)}):"]
+    for label in labels:
+        lines.append(
+            f"  - {label.get('name','')}  [id={label.get('id','')}"
+            f" type={label.get('type','')}"
+            f" total={label.get('messages_total',0)}"
+            f" unread={label.get('unread',0)}]"
+        )
+    return "\n".join(lines)
+
+
+def create_gmail_label(name: str) -> str:
+    """Create a Gmail label."""
+    log_write(f"[create_gmail_label] name:{name}")
+    if not name:
+        return "[ERROR] A label name is required."
+    try:
+        data = google_api.gmail_create_label(name)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return f"Created Gmail label '{data.get('name', name)}' (id={data.get('id','')})."
+
+
+def delete_gmail_message(message_id: str, permanent: bool = False) -> str:
+    """Trash (or permanently delete) a Gmail message."""
+    log_write(f"[delete_gmail_message] id:{message_id} permanent:{permanent}")
+    if not message_id:
+        return "[ERROR] A message id is required."
+    try:
+        data = google_api.gmail_delete_message(message_id, permanent=permanent)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return f"Gmail message {message_id} {data.get('action', 'processed')}."
+
+
+def send_gmail_message(to: str, subject: str, body: str,
+                       cc: str = "", bcc: str = "") -> str:
+    """Send an email through the connected Gmail account."""
+    log_write(f"[send_gmail_message] to:{to} subject:{subject}")
+    if not to:
+        return "[ERROR] A recipient ('to') is required."
+    try:
+        data = google_api.gmail_send_message(to=to, subject=subject,
+                                             body=body, cc=cc, bcc=bcc)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return (f"Sent email to {to} (message id={data.get('id','')}, "
+            f"thread id={data.get('thread_id','')}).")
+
+
+def read_gmail_message(message_id: str, format: str = "full") -> str:
+    """Read the full content of a single Gmail message by ID.
+
+    ``format`` is ``full`` (headers + body + attachments) or ``metadata``
+    (headers + snippet only).
+    """
+    log_write(f"[read_gmail_message] id:{message_id} format:{format}")
+    if not message_id:
+        return "[ERROR] A message id is required."
+    try:
+        if format == "metadata":
+            data = google_api._gmail_message_meta(message_id)
+            if not data:
+                return f"[ERROR] Could not read message {message_id}."
+            lines = [
+                f"From: {data.get('from','')}",
+                f"To: {data.get('to','')}",
+                f"Subject: {data.get('subject','')}",
+                f"Date: {data.get('date','')}",
+                "",
+                f"Snippet: {data.get('snippet','') or '(no snippet)'}",
+            ]
+            return "\n".join(lines)
+        data = google_api.gmail_get_message(message_id)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    body = data.get("body") or ""
+    lines = [
+        f"From: {data.get('from','')}",
+        f"To: {data.get('to','')}",
+        f"Cc: {data.get('cc','')}",
+        f"Subject: {data.get('subject','')}",
+        f"Date: {data.get('date','')}",
+        f"Labels: {', '.join(data.get('labels') or [])}",
+        "",
+        f"--- Body ({len(body)} chars) ---",
+        body or "(no readable body)",
+    ]
+    if data.get("attachments"):
+        lines.append("")
+        lines.append("Attachments:")
+        for att in data["attachments"]:
+            lines.append(
+                f"  - {att.get('filename','')}"
+                f" ({att.get('mime_type','')}, {att.get('size',0)} bytes)"
+            )
+    return "\n".join(lines)
+
+
+def get_gmail_profile() -> str:
+    """Show the connected Gmail account's profile (address, message counts)."""
+    log_write("[get_gmail_profile]")
+    try:
+        data = google_api.gmail_get_profile()
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    email = data.get("email_address") or "(not available)"
+    return (
+        f"Connected Gmail account: {email}\n"
+        f"Messages total: {data.get('messages_total', 0)}\n"
+        f"Threads total:  {data.get('threads_total', 0)}\n"
+        f"History id:     {data.get('history_id', '')}"
+    )
+
+
+def list_calendars() -> str:
+    """List the Google Calendars the account can access."""
+    log_write("[list_calendars]")
+    try:
+        data = google_api.calendar_list_calendars()
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    calendars = data.get("calendars", [])
+    if not calendars:
+        return "No Google calendars found."
+    lines = [f"Google calendars ({len(calendars)}):"]
+    for cal in calendars:
+        tag = " [primary]" if cal.get("primary") else ""
+        lines.append(f"  - {cal.get('summary','')}{tag}  "
+                     f"id={cal.get('id','')} role={cal.get('access_role','')}")
+    return "\n".join(lines)
+
+
+def get_calendar_events(calendar_id: str = "primary", time_min: str = "",
+                        time_max: str = "", max_results: int = 25,
+                        query: str = "") -> str:
+    """List Google Calendar events.
+
+    With no time bounds the window defaults to 30 days in the past through
+    90 days ahead, so "today's events" show up without you having to pass
+    timeMin/timeMax explicitly.
+    """
+    log_write(f"[get_calendar_events] cal:{calendar_id} query:{query}")
+    try:
+        data = google_api.calendar_list_events(calendar_id=calendar_id,
+                                               time_min=time_min,
+                                               time_max=time_max,
+                                               max_results=max_results,
+                                               query=query)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    events = data.get("events", [])
+    if not events:
+        hint = ""
+        if not time_min and not time_max:
+            hint = (" Try passing time_min/time_max (ISO-8601) to look in a "
+                    "specific window.")
+        return (f"No events found in calendar '{data.get('calendar_id', calendar_id)}'."
+                f"{hint}")
+    window = ""
+    if data.get("time_min") and data.get("time_max"):
+        window = f" (window {data['time_min']} → {data['time_max']})"
+    lines = [f"Events in '{data.get('calendar_id', calendar_id)}' ({len(events)}):{window}"]
+    for event in events:
+        tag = ""
+        status = event.get("status", "")
+        if status == "cancelled":
+            tag = " [CANCELLED]"
+        elif event.get("all_day"):
+            tag = " [all-day]"
+        lines.append(
+            f"  - [{event.get('start','')} → {event.get('end','')}]"
+            f" {event.get('summary','')}{tag}  (id={event.get('id','')})"
+        )
+        if event.get("location"):
+            lines.append(f"      at {event['location']}")
+        if event.get("description"):
+            lines.append(f"      {event['description'][:120]}")
+        if event.get("attendees"):
+            lines.append(f"      attendees: {', '.join(event['attendees'])}")
+    nxt = data.get("next_page_token", "")
+    if nxt:
+        lines.append(f"\nMore pages available — pass page_token={nxt!r} to see the next page.")
+    return "\n".join(lines)
+
+
+def create_calendar_event(calendar_id: str = "primary", summary: str = "",
+                           start: str = "", end: str = "",
+                           description: str = "", location: str = "",
+                           attendees: list | None = None) -> str:
+    """Create a Google Calendar event."""
+    log_write(f"[create_calendar_event] cal:{calendar_id} summary:{summary}")
+    try:
+        data = google_api.calendar_create_event(calendar_id=calendar_id,
+                                                summary=summary, start=start,
+                                                end=end, description=description,
+                                                location=location,
+                                                attendees=attendees)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    link = data.get("html_link", "")
+    return (f"Created event '{data.get('summary', summary)}' "
+            f"({data.get('start','')} → {data.get('end','')}, "
+            f"id={data.get('id','')})."
+            + (f"\n{link}" if link else ""))
+
+
+def update_calendar_event(event_id: str, calendar_id: str = "primary",
+                           summary: str = "", start: str = "", end: str = "",
+                           description: str = "", location: str = "",
+                           attendees: list | None = None) -> str:
+    """Update a Google Calendar event."""
+    log_write(f"[update_calendar_event] id:{event_id}")
+    try:
+        data = google_api.calendar_update_event(event_id=event_id,
+                                                calendar_id=calendar_id,
+                                                summary=summary, start=start,
+                                                end=end, description=description,
+                                                location=location,
+                                                attendees=attendees)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return (f"Updated event {data.get('id', event_id)}"
+            + (f" — '{data.get('summary','')}'" if data.get("summary") else ""))
+
+
+def delete_calendar_event(event_id: str, calendar_id: str = "primary") -> str:
+    """Delete a Google Calendar event."""
+    log_write(f"[delete_calendar_event] id:{event_id}")
+    try:
+        data = google_api.calendar_delete_event(event_id=event_id,
+                                                calendar_id=calendar_id)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return f"Deleted event {data.get('id', event_id)}."
+
+
+def list_drive_files(query: str = "", page_size: int = 25,
+                     order_by: str = "modifiedTime desc") -> str:
+    """List Google Drive files."""
+    log_write(f"[list_drive_files] query:{query}")
+    try:
+        data = google_api.drive_list_files(query=query,
+                                            page_size=page_size,
+                                            order_by=order_by)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+
+    files = data.get("files", [])
+    if not files:
+        return "No Google Drive files matched."
+    lines = [f"Google Drive files ({len(files)}):"]
+    for item in files:
+        size = item.get("size", "")
+        size_txt = f"  {int(size) // 1024} KB" if str(size).isdigit() else ""
+        lines.append(f"  - {item.get('name','')}  [id={item.get('id','')}"
+                     f" type={item.get('mime_type','')}{size_txt}]")
+    return "\n".join(lines)
+
+
+def upload_drive_file(file_path: str, name: str = "",
+                      parent_folder_id: str = "") -> str:
+    """Upload a local file to Google Drive."""
+    log_write(f"[upload_drive_file] path:{file_path}")
+    try:
+        data = google_api.drive_upload_file(file_path=file_path, name=name,
+                                            parent_folder_id=parent_folder_id)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    link = data.get("link", "")
+    return (f"Uploaded '{data.get('name','')}' to Google Drive "
+            f"(id={data.get('id','')})."
+            + (f"\n{link}" if link else ""))
+
+
+def download_drive_file(file_id: str, output_path: str = "") -> str:
+    """Download a Google Drive file to the device."""
+    log_write(f"[download_drive_file] id:{file_id}")
+    try:
+        data = google_api.drive_download_file(file_id=file_id,
+                                              output_path=output_path)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return (f"Downloaded Drive file {file_id} to {data.get('path','')} "
+            f"({data.get('size', 0)} bytes).")
+
+
+def delete_drive_file(file_id: str) -> str:
+    """Delete a Google Drive file."""
+    log_write(f"[delete_drive_file] id:{file_id}")
+    try:
+        data = google_api.drive_delete_file(file_id=file_id)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return f"Deleted Google Drive file {data.get('id', file_id)}."
+
+
+def create_drive_folder(name: str, parent_folder_id: str = "") -> str:
+    """Create a Google Drive folder."""
+    log_write(f"[create_drive_folder] name:{name}")
+    try:
+        data = google_api.drive_create_folder(name=name,
+                                              parent_folder_id=parent_folder_id)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return (f"Created Drive folder '{data.get('name', name)}' "
+            f"(id={data.get('id','')}).")
+
+
+def share_drive_file(file_id: str, email: str, role: str = "reader",
+                     permission_type: str = "user") -> str:
+    """Share a Google Drive file with somebody."""
+    log_write(f"[share_drive_file] id:{file_id} email:{email} role:{role}")
+    try:
+        data = google_api.drive_share_file(file_id=file_id, email=email,
+                                            role=role,
+                                            permission_type=permission_type)
+    except google_api.GoogleApiError as e:
+        return _google_fail(e)
+    return (f"Shared Drive file {file_id} with {email} "
+            f"(role={data.get('role', role)}, type={data.get('type', permission_type)}).")
+
+
 def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_prompt: str = "") -> str:
     """Execute a lightweight tool-free LLM completion for internal tasks (summaries, auto-replies)."""
     try:
@@ -4204,9 +7900,22 @@ def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_p
         ]
 
         def _infer_provider(m: str) -> tuple[str, str]:
+            try:
+                from core.models import MODEL_SLOTS, AGENT_MODEL_SLOTS, SUBAGENT_TIERS
+                for slot in MODEL_SLOTS + AGENT_MODEL_SLOTS:
+                    if slot.get("name") == m:
+                        pid = slot["provider_id"]
+                        return pid, PROVIDERS[pid]["base_url"]
+                for entries in SUBAGENT_TIERS.values():
+                    for entry in entries:
+                        if entry.get("name") == m:
+                            pid = entry["provider_id"]
+                            return pid, PROVIDERS[pid]["base_url"]
+            except Exception:
+                pass
+
             # Base URLs come from core/models.py PROVIDERS — the single source
-            # of truth.  Hardcoding them here silently diverged from the
-            # provider table (e.g. the Ollama cloud endpoint fix).
+            # of truth.
             if m.startswith("openrouter") or "/" in m:
                 pid = "openrouter"
             elif m.startswith("gemini") or m.startswith("gemma"):
@@ -4293,6 +8002,11 @@ def ask_user(
     
     prompt = "\n".join(prompt_parts) + " "
     
+    # The runtime is about to block waiting for the answer.  Push a
+    # notification so the user finds out even when the terminal is in the
+    # background — with "notify" switched off this is a no-op.
+    notifier.question(question, options)
+
     # Get user input
     try:
         user_input = input(prompt).strip()
@@ -4334,6 +8048,11 @@ def confirm(question: str, default: bool = True) -> bool:
         True for yes, False for no.
     """
     suffix = " [Y/n]: " if default else " [y/N]: "
+
+    # The runtime is about to block waiting for the yes/no answer.  Push a
+    # notification so the user finds out even when the terminal is in the
+    # background — with "notify" switched off this is a no-op.
+    notifier.confirmation(question, default)
     
     try:
         response = input(question + suffix).strip().lower()
@@ -4485,6 +8204,221 @@ def manage_todos(
     return f"[ERROR] Unknown action '{action}'. Valid: create, add, list, check, uncheck, delete, clear."
 
 
+# ── PLUGIN MANAGEMENT TOOL ────────────────────────────────────────────────────
+#
+# Lets the model answer "turn on Gmail" / "is Calendar connected?" without the
+# user having to remember the slash command.
+#
+# Enabling an account plugin is only half the job: the Google account still has
+# to grant access.  A tool call cannot sit and wait minutes for a browser click
+# the way '/plugin <name> setup' does, so the consent flow is split here —
+# 'setup' returns immediately with the URL to open, and 'finish' collects the
+# result afterwards, with a bounded wait.
+#
+# Deliberately NOT added to _SUB_TOOL_FUNCS: enabling a plugin mutates shared
+# configuration, which is a main-agent decision, not a delegated one.
+
+def _plugin_state_line(plugin_name: str) -> str:
+    """One readable line describing a plugin's enabled + connected state."""
+    pm = plugin_manager_module.plugin_manager
+    state = pm.plugin_state(plugin_name) or {}
+    enabled = "enabled" if state.get("enabled") else "disabled"
+
+    if not state.get("requires_setup"):
+        return f"{plugin_name}: {enabled} (local — no account setup needed)"
+    if state.get("authorized"):
+        account = state.get("account") or ""
+        return (f"{plugin_name}: {enabled}, connected"
+                + (f" as {account}" if account else ""))
+    if not state.get("client_configured"):
+        return (f"{plugin_name}: {enabled}, NOT connected "
+                f"(no Google OAuth client configured yet)")
+    return f"{plugin_name}: {enabled}, NOT connected (access not granted yet)"
+
+
+def _plugin_setup_prompt(plugin_name: str, service: str) -> str:
+    """Start the consent flow and return the URL the user has to open."""
+    info, error = google_oauth.begin_loopback_consent(service)
+    if error:
+        return (f"[ERROR] Could not start the Google consent flow for "
+                f"'{plugin_name}': {error}\n"
+                f"The OAuth client has to be an application of type 'Desktop app' "
+                f"— create one at {google_oauth.CLOUD_CONSOLE_CLIENTS}.\n"
+                f"Run '/plugin setup {plugin_name}' to do it interactively.")
+
+    url = info.get("url") or ""
+    lines = [f"'{plugin_name}' needs permission to access your Google account.",
+             "",
+             "Open this URL in the browser on this device and approve the request:"]
+    lines.append(f"  {url}")
+    lines.append("")
+    lines.append("If you approve it on another device instead, copy the "
+                 "address-bar URL (it contains ?code=...) and give it back to me.")
+    lines.append("")
+    lines.append("Tell me once you have approved it and I will finish connecting "
+                 "the account.")
+    return "\n".join(lines)
+
+
+def manage_plugin(action: str = "list", plugin: str = "", code: str = "") -> str:
+    """Inspect and control plugins: list, status, enable, disable, setup, finish, disconnect."""
+    log_write(f"[manage_plugin] action:{action} plugin:{plugin}")
+    pm = plugin_manager_module.plugin_manager
+
+    action = (action or "list").strip().lower()
+    plugin = (plugin or "").strip().lower()
+
+    if action in ("list", ""):
+        names = list(pm.list_plugins().keys())
+        return ("Termux-AI plugins:\n"
+                + "\n".join("  - " + _plugin_state_line(n) for n in names))
+
+    if not plugin:
+        return ("[ERROR] A plugin name is required for this action. Available: "
+                + ", ".join(pm.list_plugins().keys()))
+
+    state = pm.plugin_state(plugin)
+    if not state:
+        return (f"[ERROR] Unknown plugin '{plugin}'. Available: "
+                + ", ".join(pm.list_plugins().keys()))
+
+    if action == "status":
+        desc = state.get("description") or ""
+        lines = [f"Plugin '{plugin}': {_plugin_state_line(plugin)}"]
+        if desc:
+            lines.append(f"  {desc}")
+        # An enabled plugin whose runtime is down still fails every call —
+        # the model should see that before it tries.
+        runtime_getter = getattr(pm, "runtime_state", None)
+        if callable(runtime_getter):
+            runtime = runtime_getter(plugin) or {}
+            if runtime.get("state") not in ("no_runtime", "unknown"):
+                mark = "running" if runtime.get("ok") else "NOT running"
+                lines.append(f"  Runtime: {mark} — {runtime.get('message', '')}")
+        return "\n".join(lines)
+
+    if action == "disable":
+        if not pm.is_enabled(plugin):
+            return f"Plugin '{plugin}' is already disabled."
+        deactivate = getattr(pm, "deactivate", None)
+        if callable(deactivate):
+            result = deactivate(plugin)
+            runtime = result.get("runtime") or {}
+            message = (f"Plugin '{plugin}' disabled. Its tools are no longer "
+                       f"offered to me.")
+            if runtime.get("message"):
+                message += f" {runtime['message']}"
+            return message
+        pm.disable(plugin)
+        return f"Plugin '{plugin}' disabled. Its tools are no longer offered to me."
+
+    if action in ("enable", "setup", "connect"):
+        if not state.get("requires_setup"):
+            if action == "setup":
+                # The explicit setup path — for WhatsApp this is the
+                # pairing step.  The code itself is rendered in the user's
+                # terminal by the runtime, never here and never on its own.
+                setup = getattr(pm, "setup", None)
+                if callable(setup):
+                    result = setup(plugin)
+                    message = result.get("message") or ""
+                    if result.get("ok"):
+                        if result.get("state") == "reset":
+                            return (message + " The WhatsApp tools are no "
+                                    "longer offered to me until the plugin "
+                                    "is enabled again.")
+                        return message
+                    return f"[ERROR] {message}"
+            # A local plugin: enabling it also starts whatever it needs to
+            # run (the Termux-WP gateway for WhatsApp).  The tools are in my
+            # tool list from the next request on, so I can carry on with the
+            # task straight away instead of asking the user to repeat it.
+            activate = getattr(pm, "activate", None)
+            if callable(activate):
+                result = activate(plugin)
+                if not result.get("ok"):
+                    return (f"[ERROR] Could not enable '{plugin}': "
+                            f"{result.get('message', 'unknown error')}")
+                runtime = result.get("runtime") or {}
+                tools = result.get("tools") or []
+                if runtime.get("ok"):
+                    lines = [
+                        (f"Plugin '{plugin}' enabled (local plugin — no account "
+                         f"setup needed). {runtime.get('message', '')}").strip(),
+                        f"Its {len(tools)} tools are now in my tool list — I can "
+                        f"use them right away, so carry on with the task without "
+                        f"asking the user to repeat it.",
+                    ]
+                    if plugin == "whatsapp":
+                        lines.append("(If this device is not paired yet, call "
+                                     "manage_plugin(action='setup', "
+                                     "plugin='whatsapp') to put the pairing "
+                                     "code on the user's screen — it is never "
+                                     "printed on its own.)")
+                    return "\n".join(lines)
+                return (f"Plugin '{plugin}' is enabled, but its runtime did not "
+                        f"start: {runtime.get('message', 'unknown error')}\n"
+                        f"The {len(tools)} tools are advertised but will fail "
+                        f"until the runtime is up.")
+            if pm.is_enabled(plugin):
+                return f"Plugin '{plugin}' is already enabled (no account setup needed)."
+            pm.enable(plugin)
+            return f"Plugin '{plugin}' enabled (local plugin — no account setup needed)."
+
+        was_enabled = pm.is_enabled(plugin)
+        if not was_enabled:
+            pm.enable(plugin)
+        prefix = "" if was_enabled else f"Plugin '{plugin}' enabled. "
+
+        if state.get("authorized"):
+            account = state.get("account") or ""
+            return (prefix + f"'{plugin}' is already connected"
+                    + (f" as {account}" if account else "") + ".")
+
+        return prefix + _plugin_setup_prompt(plugin, state.get("service"))
+
+    if action == "finish":
+        if not state.get("requires_setup"):
+            return f"Plugin '{plugin}' does not need a setup step."
+        if state.get("authorized"):
+            account = state.get("account") or ""
+            return ("'" + plugin + "' is already connected"
+                    + (f" as {account}" if account else "") + ".")
+
+        service = state.get("service")
+
+        # The user may have approved on another device and copied the
+        # redirect URL — that is a complete code exchange on its own.
+        if (code or "").strip():
+            ok, detail = google_oauth.complete_code_flow(service, code)
+            if ok:
+                return (f"'{plugin}' is now connected"
+                        + (f" as {detail}" if detail else "")
+                        + ". Its tools are available.")
+            return (f"[ERROR] '{plugin}' setup did not finish: {detail}")
+
+        outcome = google_oauth.finish_loopback_consent(service)
+        if outcome.get("ok"):
+            account = outcome.get("account") or ""
+            return (f"'{plugin}' is now connected"
+                    + (f" as {account}" if account else "")
+                    + ". Its tools are available.")
+        if outcome.get("stage") == "pending":
+            return outcome.get("message", "Not approved yet.")
+        return (f"[ERROR] '{plugin}' setup did not finish: "
+                f"{outcome.get('message') or 'unknown error'}")
+
+    if action in ("disconnect", "revoke", "logout"):
+        if not state.get("requires_setup"):
+            return f"'{plugin}' has no account to disconnect."
+        google_oauth.revoke_token(state.get("service"))
+        return (f"'{plugin}' disconnected — access revoked. "
+                f"Run the setup again to reconnect it.")
+
+    return (f"[ERROR] Unknown action '{action}'. Valid: list, status, enable, "
+            f"disable, setup, finish, disconnect.")
+
+
 # ── Sub-AI tool registry ──────────────────────────────────────────────────────
 # Single source of truth for the tools a delegated sub-AI is allowed to run.
 # It is built here (after every tool function is defined) so the entries can
@@ -4524,6 +8458,7 @@ _SUB_TOOL_FUNCS: dict = {
     "run_diagnosis":              run_diagnosis,
     # Web / media
     "browse_web":                 browse_web,
+    "browser":                    browser,
     "generate_image":             generate_image,
     # WhatsApp
     "send_whatsapp_message":      send_whatsapp_message,
@@ -4543,6 +8478,26 @@ _SUB_TOOL_FUNCS: dict = {
     "silence_whatsapp_contact":   silence_whatsapp_contact,
     "schedule_whatsapp_message":  schedule_whatsapp_message,
     "set_whatsapp_seen":          set_whatsapp_seen,
+    # Google plugins (Gmail / Calendar / Drive)
+    "send_gmail_message":         send_gmail_message,
+    "get_gmail_messages":         get_gmail_messages,
+    "search_gmail":               search_gmail,
+    "read_gmail_message":         read_gmail_message,
+    "get_gmail_profile":          get_gmail_profile,
+    "get_gmail_labels":           get_gmail_labels,
+    "create_gmail_label":         create_gmail_label,
+    "delete_gmail_message":       delete_gmail_message,
+    "list_calendars":             list_calendars,
+    "get_calendar_events":        get_calendar_events,
+    "create_calendar_event":      create_calendar_event,
+    "update_calendar_event":      update_calendar_event,
+    "delete_calendar_event":      delete_calendar_event,
+    "list_drive_files":           list_drive_files,
+    "upload_drive_file":          upload_drive_file,
+    "download_drive_file":        download_drive_file,
+    "delete_drive_file":          delete_drive_file,
+    "create_drive_folder":        create_drive_folder,
+    "share_drive_file":           share_drive_file,
     # Platform wrappers (tools/wrapper_*.py)
     "get_contacts":               get_contacts,
     "get_contact_by_id":          get_contact_by_id,

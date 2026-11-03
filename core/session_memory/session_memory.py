@@ -7,7 +7,7 @@ compressed but detailed enough to continue from where we left off.
 Architecture:
 - workspace/session_draft.json  --  Incremental draft updated during the session
 - logs/session_<timestamp>.json  --  Finalized, compressed session record
-- Uses delegate_subtask with small model (north-mini-code:free) for compression
+- Uses delegate_subtask at the "low" intelligence level for compression
 """
 
 import sys
@@ -33,8 +33,10 @@ import paths
 DRAFT_FILE = os.path.join(paths.WORKSPACE_DIR, "session_draft.json")
 SESSIONS_DIR = paths.LOGS_DIR  # logs/session_<timestamp>.json
 
-# Compression model (free on OpenRouter, 256k context)
-COMPRESSION_MODEL = "cohere/north-mini-code:free"
+# Compression settings.  The sub-agent is selected by intelligence level now
+# (core/models.py SUBAGENT_TIERS), not by model id — "low" routes to the cheap
+# and fast models, which is what a compression pass needs.
+COMPRESSION_INTELLIGENCE = "low"
 COMPRESSION_MAX_TOKENS = 4096
 
 # Note types for structured draft
@@ -184,17 +186,18 @@ def get_session_draft() -> dict:
 
 def finalize_session(
     use_small_model: bool = True,
-    model: str = COMPRESSION_MODEL,
+    intelligence: str = COMPRESSION_INTELLIGENCE,
     max_tokens: int = COMPRESSION_MAX_TOKENS,
 ) -> str:
     """
     Finalize the current session: compress draft into a session file.
 
     Args:
-        use_small_model: If True, use delegate_subtask with small model for compression.
+        use_small_model: If True, use delegate_subtask for compression.
                         If False, just structure the draft as-is (faster, less compressed).
-        model: Model to use for compression (only if use_small_model=True)
-        max_tokens: Max tokens for compression model
+        intelligence: Intelligence level of the sub-AI used for compression
+                     ("low", "medium" or "high"; only if use_small_model=True)
+        max_tokens: Size hint for the compressed record (only if use_small_model=True)
 
     Returns:
         Path to the created session file
@@ -224,8 +227,8 @@ def finalize_session(
     session_file = os.path.join(SESSIONS_DIR, f"session_{session_id}.json")
 
     if use_small_model:
-        # Delegate to small model for intelligent compression
-        compressed = _compress_with_small_model(draft, model, max_tokens)
+        # Delegate to a low-tier sub-AI for intelligent compression
+        compressed = _compress_with_small_model(draft, intelligence, max_tokens)
         if compressed:
             final_data = compressed
         else:
@@ -249,9 +252,9 @@ def finalize_session(
     return str(session_file)
 
 
-def _compress_with_small_model(draft: dict, model: str, max_tokens: int) -> Optional[dict]:
+def _compress_with_small_model(draft: dict, intelligence: str, max_tokens: int) -> Optional[dict]:
     """
-    Use delegate_subtask to compress the draft with a small model.
+    Use delegate_subtask to compress the draft with a low-tier sub-AI.
     Returns the compressed session dict or None on failure.
     """
     try:
@@ -278,8 +281,7 @@ Return the compressed session object as JSON."""
     result = delegate_subtask(
         task=prompt,
         context="",
-        model=model,
-        max_tokens=max_tokens,
+        intelligence=intelligence,
         available_tools=[],  # No tools needed for compression
         tool_call_iterations=0,
         system_prompt=(

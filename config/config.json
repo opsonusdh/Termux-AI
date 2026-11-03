@@ -14,10 +14,10 @@
             "enabled": false
         },
         "google_calendar": {
-            "enabled": false
+            "enabled": true
         },
         "google_drive": {
-            "enabled": false
+            "enabled": true
         }
     }
 }

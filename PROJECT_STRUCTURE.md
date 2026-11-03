@@ -29,6 +29,14 @@ Termux-AI/
 │   ├── input_handler.py        ← Terminal input reading and slash-command parsing
 │   ├── renderer.py             ← Markdown → terminal, TTS render helpers, ANSI colors
 │   ├── permissions.py          ← Command safety validation (validate_command)
+│   ├── plugin_manager.py       ← Plugin enable/disable state, tool filtering,
+│   │                            Google OAuth service map, auth-aware gating,
+│   │                            runtime activation (enable → start → ready)
+│   ├── plugin_runtime.py        ← Runtime bridge: starts/stops what a plugin
+│   │                            needs to work (the Termux-WP node gateway)
+│   ├── google_oauth.py         ← Google OAuth 2.0: client creds, device + loopback
+│   │                            consent flow, token storage/refresh, setup flow
+│   ├── google_api.py           ← Gmail / Calendar / Drive REST clients
 │   └── whatsapp_manager.py     ← WhatsApp bridge integration manager
 │
 ├── agent/                      ← Planning, execution, validation, state
@@ -78,11 +86,12 @@ Termux-AI/
 │   └── cli_history             ← Terminal prompt command history
 │
 ├── logs/                       ← Execution and chat logs
+│   ├── log.txt                 ← Live session log (real-time, capped at 1M lines)
 │   ├── chunks.jsonl            ← Raw conversation chunk store (append-only)
 │   ├── chunk_summaries.json    ← Progressive summaries keyed by chunk ID
 │   ├── reflection.jsonl        ← Reflection loop records
 │   ├── whatsapp_log.jsonl      ← WhatsApp interaction history
-│   └── history.jsonl           ← Turn history log
+│   └── history.jsonl           ← Legacy turn history log
 │
 ├── instructions/               ← System instruction manuals & modular skills
 │   ├── readme.md               ← Instruction manual index

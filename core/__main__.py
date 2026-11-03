@@ -1,6 +1,5 @@
 import os
 import sys
-import subprocess
 from pathlib import Path
 
 sys.dont_write_bytecode = True
@@ -11,7 +10,7 @@ _ROOT = _CORE.parent
 if str(_CORE) not in sys.path:
     sys.path.insert(0, str(_CORE))
 if str(_ROOT) not in sys.path:
-    sys.path.insert(1, str(_ROOT))
+    sys.path.insert(0, str(_ROOT))
 
 def ensure_termux_property() -> None:
     if sys.platform == "win32" or os.name == "nt":
@@ -31,41 +30,26 @@ def ensure_termux_property() -> None:
 
     if target_line not in lines:
         with props_file.open("a", encoding="utf-8") as f:
-            if content and not content.endswith("\n"):
-                f.write("\n")
             f.write(target_line + "\n")
 
 ensure_termux_property()
 
-_WP_DIR = _ROOT / "Termux-WP"
-wp_process = None
-
-if _WP_DIR.exists():
-    node_cmd = ["node.exe", "bot"] if sys.platform == "win32" else ["node", "bot"]
-    try:
-        wp_process = subprocess.Popen(
-            node_cmd,
-            cwd=str(_WP_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-
-        for line in wp_process.stdout:
-            print(line, end="")
-
-            if "System Connected! Your phone is now sending and receiving." in line:
-                break
-    except Exception as e:
-        print(f"[WARN] Could not start WhatsApp bot process: {e}")
-        wp_process = None
+# The WhatsApp gateway (Termux-WP/bot.js) is started by the plugin runtime,
+# not here.
+#
+# This module used to spawn its own `node bot` and print the gateway's
+# stdout into the terminal.  That had three defects:
+#
+#   1. the gateway prints the rotating pairing QR to its stdout, so every
+#      session that started before pairing was buried under QR art;
+#   2. the read loop waited for "System Connected!" before the chat loop
+#      even began, so an unpaired device never reached the prompt;
+#   3. it started a *second* gateway next to the one the plugin runtime
+#      starts — two WebSocket listeners on one WhatsApp session means every
+#      incoming message is handled twice.
+#
+# The runtime owns the gateway now (core/plugin_runtime.py), and the
+# pairing code is only ever rendered on request ('/plugin setup whatsapp').
 
 from interface import chat_loop
 chat_loop()
-
-if wp_process:
-    try:
-        wp_process.terminate()
-    except Exception:
-        pass

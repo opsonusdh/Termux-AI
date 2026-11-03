@@ -1,0 +1,398 @@
+{
+  "method": "live probe: one chat completion with a `tools` payload and tool_choice=auto, sent through the same request builder the delegate uses (core.tools._delegate_request_kwargs); a model stays in the gate only when the provider answered with a tool call",
+  "models": {
+    "google/gemini-2.5-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 4.0,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-2.5-flash-lite": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 1.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3-flash-preview": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 1.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3.1-flash-lite": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 12.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3.5-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 3.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3.5-flash-lite": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 0.9,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3.6-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 2.7,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3.7-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...i2OE",
+      "latency_s": 84.7,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-3.8-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 66.8,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-flash-latest": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 138.7,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemini-flash-lite-latest": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 0.9,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemma-4-26b-a4b-it": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 2.5,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "google/gemma-4-31b-it": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...s3G8",
+      "latency_s": 62.2,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "groq/openai/gpt-oss-120b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...YyQn",
+      "latency_s": 0.6,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "groq/openai/gpt-oss-20b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...YyQn",
+      "latency_s": 0.7,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "groq/qwen/qwen3.8-27b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...YyQn",
+      "latency_s": 0.5,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/google/gemma-4-31b-it": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 53.6,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/minimaxai/minimax-m3.1-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 81.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/mistralai/mistral-large-4-1t-a52b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 62.8,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 51.6,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 1.0,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/nvidia/nemotron-3.5-bolt-e4b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 2.6,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/nvidia/nemotron-3.5-super-vl-120b-a12b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 2.7,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/openai/gpt-oss-20b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 1.8,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/poolside/laguna-xs-2.1": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 2.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/stepfun-ai/step-5-preview": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 14.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "nvidia/z-ai/glm-5.3-flash": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 145.2,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/beam:cloud": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...QjNP",
+      "latency_s": 1.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/gemma4:31b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/gemma4:31b-cloud": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/gpt-oss:120b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...QjNP",
+      "latency_s": 1.7,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/gpt-oss:120b-cloud": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...QjNP",
+      "latency_s": 0.9,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/gpt-oss:20b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...QjNP",
+      "latency_s": 1.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/nemotron-3-nano:30b": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/nemotron-3-super": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...QjNP",
+      "latency_s": 2.3,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "ollama/nemotron-3-ultra:cloud": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...QjNP",
+      "latency_s": 1.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/cohere/north-mini-code:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 1.2,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/dots-studio/dots-3-note-preview:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 6.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/google/gemma-4-26b-a4b-it:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 4.2,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/google/gemma-4-31b-it:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...1077",
+      "latency_s": 3.5,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/liquid/lfm-2.5-2.6b:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...1e8a",
+      "latency_s": 0.9,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 3.2,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 1.9,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/nvidia/nemotron-3.5-lightning:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 126.8,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/nvidia/nemotron-3.5-super-vl:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 0.9,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/poolside/laguna-s-2.1:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 1.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/poolside/laguna-xs-2.1:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...1077",
+      "latency_s": 5.8,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/recursive/flint-v1.0:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 1.4,
+      "status": "ok",
+      "tools_accepted": true
+    },
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...1077",
+      "latency_s": 5.4,
+      "status": "ok",
+      "tools_accepted": true
+    }
+  },
+  "verified_on": "2026-11-03"
+}

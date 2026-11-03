@@ -29,7 +29,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 - **Safe execution** — `permissions.py` validates every shell command before dispatch.
 - **Autonomous mode (opt-in)** — `/autonomous on` bypasses the permission layer entirely; off by default. See [Autonomous Mode](#autonomous-mode).
 - **Advanced LLM Client** — Enhanced model slot organization with agent-specific slots, advanced error handling for API failures, reasoning budget exhaustion management, native reasoning metadata preservation, and tool execution timeout tracking.
-- **Notifications (opt-in)** — When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification` after agent tasks complete (both inline `/agent [prompt]` and persistent agent mode).
+- **Notifications (opt-in)** — When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification` **whenever the AI stops and waits for you** — a permission request, a confirmation, or a question — and after an agent task completes. Each kind of prompt gets its own notification, so the shade says what is being asked. See [Notifications](#notifications).
 
 ---
 
@@ -186,7 +186,7 @@ The following options are available in `config/config.json`:
 | `use_groq` | boolean | `false` | Use Groq TTS (faster, requires internet) |
 | `show_details` | boolean | `false` | Show expanded tool output by default |
 | `autonomous` | boolean | `false` | Bypass permission layer (opt-in) |
-| `notify` | boolean | `true` | Send system notification after agent tasks complete |
+| `notify` | boolean | `true` | Push a notification when the AI waits for you (permission / confirmation / question) and when an agent task completes |
 
 Example `config.json`:
 ```json
@@ -214,16 +214,38 @@ YOU > /chat           # switch to conversational mode
 
 Initialize a project and add tasks through normal chat — Orion uses the `initialize_project` and `add_subtask` tools. State persists in `data/state.json` and survives restarts.
 
-### Agent Notifications
+### Notifications
 
-When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification` after:
-- `/agent auto` completes its loop
-- `/agent [prompt]` finishes an inline agent task
-- Persistent agent mode (`/agent` mode) completes a task
+When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification`.
 
-The notification appears in the Android notification shade with title "Termux-AI Agent" and message "Agent task completed" (or "Agent auto task completed").
+**When the AI waits for you** — the runtime blocks on `input()`, and on a phone
+the terminal is usually in the background, so nothing on screen says that
+something is being asked. Each of those moments pushes its own notification:
 
-To disable: set `"notify": false` in `config/config.json`.
+| The AI is… | Notification title | The body carries |
+|---|---|---|
+| asking for permission to run something | `Termux-AI: Permission needed` | every command in the batch and the reason for it |
+| waiting for a yes/no confirmation | `Termux-AI: Confirmation needed` | the question and which key Enter answers |
+| waiting for an answer to a question | `Termux-AI: Question` | the question and the options, if there are any |
+
+The permission prompt, the `confirm` tool and the `ask_user` tool are the three
+places that block, so those are the three places that notify.
+
+**When an agent task finishes** — after `/agent auto` completes its loop,
+`/agent [prompt]` finishes an inline task, or persistent agent mode completes
+a task, the notification says "Termux-AI Agent — Agent task completed".
+
+Switch it without touching the file:
+
+```
+YOU > /notify true      # on — and a test notification proves the plumbing
+YOU > /notify false     # off — the AI stops pinging you while it waits
+YOU > /notify status    # what is it doing right now?
+```
+
+To disable it permanently: set `"notify": false` in `config/config.json`.
+A missing Termux:API package is not an error — the notification is simply
+skipped, and the runtime carries on.
 
 ---
 
@@ -283,7 +305,61 @@ Wrote 16 lines to core/llm_client.py
 [TOOL DONE] (0.08s)
 ```
 
-Every other tool follows the same shape — `[TOOL_NAME]` collapsed, `[TOOL_NAME] <key argument>` plus a full `[OUTPUT]` block expanded — and a failed call closes with `[TOOL ERROR] (Xs)` instead of `[TOOL DONE]`. This is presentation only: the model always receives the complete tool output regardless of what the terminal happens to be showing.
+Every other tool follows the same shape — `[TOOL_NAME]` collapsed, every one of its arguments plus a full `[OUTPUT]` block expanded — and a failed call closes with `[TOOL ERROR] (Xs)` instead of `[TOOL DONE]`. This is presentation only: the model always receives the complete tool output regardless of what the terminal happens to be showing.
+
+Expanded shows **all** of a call, not a summary:
+
+- `write_file` shows the path, the mode, the affected line range **and the content being written**.
+- `find_replace` shows the path and the **complete** find and replace text.
+- `shell` shows the whole command and the timeout budget.
+- Every other tool shows all of its arguments, one per line — including the tools that have no obvious "main" argument (`delegate_subtask`, `create_calendar_event`, `share_drive_file`, …), which used to show nothing at all.
+
+### Delegation
+
+A delegated sub-task shows the whole hand-over in expanded mode — the manager's command, the context it supplied, the tools the sub-AI may use, the iteration budget and the system prompt — followed by every tool call the sub-AI makes (with its arguments) and the output each call returned:
+
+```
+[DELEGATE COMMAND] intelligence=high iterations=5
+[DELEGATE TASK]
+    Audit the shell parser
+[DELEGATE CONTEXT]
+    core/shell_parse.py holds the parser
+[DELEGATE TOOLS] read_file, search_in_files, shell
+[DELEGATE TOOL] shell
+    {
+      "bash": "grep -n parse core/shell_parse.py"
+    }
+[DELEGATE RESULT] shell
+    42:def parse(command):
+```
+
+---
+
+## Session Log
+
+Everything the runtime does is appended to `logs/log.txt` **as it happens** — the user's message, the model's reasoning, every tool call with its full arguments, every tool result with its full output, the delegation traffic and the final replies.
+
+Each write is flushed immediately, so a tool call is in the log *while it is still running*, not after the turn ends:
+
+```
+$ tail -f logs/log.txt
+[2026-11-03 16:57:19] [session]
+    session started (pid 24460) — live log: .../logs/log.txt
+[2026-11-03 16:57:19] [user] input | chat
+    Use the get_datetime tool to tell me the current date and time
+[2026-11-03 16:57:26] [reasoning] ollama/beam:cloud
+    I need to call the get_datetime tool to find out the current date and time.
+[2026-11-03 16:57:26] [tool:call] get_datetime
+[2026-11-03 16:57:26] [tool:result] get_datetime (0.00s)
+    Local Time : 2026-11-03 16:57:26
+    Day of Week: Tuesday
+[2026-11-03 16:57:28] [reply] final
+    It's Tuesday, November 03, 2026 at 4:57 PM IST.
+```
+
+If the session is cut short mid-turn, the log still shows exactly what was being done — the last tool call is on disk with its arguments, and the result is simply missing.
+
+The file is capped at **1,000,000 lines**. When it grows past that, the oldest lines are dropped, oldest first, so the log keeps the most recent history instead of eating the device's storage. The trim streams the file through a temporary copy and swaps it in atomically, so a reader tailing the log never sees a half-written file.
 
 ---
 
@@ -299,8 +375,8 @@ Every other tool follows the same shape — `[TOOL_NAME]` collapsed, `[TOOL_NAME
 If a terminal doesn't pass a key combo through, the same toggle is available as a command, in both `/agent` and normal chat:
 
 ```
-YOU > /expand      # aliases: /details on, /view extended
-YOU > /collapse    # aliases: /details off, /view collapsed
+YOU > /expand      # aliases: /e, /details on, /view extended
+YOU > /collapse    # aliases: /c, /details off, /view collapsed
 ```
 
 ---
@@ -353,6 +429,136 @@ cd Termux-WP && bash setup.sh
 ```
 YOU > Enable busy mode on WhatsApp for the next hour.
 ```
+
+---
+
+## Plugins
+
+Plugins add whole capability groups, and each one can be switched on or off
+independently. Two kinds exist:
+
+- **Local plugins** — `whatsapp` pairs on the device, so it needs no account
+  handshake. Enabling it also **starts what it needs to run**: the Termux-WP
+  node gateway (`bot.js`) is launched for you, so the WhatsApp tools work
+  right away instead of failing with "connection refused". A gateway that
+  dies is restarted automatically, and an orphaned browser holding the
+  WhatsApp profile is cleared before the next start.
+- **Account plugins** — `gmail`, `google_calendar`, `google_drive`. Enabling
+  one is only *half* the job: the account still has to grant access before the
+  tools become usable.
+
+```bash
+/plugin                      # show every plugin and its state
+/plugin status gmail         # one plugin in detail
+/plugin status whatsapp      # …including whether this device is paired
+/plugin setup gmail          # connect the account (shows the URL to approve)
+/plugin setup whatsapp       # pair this device (shows the QR — once)
+/plugin enable gmail         # enable — and start the permission request
+/plugin enable whatsapp      # enable — and start the Termux-WP gateway
+/plugin disable gmail        # stop offering its tools
+/plugin disconnect gmail     # revoke the stored Google access
+```
+
+The plugin manager itself (`manage_plugin`) is always in the assistant's tool
+list, and a plugin's tools join that list the moment it is enabled — no
+restart, no repeat of the request.
+
+#### Pairing WhatsApp
+
+The WhatsApp session is paired by scanning a QR code, and that code is a live
+secret — whoever scans it gets read/write access to your account. So the
+plugin never prints it on its own: it is captured, and drawn **only** when you
+ask for it.
+
+```bash
+/plugin setup whatsapp       # the pairing code appears on your screen, once
+```
+
+If the device is **already paired** and you ask for the code again, there is no
+code to give — a re-pair is what you are after — so the plugin stops the
+gateway and switches itself off instead. Run `/plugin enable whatsapp` to bring
+it back.
+
+An unpaired gateway is silent: it does not reprint the code while you are
+chatting, and it does not announce that it connected or print your number.
+`/plugin status whatsapp` tells you the pairing state when you ask for it.
+
+### Connecting a Google account
+
+You can also just ask: *"turn on Gmail"* — the assistant calls `manage_plugin`
+and hands you the link.
+
+```bash
+/plugin setup gmail
+```
+
+That prints a URL. Open it **in the browser on this device**, sign in with the
+account you want to connect, and approve the permissions:
+
+```
+┌─ Gmail setup — Google OAuth ─────────────┐
+  Open this URL in the browser on this device —
+  the approval is sent straight back to Termux-AI:
+  https://accounts.google.com/o/oauth2/v2/auth?...
+  Sign in and approve the requested permissions.
+  (waiting for the approval… press Ctrl+C to abort)
+```
+
+Termux-AI runs a throwaway local web server and Google sends the approval
+straight back to it, so nothing has to be copied. If you approve on another
+device instead, the redirect cannot reach this one — copy the address-bar URL
+(it contains `?code=…`) and paste it back; that works too.
+
+Once you approve, the token is stored and the Gmail tools become visible to
+the model.
+
+**You need a Google OAuth client first (about 2 minutes, one time):**
+
+1. **OAuth consent screen** — <https://console.cloud.google.com/auth/overview>.
+   Choose **External**, fill in the app name and a support email, and add your
+   own Google account as a **test user** (test users can approve sensitive
+   scopes without waiting for a review).
+2. **Enable the API** in the API library:
+   - Gmail — <https://console.cloud.google.com/apis/library/gmail.googleapis.com>
+   - Drive — <https://console.cloud.google.com/apis/library/drive.googleapis.com>
+   - Calendar — <https://console.cloud.google.com/apis/library/calendar-json.googleapis.com>
+3. **Create the client** — <https://console.cloud.google.com/auth/clients> →
+   *Create credentials → OAuth client ID* → application type **Desktop app**.
+   > **Do not pick "TVs and Limited Input devices".** That client type only
+   > supports the device-code flow, which cannot request the Gmail, Calendar or
+   > Drive scopes, and Google blocks the local redirect for it — you get
+   > *"Access blocked: … request is invalid"*. A **Desktop app** client is the
+   > one that supports the local redirect Termux-AI uses.
+4. **Copy the Client ID and Client secret** from the same page
+   (<https://console.cloud.google.com/auth/clients>). The next
+   `/plugin setup gmail` asks for them, or you can export them instead so they
+   never touch the repo:
+
+```bash
+export GOOGLE_CLIENT_ID="..."
+export GOOGLE_CLIENT_SECRET="..."
+```
+
+Reference: [Desktop app flow](https://developers.google.com/identity/protocols/oauth2/native-app) ·
+[device flow for TVs](https://developers.google.com/identity/protocols/oauth2/limited-input-device) ·
+[all scopes](https://developers.google.com/identity/protocols/oauth2/scopes) ·
+[why the local redirect works for Desktop clients only](https://developers.google.com/identity/protocols/oauth2/resources/loopback-migration)
+
+### Where the credentials live
+
+| File | Contents | Permissions |
+|---|---|---|
+| `config/google_oauth.json` | OAuth client id + secret | `0600`, permission-gated |
+| `data/google_tokens/<service>.json` | access + refresh tokens | `0600`, permission-gated |
+| `data/google_pending_auth.json` | in-flight PKCE verifier | `0600`, permission-gated |
+
+All three are treated like `config/api.keys`: they are protected in every
+permission mode, including autonomous, and are git-ignored. Tokens are never
+printed — `/plugin status` reports the connected *account*, not the token.
+
+If a plugin is enabled but the account is not connected, the tools stay hidden
+from the model and a call returns an explicit message naming the command to
+run — instead of failing in a way that looks like a bug.
 
 ---
 

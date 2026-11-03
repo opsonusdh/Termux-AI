@@ -148,3 +148,21 @@ If any, **MUST** fix errors that are found.
 - **Type Hints:** Use explicit typing and `X | Y` for Union types.
 - **Pattern Matching:** Use `match ... case` statements where suitable.
 - **Context Managers:** Always use `with` statements for resource management.
+
+---
+
+## 10. Module Import & Singleton Invariants
+
+- **Importing Permissions:** `core/permissions.py` must always be imported as `from core import permissions` (or `from core.permissions import ...`), never as a top-level `import permissions` (which creates a duplicate module instance with isolated state).
+- **Module Shadowing (`tools`):** `core/tools.py` is imported as `tools`, shadowing the `tools/` package in `sys.modules`. Platform wrappers must be loaded by file path (`spec_from_file_location`) or re-exported through `core/tools.py`.
+- **Dual Module Registration:** Stateful core modules (e.g., context compressor, context manager) must register themselves in `sys.modules` under both `core.<name>` and bare `<name>` to prevent separate duplicate instances across different import statements.
+
+---
+
+## 11. LLM Client, Model Registries & Output Separation
+
+- **Type Hints & Docstrings:** All public functions must have explicit type hints and descriptive docstrings (enforced by CI).
+- **Centralized Provider Endpoints:** Provider base URLs live only in `core/models.py` (`PROVIDERS`). Tools and agents must look up `PROVIDERS[pid]["base_url"]` rather than hardcoding endpoints.
+- **Immutable Model Registries:** Never mutate global model registries (`MODEL_SLOTS`, `AGENT_MODEL_SLOTS`) at runtime. Per-request parameter overrides must be stored in request-local dictionaries.
+- **Key Exhaustion & Cooldown:** Persistent error tracking in `llm_client.py` rotates keys after 10 consecutive same-status failures (e.g. 429 rate limits) and applies a timed cooldown before retrying exhausted keys.
+- **Working Trace Decoupling:** Model replies must never leak internal tool-call narration into the final response. `core/llm_client.py` separates working traces from final answers into a collapsable `[Working trace]` section.

@@ -207,8 +207,17 @@ def highlight_code(code: str, lang: str = '', style: str = 'monokai') -> str:
 # Width helpers
 # ============================================================
 
-def _term_size() -> Tuple[int, int]:
+def term_size() -> Tuple[int, int]:
+    """Current terminal size as ``(columns, rows)``, with an 80x24 fallback.
+
+    Public so the terminal-chrome layer (``core/ui.py``) can size its panels
+    and banners against the same source of truth the markdown renderer uses.
+    """
     return shutil.get_terminal_size((80, 24))
+
+
+def _term_size() -> Tuple[int, int]:
+    return term_size()
 
 
 def visible_len(s: str) -> int:

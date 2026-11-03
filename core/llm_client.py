@@ -17,11 +17,15 @@ from agent import state_manager
 from openai import OpenAI
 import httpx
 from core.renderer import RED, YELLOW, RESET, GRAY, GREEN, BLUE, CYAN, MAG, DIM
-from tools import *
+from core import tools as _tool_runtime
+from core import runtime_log
+from core.tools import *
 from core.plugin_manager import plugin_manager
 import context_manager as _cm
+import context_compressor as _cc
 import core.display_state as display_state
-from core.models import PROVIDERS, MODEL_SLOTS, AGENT_MODEL_SLOTS
+from core.models import (PROVIDERS, MODEL_SLOTS, AGENT_MODEL_SLOTS,
+                       model_supports_vision)
 
 with open(paths.PROMPT_FILE, encoding="utf-8") as file:
     SYSTEM_PROMPT = file.read()
@@ -104,6 +108,9 @@ _SAME_STATUS_THRESHOLD = 10
 _consecutive_error_status: dict[tuple[str, str], int | None] = {}
 _consecutive_error_count: dict[tuple[str, str], int] = {}
 _persistent_exhausted_keys: dict[tuple[str, str], set[str]] = {}
+# Timestamps when keys were added to _persistent_exhausted_keys, so they
+# can be retried after _EXHAUSTED_COOLDOWN seconds (rate-limit reset window).
+_exhausted_key_timestamps: dict[tuple[str, str], dict[str, float]] = {}
 
 
 def _next_key(
@@ -151,15 +158,53 @@ def _reset_error_counters(provider_id: str, model_name: str) -> None:
     _consecutive_error_status[_pkey] = None
     _consecutive_error_count[_pkey] = 0
     _persistent_exhausted_keys.pop(_pkey, None)
+    _exhausted_key_timestamps.pop(_pkey, None)
 
 
 def _get_exhausted_keys(pid: str, model_name: str,
                         exhausted_keys: dict) -> set[str]:
-    """Union of locally- and persistently-exhausted keys for a provider+model."""
-    return (
-        exhausted_keys.get((pid, model_name), set())
-        | _persistent_exhausted_keys.get((pid, model_name), set())
+    """Union of locally- and persistently-exhausted keys for a provider+model.
+
+    Keys that have been in _persistent_exhausted_keys for longer than
+    _EXHAUSTED_COOLDOWN seconds are automatically released — a rate-limit
+    or transient-server-error lock should be temporary, not permanent.
+    Without this, a single 429 storm (10 rapid retries) would blacklist a
+    key forever, since the only other clearance path is a successful API
+    response, which is impossible while the key is blocked.
+    """
+    pkey = (pid, model_name)
+    merged = (
+        exhausted_keys.get(pkey, set())
+        | _persistent_exhausted_keys.get(pkey, set())
     )
+    # Expiry sweep: release keys whose cooldown has elapsed
+    timestamps = _exhausted_key_timestamps.get(pkey, {})
+    if timestamps:
+        now = time.time()
+        expired = [
+            k for k, ts in timestamps.items()
+            if now - ts >= _EXHAUSTED_COOLDOWN
+        ]
+        if expired:
+            persistent = _persistent_exhausted_keys.get(pkey)
+            if persistent is not None:
+                for k in expired:
+                    persistent.discard(k)
+                if not persistent:
+                    _persistent_exhausted_keys.pop(pkey, None)
+            for k in expired:
+                timestamps.pop(k, None)
+            if not timestamps:
+                _exhausted_key_timestamps.pop(pkey, None)
+    # Recompute merged AFTER the cooldown sweep so that keys which are both
+    # locally exhausted (this call) and past their persistent cooldown are
+    # still retained — local exhaustion has no cooldown and must keep the
+    # key blocked for the remainder of this _ask_with_slots call.
+    merged = (
+        exhausted_keys.get(pkey, set())
+        | _persistent_exhausted_keys.get(pkey, set())
+    )
+    return merged
 
 
 def _log_api_error_log(
@@ -206,16 +251,214 @@ def _error_status(exc: Exception) -> int | None:
     return None
 
 
+# Phrasing that providers actually use when the *prompt* does not fit.
+# The old matcher looked for bare words ("context", "exceed", "window"),
+# which also matched unrelated failures — "rate limit exceeded" was read as
+# a context error, and the runtime then spent the request halving
+# max_tokens instead of compressing the context it actually had.
+_CONTEXT_ERROR_PATTERNS = (
+    "context length",
+    "context_length",
+    "context window",
+    "context limit",
+    "maximum context",
+    "max context",
+    "available context",
+    "exceeds the maximum number of tokens",
+    "maximum number of tokens",
+    "too many tokens",
+    "prompt is too long",
+    "input is too long",
+    "input length",
+    "token limit",
+    "tokens exceeds",
+    "reduce the length",
+    "request too large",
+    "payload too large",
+    "string too long",
+    "payload size exceeds",
+    "exceeds the limit",
+    "prompt size exceeds",
+    "max_model_len",
+    "model_length",
+    "max_prompt_tokens",
+    "context_overflow",
+    "input token count",
+    "prompt exceeds",
+    "input exceeds",
+    "request exceeds",
+)
+
+# HTTP statuses a provider — or a proxy in front of it — uses when the
+# request itself is too big.  413 is the standard one; the others are seen
+# in the wild as a gateway refusing an oversized body.  They are only a
+# hint: the message decides when it says anything useful.
+_CONTEXT_STATUS_CODES = {405, 413, 422, 431}
+
+# A failure that is definitely about something else — credentials, quota,
+# rate limiting — must never be answered by compressing the context.
+_OTHER_CAUSE_PATTERNS = (
+    "rate limit",
+    "too many requests",
+    "quota",
+    "insufficient_quota",
+    "unauthorized",
+    "invalid api key",
+    "authentication",
+    "permission denied",
+    "forbidden",
+    "insufficient credits",
+    "payment required",
+)
+
+# The window the provider states in its own error message.  This is the
+# only trustworthy number — the endpoint decides, not a local registry:
+#   "This model's maximum context length is 8192 tokens"      -> 8192
+#   "This endpoint's maximum context length is 262144 tokens"  -> 262144
+_CONTEXT_LIMIT_PATTERNS = (
+    re.compile(r"['\"]limit['\"]\s*:\s*([\d][\d,_]*)", re.I),
+    re.compile(r"max(?:imum)?\s+context\s+length\s+is\s*([\d][\d,_]*)(?:\s*tokens)?", re.I),
+    re.compile(r"max(?:imum)?\s+context\s+length\s*[:=]\s*([\d][\d,_]*)", re.I),
+    re.compile(r"context\s+window\s+is\s*([\d][\d,_]*)(?:\s*tokens)?", re.I),
+    re.compile(r"max(?:imum)?\s+context\s+window\s*[:=]\s*([\d][\d,_]*)", re.I),
+    re.compile(r"([\d][\d,_]*)\s*tokens?\s+(?:is|are)\s+(?:the\s+)?(?:maximum|max)\s+context", re.I),
+    re.compile(r"tokens?\s*[>:]\s*([\d][\d,_]*)\s*(?:maximum|max)", re.I),
+    re.compile(r"limit\s+of\s+([\d][\d,_]*)\s*tokens?", re.I),
+    re.compile(r"context\s+length\s+of\s+([\d][\d,_]*)\s*tokens?", re.I),
+    re.compile(r"max(?:imum)?\s+context[^\d]{0,24}([\d][\d,_]*)\s*tokens?", re.I),
+    re.compile(r"max_model_len\s*[:=]\s*([\d][\d,_]*)", re.I),
+)
+
+
+def _error_text(exc: Exception) -> str:
+    """Everything the provider said about the failure.
+
+    The SDK's exception string usually carries the provider's message, but
+    some providers put the detail only in the response body — both are read
+    so a context error is recognised whatever shape it arrives in.
+    """
+    parts = [str(exc)]
+    response = getattr(exc, "response", None)
+    body = getattr(response, "text", None)
+    if isinstance(body, str) and body:
+        parts.append(body)
+    return " ".join(parts)
+
+
 def _is_context_error(exc: Exception) -> bool:
     """Identify request-size/context errors independently of HTTP status."""
-    s = str(exc).lower()
-    return any(
-        x in s
-        for x in (
-            "context", "token_limit", "max_tokens", "exceed",
-            "excluding", "window", "too many tokens", "prompt is too long",
-        )
-    )
+    text = _error_text(exc).lower()
+    if any(x in text for x in _CONTEXT_ERROR_PATTERNS):
+        return True
+    status = _error_status(exc)
+    if status == 413:
+        return True
+    if status in _CONTEXT_STATUS_CODES:
+        # The body says nothing useful — the status is the only hint left.
+        # Compressing once is cheap, and the ordinary fallback still runs if
+        # this was something else entirely.
+        return not any(x in text for x in _OTHER_CAUSE_PATTERNS)
+    return False
+
+
+def _parse_context_limit(exc: Exception) -> int | None:
+    """The context window the provider states in its own error message.
+
+    Returns ``None`` when the provider does not say — the caller then
+    compresses without a budget instead of guessing a window.
+    """
+    text = _error_text(exc)
+    for pattern in _CONTEXT_LIMIT_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1).replace(",", "").replace("_", ""))
+        except ValueError:
+            continue
+        if 256 <= value <= 10_000_000:
+            return value
+    return None
+
+
+# The smallest prompt and the smallest output cap that are still worth
+# sending.  Below these a request cannot do anything useful, so the runtime
+# stops tuning and moves on to another model.
+_MIN_PROMPT_TOKENS = 512
+_MIN_OUTPUT_TOKENS = 512
+
+
+def _estimate_tool_tokens(tools) -> int:
+    """
+    Rough token cost of the tool catalogue the provider receives.
+
+    The catalogue is part of the request: a provider that counts the prompt
+    counts the schemas too ("9089 of tool input" in an OpenRouter error).
+    It is not part of the message list, so the compressor cannot shrink it
+    — but it has to be subtracted from the window, or the history is
+    compressed into a budget that was never available in the first place.
+    """
+    if not tools:
+        return 0
+    try:
+        payload = json.dumps(tools)
+    except (TypeError, ValueError):
+        return 0
+    return len(payload) // 4
+
+
+def _context_input_budget(limit_tokens: int, max_tok: int | None,
+                           tool_tokens: int) -> int:
+    """
+    How many tokens the message history may use inside the provider's window.
+
+    The window is shared between the prompt, the tool catalogue and the
+    output the model is allowed to produce, so both are taken off the top
+    before the history is measured.  The token estimate itself is rough
+    (characters / 4), so a margin is kept on top of it.
+    """
+    reserve_output = max_tok if max_tok else 0
+    usable = limit_tokens - reserve_output - tool_tokens
+    usable = int(usable * 0.85)
+    return max(usable, _MIN_PROMPT_TOKENS)
+
+
+def _clamp_max_tokens(max_tok: int | None, limit_tokens: int,
+                       tool_tokens: int = 0) -> int | None:
+    """
+    Keep the output cap inside the window the provider actually enforces.
+
+    The window is shared by the tool catalogue, the prompt and the output, so
+    the cap has to leave room for both.  A slot may ask for more output
+    tokens than the model has room for in total — NVIDIA's endpoint answered
+    "maximum context length is 8192 tokens" to a request that asked for 16384
+    output tokens.  The request can only succeed when the output cap leaves
+    room for the prompt.
+    """
+    if max_tok is None:
+        return None
+    room = limit_tokens - tool_tokens - _MIN_PROMPT_TOKENS
+    cap = min(max_tok, max(_MIN_OUTPUT_TOKENS,
+                            min(limit_tokens // 4, room)))
+    return max(_MIN_OUTPUT_TOKENS, cap)
+
+
+def _normalize_reasoning_key(d: dict) -> None:
+    """Collapse duplicate reasoning keys to a single ``reasoning_content`` entry.
+
+    Some providers (nvidia, OpenRouter) return reasoning under
+    ``reasoning_content``; the OpenAI Python SDK stores it in ``model_extra``
+    and ``model_dump()`` copies it into the dict.  Older code paths may also
+    set a separate ``reasoning`` key.  Having both keys in the same message dict
+    causes nvidia's API to reject the request with a 400 "duplicate field
+    ``reasoning_content``".  This helper guarantees a single canonical key
+    survives into the serialised JSON.
+    """
+    if "reasoning" in d and "reasoning_content" in d and d["reasoning"] != d.get("reasoning_content"):
+        # Prefer reasoning_content (nvidia/OpenRouter convention)
+        d.pop("reasoning", None)
+    elif "reasoning" in d:
+        d["reasoning_content"] = d.pop("reasoning")
 
 
 def _msg_to_dict(msg) -> dict:
@@ -240,10 +483,29 @@ def _msg_to_dict(msg) -> dict:
         if content is not None:
             d["content"] = content
         if reasoning:
-            d["reasoning"] = reasoning
+            # Normalise to a single canonical key.  The OpenAI SDK v2.53
+            # stores ``reasoning_content`` in ``model_extra`` and
+            # ``model_dump()`` already copies it into *d*.  If we also add a
+            # separate ``reasoning`` key here, the dict ends up with both —
+            # and when it is later serialised, nvidia's API rejects the
+            # request with a 400 ("duplicate field `reasoning_content`").
+            # Always use ``reasoning_content`` as the single key and drop any
+            # stray ``reasoning`` copy to guarantee no duplicate ever reaches
+            # the wire.
+            d.pop("reasoning", None)
+            if "reasoning_content" not in d:
+                d["reasoning_content"] = reasoning
         if reasoning_details is not None:
             d["reasoning_details"] = reasoning_details
 
+    # Normalise reasoning keys for dict inputs too — a message dict may
+    # already carry both ``reasoning`` and ``reasoning_content`` (from a prior
+    # unnormalised serialisation).  Collapse to the single canonical key so
+    # the downstream JSON never contains a duplicate that nvidia rejects.
+    _normalize_reasoning_key(d)
+
+    # Tool-call serialisation only applies to SDK message objects.
+    if not isinstance(msg, dict):
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             serialised = []
@@ -283,6 +545,191 @@ _DUMMY_SIG = "context_engineering_is_the_way_to_go"
 _GEMINI_PROVIDERS = {"google"}
 
 
+def _find_vision_slot(model_slots: list[dict], start: int) -> int | None:
+    """Index of a slot whose model can see images.
+
+    Slots after ``start`` are preferred; if there is none, the ones before
+    it are considered.  Returning ``None`` means no configured model can
+    look at an image.
+    """
+    for index in range(start + 1, len(model_slots)):
+        slot = model_slots[index]
+        if model_supports_vision(slot.get("provider_id", ""),
+                                 slot.get("name")):
+            return index
+    for index in range(0, start):
+        slot = model_slots[index]
+        if model_supports_vision(slot.get("provider_id", ""),
+                                 slot.get("name")):
+            return index
+    return None
+
+
+def _append_image_message(messages: list[dict], attachments: list[dict]) -> None:
+    """Hand the pictures a tool produced to the model.
+
+    The images travel in a *user* message that follows the tool result.
+    Putting the image part inside the tool message itself is rejected by
+    Google ("Invalid content part type: image_url"), and a user message is
+    accepted by every provider that can see images.
+
+    The parts carry a path rather than the pixels; the payload is inlined
+    once per request by :func:`_prepare_messages_for_wire`.
+    """
+    if not attachments:
+        return
+    parts: list[dict] = [{
+        "type": "text",
+        "text": ("[Screenshot(s) captured by the tool above — this is what "
+                 "the page looks like.]"),
+    }]
+    for att in attachments:
+        parts.append({
+            "type": "orion_image",
+            "path": att.get("path", ""),
+            "label": att.get("label", "image"),
+        })
+    messages.append({"role": "user", "content": parts})
+
+
+def _sanitize_multimodal_content(content: list, pid: str,
+                                 model_name: str | None) -> list | str:
+    """Prepare a multimodal content list for the target model.
+
+    Image parts are kept when the model can see images and replaced with a
+    short text note when it cannot — a request that carries an image to a
+    text-only model is rejected outright, whereas a note is merely less
+    useful.  The pixels are *not* inlined here: that happens once per
+    request in :func:`_prepare_messages_for_wire`.
+    """
+    vision = model_supports_vision(pid, model_name)
+    kept: list = []
+    texts: list[str] = []
+    dropped: list[str] = []
+
+    for part in content:
+        if not isinstance(part, dict):
+            texts.append(str(part))
+            continue
+        ptype = part.get("type")
+        if ptype in ("image_url", "orion_image", "input_image"):
+            if vision:
+                kept.append(part)
+            else:
+                dropped.append(str(part.get("label") or "image"))
+            continue
+        if ptype == "text":
+            texts.append(str(part.get("text", "")))
+            continue
+        kept.append(part)
+
+    if dropped:
+        texts.append(
+            f"[{len(dropped)} image(s) omitted: {', '.join(dropped)} — this "
+            "model cannot view images]"
+        )
+
+    if not kept:
+        return "\n".join(t for t in texts if t)
+
+    if texts:
+        joined = "\n".join(t for t in texts if t)
+        if joined:
+            kept = [{"type": "text", "text": joined}] + kept
+    return kept
+
+
+def _strip_images(messages: list[dict]) -> list[dict]:
+    """Return a copy of the messages with every image part removed.
+
+    Used as the fallback when a provider rejects a request because it
+    cannot handle image input: the same model is retried with the picture
+    replaced by a text note instead of the whole model being abandoned.
+    """
+    stripped: list[dict] = []
+    changed = False
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            stripped.append(msg)
+            continue
+        parts: list = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in (
+                    "orion_image", "image_url", "input_image"):
+                changed = True
+                parts.append({
+                    "type": "text",
+                    "text": f"[image omitted: {part.get('label', 'image')}]",
+                })
+            else:
+                parts.append(part)
+        new_msg = dict(msg)
+        new_msg["content"] = parts
+        stripped.append(new_msg)
+    return stripped if changed else messages
+
+
+def _prepare_messages_for_wire(messages: list[dict], pid: str,
+                               model_name: str | None,
+                               max_images: int = 3) -> list[dict]:
+    """Turn the internal message list into the form the provider expects.
+
+    Images are held internally as ``{"type": "orion_image", "path": …}``
+    markers so the stored conversation keeps the *path* rather than a
+    megabyte of base64 pixels.  Here the markers are inlined as the
+    OpenAI-style ``image_url`` parts that providers accept.
+
+    At most ``max_images`` pictures go out in a single request — the most
+    recent ones win — so a long browsing session cannot blow the context
+    budget.  A model that cannot see images gets a text note instead, so the
+    request still succeeds.
+    """
+    if not messages:
+        return messages
+
+    vision = model_supports_vision(pid, model_name)
+
+    # Locate the image markers, newest message first, so the cap keeps the
+    # most recent pictures.
+    markers: list[tuple[int, int]] = []
+    for mi in range(len(messages) - 1, -1, -1):
+        content = messages[mi].get("content")
+        if not isinstance(content, list):
+            continue
+        for pi, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") == "orion_image":
+                markers.append((mi, pi))
+    if not markers:
+        return messages
+
+    allowed = set(markers[:max_images]) if vision else set()
+
+    result: list[dict] = list(messages)
+    for mi, pi in markers:
+        msg = result[mi]
+        content = list(msg.get("content") or [])
+        part = content[pi]
+        if (mi, pi) in allowed:
+            uri = image_to_data_uri(part.get("path", ""))
+            if uri:
+                content[pi] = {"type": "image_url", "image_url": {"url": uri}}
+                new_msg = dict(msg)
+                new_msg["content"] = content
+                result[mi] = new_msg
+                continue
+            note = (f"[image could not be read: "
+                    f"{part.get('label', 'image')}]")
+        else:
+            note = (f"[image omitted: {part.get('label', 'image')} — this "
+                    f"model cannot view images]")
+        content[pi] = {"type": "text", "text": note}
+        new_msg = dict(msg)
+        new_msg["content"] = content
+        result[mi] = new_msg
+    return result
+
+
 def _sanitize_messages_for_provider(
     messages: list[dict],
     pid: str,
@@ -310,7 +757,14 @@ def _sanitize_messages_for_provider(
         clean_m = {"role": m.get("role", "user")}
 
         content = m.get("content")
-        if isinstance(content, (dict, list)):
+        if isinstance(content, list):
+            # Multimodal content (text parts plus image parts).  The list
+            # shape is preserved for models that can see images and flattened
+            # to text for the ones that cannot, so the request still goes
+            # through instead of being rejected.
+            clean_m["content"] = _sanitize_multimodal_content(
+                content, pid, model_name)
+        elif isinstance(content, dict):
             clean_m["content"] = json.dumps(content, ensure_ascii=False)
         elif content is not None:
             clean_m["content"] = content
@@ -335,9 +789,19 @@ def _sanitize_messages_for_provider(
             and m.get("_reasoning_provider") == reasoning_carry_provider
         )
         if same_provider_model or cross_model_carry:
-            for reasoning_key in ("reasoning", "reasoning_content", "reasoning_details"):
-                if reasoning_key in m:
-                    clean_m[reasoning_key] = m[reasoning_key]
+            # Copy reasoning keys but normalise to a single field.  Historical
+            # messages may contain *both* ``reasoning`` and ``reasoning_content``
+            # (the latter comes from nvidia/OpenRouter, the former from some
+            # OpenAI-style backends).  Sending both in the same message object
+            # makes nvidia's API reject the request with a 400 "duplicate field
+            # `reasoning_content`".  Prefer ``reasoning_content``; fall back
+            # to ``reasoning`` only when content is absent.
+            if "reasoning_content" in m:
+                clean_m["reasoning_content"] = m["reasoning_content"]
+            elif "reasoning" in m:
+                clean_m["reasoning_content"] = m["reasoning"]
+            if "reasoning_details" in m:
+                clean_m["reasoning_details"] = m["reasoning_details"]
             # Preserve reasoning provenance so downstream code can identify
             # which provider/model produced the carried chain-of-thought.
             for prov_key in ("_reasoning_provider", "_reasoning_model"):
@@ -391,21 +855,44 @@ def _make_client(provider_id: str, api_key: str | None) -> OpenAI:
     if headers:
         client_kwargs["default_headers"] = headers
     if provider_id in ("ollama", "ollama-local"):
-        client_kwargs["timeout"] = httpx.Timeout(5.0, connect=2.0, read=5.0, write=5.0)
+        client_kwargs["timeout"] = httpx.Timeout(60.0, connect=5.0, read=60.0, write=30.0)
         client_kwargs["max_retries"] = 0
     return OpenAI(**client_kwargs)
 
 
-def _stitch_assistant_turns(messages: list[dict], last_chunk: str) -> str:
-    parts = [
-        m["content"]
-        for m in messages
-        if m.get("role") == "assistant"
-        and isinstance(m.get("content"), str)
-        and m["content"].strip()
-    ]
-    parts.append(last_chunk)
-    return "".join(parts).strip()
+def _split_assistant_turns(messages: list[dict], last_chunk: str) -> tuple[str, str]:
+    """Split a turn's assistant text into ``(answer, working trace)``.
+
+    An assistant message that carries tool calls holds *narration* — the
+    "Let me look at X." the model writes while it works — and that text is
+    not part of the answer the user reads.  Stitching it into the reply
+    (as this function used to do) pasted the model's running commentary on
+    top of the answer, glued to it without a line break, so the answer
+    arrived with a paragraph of thinking trace in front of it.
+
+    The narration is therefore separated here and printed in the trace
+    channel, while the answer keeps every fragment that belongs to it.
+    """
+    answer_parts: list[str] = []
+    trace_parts: list[str] = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if m.get("tool_calls"):
+            trace_parts.append(content.strip())
+        else:
+            answer_parts.append(content.strip())
+    if isinstance(last_chunk, str) and last_chunk.strip():
+        answer_parts.append(last_chunk.strip())
+    # Answer fragments are glued, not separated: they are continuations of
+    # one answer (a length-truncated reply plus its continuation), and a
+    # paragraph break in the middle of a sentence would be wrong.
+    answer = "".join(answer_parts).strip()
+    trace = "\n\n".join(trace_parts).strip()
+    return answer, trace
 
 
 _TOOL_TAGS = {
@@ -434,6 +921,35 @@ _TOOL_COLORS = {
 _COLLAPSED_LINE_CHAR_CAP = 200
 
 
+def _format_tool_args(args: dict) -> list:
+    """Render every tool argument as ``key: value`` lines.
+
+    Used by the expanded display.  The old code picked a single field out of
+    a fixed preference list ("path", "bash", "query", …), so any tool whose
+    arguments were not on that list — ``delegate_subtask``,
+    ``create_calendar_event``, ``share_drive_file`` — showed *nothing* at
+    all even with the details expanded.  The expanded view now shows the
+    whole argument set.
+    """
+    if not isinstance(args, dict) or not args:
+        return []
+    out: list[str] = []
+    for key, value in args.items():
+        if value is None or value == "":
+            continue
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        else:
+            rendered = str(value)
+        if "\n" in rendered:
+            head, *rest = rendered.split("\n")
+            out.append(f"{key}: {head}")
+            out.extend("    " + line for line in rest)
+        else:
+            out.append(f"{key}: {rendered}")
+    return out
+
+
 def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
     """Build the tag/preview line(s) printed before [OUTPUT]/[TOOL DONE] for
     one tool call. Presentation-layer only — never touches the tool's actual
@@ -446,16 +962,21 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
         bash = str(args.get("bash", "") or "")
         lines = bash.splitlines() or [""]
         if expanded:
-            body = bash
-        else:
-            preview_lines = lines[:3]
-            preview_lines = [
-                (l if len(l) <= _COLLAPSED_LINE_CHAR_CAP else l[: _COLLAPSED_LINE_CHAR_CAP - 3] + "...")
-                for l in preview_lines
-            ]
-            body = "\n".join(preview_lines)
-            if len(lines) > 3:
-                body += "\n..."
+            meta = []
+            if args.get("timeout") is not None:
+                meta.append(f"timeout={args.get('timeout')}")
+            if args.get("total_timeout") is not None:
+                meta.append(f"total_timeout={args.get('total_timeout')}")
+            head = f"[{tag}]" + (f" | {' | '.join(meta)}" if meta else "")
+            return {"lines": [head, bash], "tool_name": name}
+        preview_lines = lines[:3]
+        preview_lines = [
+            (l if len(l) <= _COLLAPSED_LINE_CHAR_CAP else l[: _COLLAPSED_LINE_CHAR_CAP - 3] + "...")
+            for l in preview_lines
+        ]
+        body = "\n".join(preview_lines)
+        if len(lines) > 3:
+            body += "\n..."
         return {"lines": [f"[{tag}]", body], "tool_name": name}
 
     if name in ("write_file", "read_file"):
@@ -468,7 +989,15 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
         span = f"{seg_start}-{seg_end}" if (seg_start is not None or seg_end is not None) else "all"
         if name == "write_file":
             mode = args.get("mode", "overwrite")
-            return {"lines": [f"[{tag}] {path} | mode: {mode} | {unit}: {span}"], "tool_name": name}
+            lines = [f"[{tag}] {path} | mode: {mode} | {unit}: {span}"]
+            # The content that is being written is part of the command — in
+            # the expanded view it is shown, so a write can be reviewed
+            # before it is trusted.
+            content = args.get("content")
+            if content:
+                lines.append("content:")
+                lines.extend(str(content).splitlines() or [""])
+            return {"lines": lines, "tool_name": name}
         return {"lines": [f"[{tag}] {path} | {unit}: {span}"], "tool_name": name}
 
     if name == "find_replace":
@@ -476,29 +1005,57 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
             return {"lines": [f"[{tag}]"], "tool_name": name}
         path = args.get("path", "")
         find_text = args.get("find", "")
+        replace_text = args.get("replace", "")
         segment_start = args.get("segment_start")
         segment_end = args.get("segment_end")
-        # Show truncated find text in header
-        find_preview = find_text[:80] + ("..." if len(find_text) > 80 else "")
-        # Escape newlines so a multi-line find pattern stays on one header line.
-        find_preview = find_preview.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n")
+        lines = [f"[{tag}] {path}"]
+        # The case-sensitivity flag decides *which* occurrences are replaced,
+        # so leaving it out made a surprising replacement look inexplicable.
+        case_sensitive = args.get("case_sensitive", True)
+        if not isinstance(case_sensitive, bool):
+            case_sensitive = str(case_sensitive).lower() not in (
+                "false", "0", "no", "none", ""
+            )
+        lines[0] += f" | case-sensitive: {case_sensitive}"
         if segment_start is not None or segment_end is not None:
-            seg_desc = f" lines {(segment_start if segment_start is not None else 1)}..{(segment_end if segment_end is not None else "end")}"
-            return {"lines": [f"[{tag}] {path}{seg_desc} | find: {find_preview}"], "tool_name": name}
-        return {"lines": [f"[{tag}] {path} | find: {find_preview}"], "tool_name": name}
+            lines[0] += (
+                f" | lines {(segment_start if segment_start is not None else 1)}"
+                f"..{(segment_end if segment_end is not None else 'end')}"
+            )
+        # The *full* find and replace text.  The old preview cut the pattern
+        # off at 80 characters, which hid exactly the part that matters when
+        # a replacement behaved unexpectedly.
+        if find_text:
+            lines.append("find:")
+            lines.extend(str(find_text).splitlines() or [""])
+        if replace_text:
+            lines.append("replace:")
+            lines.extend(str(replace_text).splitlines() or [""])
+        return {"lines": lines, "tool_name": name}
 
-    # Every other tool: unchanged detail-picking, restructured into the same
-    # tag(+detail)-then-OUTPUT-then-TOOL DONE shape as EXEC/EDITING FILE.
+    # Every other tool.  Collapsed: the tag alone.  Expanded: every
+    # argument, so nothing about the call is hidden.
     if not expanded:
         return {"lines": [f"[{tag}]"], "tool_name": name}
-    detail = ""
-    preferred = ("path", "bash", "query", "url", "to", "jid", "filename", "prompt")
-    for key in preferred:
-        value = args.get(key)
-        if value not in (None, ""):
-            detail = str(value)
-            break
-    return {"lines": [f"[{tag}]{' ' + detail if detail else ''}"], "tool_name": name}
+    lines = [f"[{tag}]"]
+    lines.extend(_format_tool_args(args))
+    return {"lines": lines, "tool_name": name}
+
+
+def _print_tool_header(name: str, args: dict, expanded: bool) -> str:
+    """Print the tag/preview line(s) of one tool call and return its colour key.
+
+    Every path that handles a tool call goes through this, including the ones
+    that *refuse* the call.  A refused call used to vanish from the screen
+    completely: the user saw nothing at all and could not tell what the model
+    had tried to do or why it had been turned down.
+    """
+    header = _tool_header_lines(name, args, expanded)
+    colors = _TOOL_COLORS.get(header["tool_name"], _TOOL_COLORS["default"])
+    for i, line in enumerate(header["lines"]):
+        color = colors["tag"] if i == 0 else colors["body"]
+        print(f"{color}{line}{RESET}")
+    return header["tool_name"]
 
 
 def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
@@ -509,10 +1066,49 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     except Exception:
         args = {}
 
-    # Check if tool's plugin is enabled
+    # Check if the tool's plugin is enabled *and* connected
     if not plugin_manager.is_tool_allowed(name):
         plugin = plugin_manager.get_tool_plugin(name)
-        return f"[ERROR] Tool '{name}' is not available: plugin '{plugin}' is disabled. Use '/plugin {plugin} enable' to enable it."
+        state = {}
+        try:
+            state = plugin_manager.plugin_state(plugin) or {}
+        except Exception:
+            state = {}
+        # A refused call is still a call: the model tried something and the
+        # user has to be able to see what it tried and why it was refused.
+        # Before this the call vanished from the screen completely.
+        expanded = display_state.is_expanded()
+        _print_tool_header(name, args, expanded)
+        if state.get("enabled") and not state.get("authorized"):
+            runtime_log.log_tool_result(
+                name,
+                f"plugin '{plugin}' enabled but not connected",
+                error=True,
+            )
+            print(f"{RED}[ERROR] Tool '{name}' is not available yet: the "
+                  f"'{plugin}' plugin is enabled but the account is not "
+                  f"connected. Run '/plugin setup {plugin}' and approve the "
+                  f"Google permission request in the browser.{RESET}")
+            return (f"[ERROR] Tool '{name}' is not available yet: the "
+                    f"'{plugin}' plugin is enabled but the account is not "
+                    f"connected. Run '/plugin setup {plugin}' and approve the "
+                    f"Google permission request in the browser.")
+        # The plugin manager is always in the tool context, so the model can
+        # switch the plugin on itself — the runtime starts with it and the
+        # tools are available in the next request of this very turn.
+        runtime_log.log_tool_result(
+            name, f"plugin '{plugin}' disabled", error=True
+        )
+        print(f"{RED}[ERROR] Tool '{name}' is not available: plugin '{plugin}' is "
+              f"disabled. Enable it with manage_plugin(action='enable', "
+              f"plugin='{plugin}') — its runtime starts with it and the "
+              f"tools become available immediately — or ask the user to run "
+              f"'/plugin enable {plugin}' and then retry.{RESET}")
+        return (f"[ERROR] Tool '{name}' is not available: plugin '{plugin}' is "
+                f"disabled. Enable it with manage_plugin(action='enable', "
+                f"plugin='{plugin}') — its runtime starts with it and the "
+                f"tools become available immediately — or ask the user to run "
+                f"'/plugin enable {plugin}' and then retry.")
 
     g = args.get
     # Lazy import for toggle_torch to avoid circular import
@@ -597,6 +1193,18 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 selector = g("selector", None),
                                 max_chars = int(g("max_chars", 12000)),
                                 actions  = g("actions", None),
+                                screenshot = _safe_bool(g("screenshot", True)),
+                                extract_html = _safe_bool(g("extract_html", False)),
+                           ),
+        "browser":         lambda: browser(
+                                action     = g("action", "open"),
+                                url        = g("url", ""),
+                                browser_id = g("browser_id", ""),
+                                selector   = g("selector", None),
+                                actions    = g("actions", None),
+                                max_chars  = int(g("max_chars", 12000)),
+                                screenshot = _safe_bool(g("screenshot", True)),
+                                extract_html = _safe_bool(g("extract_html", False)),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
         "intermediate_print": lambda: intermediate_print(
@@ -646,6 +1254,12 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                  chunk_id = g("chunk_id", 0),
                              ),
         "list_chunks":     lambda: _cm.list_chunks(),
+        "retrieve_archive": lambda: _cc.retrieve_archive(
+                                   archive_id = g("archive_id", ""),
+                                   offset     = int(g("offset", 0) or 0),
+                                   limit      = int(g("limit", 20000) or 20000),
+                               ),
+        "list_archives":   lambda: _cc.list_archives(),
         "run_diagnosis":   lambda: run_diagnosis(),
         "silence_whatsapp_contact": lambda: silence_whatsapp_contact(
                                 jid   = g("jid",   ""),
@@ -681,20 +1295,119 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         "set_whatsapp_seen": lambda: set_whatsapp_seen(
                                 jid = g("jid", ""),
                             ),
+        "send_gmail_message": lambda: send_gmail_message(
+                                to      = g("to", ""),
+                                subject = g("subject", ""),
+                                body    = g("body", ""),
+                                cc      = g("cc", ""),
+                                bcc     = g("bcc", ""),
+                            ),
+        "get_gmail_messages": lambda: get_gmail_messages(
+                                query       = g("query", ""),
+                                max_results = int(g("max_results", 10)),
+                                label_ids   = g("label_ids", ""),
+                            ),
+        "search_gmail":       lambda: search_gmail(
+                                query       = g("query", ""),
+                                max_results = int(g("max_results", 20)),
+                            ),
+        "get_gmail_labels":   lambda: get_gmail_labels(),
+        "create_gmail_label": lambda: create_gmail_label(
+                                name = g("name", ""),
+                            ),
+        "delete_gmail_message": lambda: delete_gmail_message(
+                                message_id = g("message_id", ""),
+                                permanent  = _safe_bool(g("permanent", False)),
+                            ),
+        "read_gmail_message": lambda: read_gmail_message(
+                                message_id = g("message_id", ""),
+                                format     = g("format", "full"),
+                            ),
+        "get_gmail_profile":  lambda: get_gmail_profile(),
+        "list_calendars":     lambda: list_calendars(),
+        "get_calendar_events": lambda: get_calendar_events(
+                                calendar_id = g("calendar_id", "primary"),
+                                time_min    = g("time_min", ""),
+                                time_max    = g("time_max", ""),
+                                max_results = int(g("max_results", 25)),
+                                query       = g("query", ""),
+                            ),
+        "create_calendar_event": lambda: create_calendar_event(
+                                calendar_id = g("calendar_id", "primary"),
+                                summary     = g("summary", ""),
+                                start       = g("start", ""),
+                                end         = g("end", ""),
+                                description = g("description", ""),
+                                location    = g("location", ""),
+                                attendees   = g("attendees", None),
+                            ),
+        "update_calendar_event": lambda: update_calendar_event(
+                                event_id    = g("event_id", ""),
+                                calendar_id = g("calendar_id", "primary"),
+                                summary     = g("summary", ""),
+                                start       = g("start", ""),
+                                end         = g("end", ""),
+                                description = g("description", ""),
+                                location    = g("location", ""),
+                                attendees   = g("attendees", None),
+                            ),
+        "delete_calendar_event": lambda: delete_calendar_event(
+                                event_id    = g("event_id", ""),
+                                calendar_id = g("calendar_id", "primary"),
+                            ),
+        "list_drive_files":   lambda: list_drive_files(
+                                query     = g("query", ""),
+                                page_size = int(g("page_size", 25)),
+                                order_by  = g("order_by", "modifiedTime desc"),
+                            ),
+        "upload_drive_file":  lambda: upload_drive_file(
+                                file_path        = g("file_path", ""),
+                                name             = g("name", ""),
+                                parent_folder_id = g("parent_folder_id", ""),
+                            ),
+        "download_drive_file": lambda: download_drive_file(
+                                file_id     = g("file_id", ""),
+                                output_path = g("output_path", ""),
+                            ),
+        "delete_drive_file":  lambda: delete_drive_file(
+                                file_id = g("file_id", ""),
+                            ),
+        "create_drive_folder": lambda: create_drive_folder(
+                                name             = g("name", ""),
+                                parent_folder_id = g("parent_folder_id", ""),
+                            ),
+        "share_drive_file":   lambda: share_drive_file(
+                                file_id         = g("file_id", ""),
+                                email           = g("email", ""),
+                                role            = g("role", "reader"),
+                                permission_type = g("permission_type", "user"),
+                            ),
+        "manage_plugin":     lambda: manage_plugin(
+                                action = g("action", "list"),
+                                plugin = g("plugin", ""),
+                                code   = g("code", ""),
+                            ),
         "delegate_subtask":  lambda: delegate_subtask(
                                 task                = g("task", ""),
                                 context             = g("context", ""),
-                                model               = g("model", "openai/gpt-oss-120b"),
-                                max_tokens          = int(g("max_tokens", 2048)),
+                                intelligence         = g("intelligence", "medium"),
                                 available_tools     = g("available_tools", None),
                                 tool_call_iterations  = int(g("tool_call_iterations", 5)),
                                 system_prompt        = g("system_prompt", None),
                              ),
         "generate_image":    lambda: generate_image(
-                                prompt   = g("prompt", ""),
-                                quality  = g("quality", "flash"),
-                                filename = g("filename", None),
-                             ),
+                                 prompt    = g("prompt", ""),
+                                 quality   = g("quality", "flash"),
+                                 filename  = g("filename", None),
+                                 provider  = g("provider", "auto"),
+                                 model     = g("model", None),
+                                 width     = g("width", None),
+                                 height    = g("height", None),
+                                 seed      = g("seed", None),
+                                 steps     = g("steps", None),
+                                 cfg_scale = g("cfg_scale", None),
+                                 negative_prompt = g("negative_prompt", None),
+                              ),
         "list_directory":    lambda: list_directory(
                                 path      = g("path", "."),
                                 recursive = _safe_bool(g("recursive", False)),
@@ -806,10 +1519,17 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         body_color = colors["body"]
         end_color = colors["end"]
 
+        # The call is logged *before* the tool runs.  If the process is killed
+        # while the tool is still working, the log already says what was
+        # asked and with which arguments — which is the whole point of a
+        # real-time log.
+        runtime_log.log_tool_call(name, args)
+
         try:
             res = fn()
         except Exception as exc:
             elapsed = time.monotonic() - started
+            runtime_log.log_tool_result(name, str(exc), elapsed, error=True)
             for i, line in enumerate(header_lines):
                 # First line is tag, rest are body
                 color = tag_color if i == 0 else body_color
@@ -830,6 +1550,10 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         else:
             normalized = str(res)
 
+        # The result is logged the moment the tool returns — not when the
+        # turn ends.
+        runtime_log.log_tool_result(name, normalized, elapsed)
+
         for i, line in enumerate(header_lines):
             color = tag_color if i == 0 else body_color
             print(f"{color}{line}{RESET}")
@@ -839,6 +1563,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         print(f"{end_color}[TOOL DONE] ({elapsed:.2f}s){RESET}")
 
         return normalized
+    runtime_log.log_tool_result(name, "unknown tool", error=True)
+    # Show what was asked for, even though the runtime cannot run it.
+    _print_tool_header(name, args, display_state.is_expanded())
     print(f"{RED}[ERROR] Unknown tool: {name}{RESET}")
     return f"[ERROR] Unknown tool: {name}"
 
@@ -914,6 +1641,11 @@ def _display_reasoning(
     elif not text and reasoning_details:
         text = str(reasoning_details).strip()
 
+    # The reasoning is logged as soon as the provider returns it, before the
+    # tool calls that follow are even issued — so the log shows what the
+    # model was thinking while it was thinking it.
+    runtime_log.log_reasoning(provider_id, model_name, text)
+
     if display_state.is_expanded():
         print(text)
     else:
@@ -924,6 +1656,35 @@ def _display_reasoning(
         )
 
     print(f"{GRAY}[End reasoning]{RESET}\n")
+
+
+def _display_working_trace(text: str) -> None:
+    """Display the model's mid-turn narration in its own labelled block.
+
+    This is the text a model writes while it works ("Let me look at the
+    fallback extraction code first.") next to its tool calls.  It belongs
+    to the trace channel — the same channel as the provider's native
+    reasoning — and never to the answer, so it is printed separately and
+    follows the Ctrl+O expand/collapse preference.
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+
+    print(f"\n{GRAY}[Working trace]{RESET}")
+
+    runtime_log.log_working_trace(text)
+
+    if display_state.is_expanded():
+        print(text)
+    else:
+        words = len(text.split())
+        print(
+            f"{GRAY}[working trace collapsed: {words} words] "
+            f"Press Ctrl+O to expand.{RESET}"
+        )
+
+    print(f"{GRAY}[End working trace]{RESET}\n")
 
 
 
@@ -967,6 +1728,12 @@ def _ask_with_slots(
     # credentials — a single success clears the exhaustion record.
     forced_retry_key: tuple[str, str, str] | None = None
     exhausted_keys: dict[tuple[str, str], set[str]] = {}
+    # The output cap is request-local.  Shrinking it on a context error must
+    # not mutate the shared MODEL_SLOTS registry — one over-long prompt
+    # would otherwise degrade that model for the rest of the process.
+    slot_max_tokens: dict[tuple[str, str], int] = {}
+    # How often a context error already triggered a compression for a slot.
+    context_compress_attempts: dict[tuple[str, str], int] = {}
 
     # Track which model/provider the current in-memory history belongs to.
     # Native reasoning is preserved only while continuing the same model.
@@ -996,7 +1763,8 @@ def _ask_with_slots(
         slot_cfg = model_slots[slot]
         pid = slot_cfg["provider_id"]
         model_name = slot_cfg["name"]
-        max_tok = slot_cfg["max_tokens"]
+        max_tok = slot_max_tokens.get((pid, model_name),
+                                      slot_cfg["max_tokens"])
 
         if (pid, model_name) in _bad_models:
             slot += 1
@@ -1135,14 +1903,42 @@ def _ask_with_slots(
 
         client = _make_client(pid, api_key)
 
+        # Set once the images have been stripped from the request, so a
+        # provider that cannot handle them is only retried without them
+        # once per request.
+        images_stripped = False
+
+        # Set once the turn has been moved to a vision-capable model, so
+        # the switch cannot loop.
+        vision_switched = False
+
+        # The token cost of the tool catalogue: part of the request payload,
+        # but not part of the message list.  It is needed when a context
+        # error has to be answered with a budget that actually fits.
+        tool_tokens = 0
+
         try:
             while True:
+                # The payload is sent as it is.  Whether it fits the model's
+                # window is the provider's decision, not a local guess: the
+                # registry of "context limits per model" was wrong about the
+                # models that actually overflowed (256K on paper, 8K on the
+                # wire), and a wrong guess either compresses work that did
+                # not need it or lets the request through to fail.  When the
+                # provider answers with a context error, the context is
+                # compressed then and retried on the same model.
+
                 # Filter tools based on enabled plugins
                 available_tools = plugin_manager.filter_tools_description(TOOLS_DESCRIPTION)
+                # A provider that counts the prompt counts the schemas too.
+                tool_tokens = _estimate_tool_tokens(available_tools)
 
                 kwargs: dict = {
                     "model": model_name,
-                    "messages": messages,
+                    # Images are inlined here, once per request, only for a
+                    # model that can actually see them.
+                    "messages": _prepare_messages_for_wire(
+                        messages, pid, model_name),
                     "tools": available_tools,
                     "tool_choice": "auto",
                 }
@@ -1253,10 +2049,20 @@ def _ask_with_slots(
                         continue
 
                     messages.append(msg_dict)
+                    turn_attachments: list[dict] = []
                     for tc in msg_dict["tool_calls"]:
                         tool_name = tc["function"].get("name", "unknown")
                         raw_args = tc["function"].get("arguments", "{}")
                         tool_result = _dispatch_tool(tc, voice=voice)
+
+                        # Drain any images the tool produced (a browser
+                        # screenshot, for instance).  They are collected here
+                        # and handed to the model in a *user* message after
+                        # the tool results: Google rejects an image part
+                        # inside a tool message ("Invalid content part type:
+                        # image_url"), while a following user message works
+                        # on every provider that can see images.
+                        turn_attachments.extend(_tool_runtime.pop_image_attachments())
 
                         # Stable signature: identical tool + arguments + error.
                         failure_markers = (
@@ -1296,12 +2102,44 @@ def _ask_with_slots(
                         })
 
                         if is_failure and tool_failure_counts.get(signature, 0) >= 3:
+                            # Hand over whatever pictures the failed call
+                            # produced before the turn is abandoned, so they
+                            # are not left dangling in the queue.
+                            _append_image_message(messages, turn_attachments)
                             _last_response_metadata["state"] = "repeated_tool_failure"
                             _cm.set_tool_context(messages[base_len:])
                             return (
                                 f"[ERROR] Agent stopped after repeated identical "
                                 f"failure from tool '{tool_name}'."
                             )
+
+                    _append_image_message(messages, turn_attachments)
+
+                    # The tool produced a picture, but the model that is
+                    # running cannot see images — it would only get a note
+                    # saying the image was dropped.  Move the turn to a
+                    # vision-capable model so the screenshot is actually
+                    # usable.  The switch happens at most once per turn.
+                    if (turn_attachments and not vision_switched
+                            and not model_supports_vision(pid, model_name)):
+                        vision_index = _find_vision_slot(model_slots, slot)
+                        if vision_index is not None:
+                            vision_switched = True
+                            vision_slot = model_slots[vision_index]
+                            print(
+                                f"{YELLOW}[{pid}/{model_name}] A screenshot was "
+                                f"captured but this model cannot view images — "
+                                f"switching to "
+                                f"{vision_slot.get('provider_id')}/"
+                                f"{vision_slot.get('name')}.{RESET}"
+                            )
+                            slot = vision_index
+                            last_slot = -1
+                            # `break`, not `continue`: the inner loop is the
+                            # tool loop, so continuing would just ask the
+                            # *same* text-only model again.  Breaking lets
+                            # the outer slot loop pick up the new model.
+                            break
                     continue
 
                 partial = msg_dict.get("content") or ""
@@ -1356,7 +2194,7 @@ def _ask_with_slots(
                             "_reasoning_model": model_name,
                         }
                         if reasoning:
-                            carry_msg["reasoning"] = reasoning
+                            carry_msg["reasoning_content"] = reasoning
                         if reasoning_details:
                             carry_msg["reasoning_details"] = reasoning_details
                         if carry_msg not in messages:
@@ -1385,7 +2223,7 @@ def _ask_with_slots(
                         carry["_reasoning_provider"] = pid
                         carry["_reasoning_model"] = model_name
                         if reasoning:
-                            carry["reasoning"] = reasoning
+                            carry["reasoning_content"] = reasoning
                         if reasoning_details:
                             carry["reasoning_details"] = reasoning_details
                     messages.append(carry)
@@ -1403,22 +2241,145 @@ def _ask_with_slots(
                     reasoning or reasoning_details
                 )
                 _cm.set_tool_context(messages[base_len:])
-                return _stitch_assistant_turns(
+                answer, trace = _split_assistant_turns(
                     messages[base_len:], partial
-                ) or "[EMPTY RESPONSE]"
+                )
+                _last_response_metadata["working_trace"] = trace
+                if trace:
+                    if answer:
+                        # Narration goes to the trace channel, never into
+                        # the answer the user reads.
+                        _display_working_trace(trace)
+                    else:
+                        # The turn produced narration but no final answer:
+                        # show it as the answer instead of "[EMPTY RESPONSE]".
+                        answer = trace
+                return answer or "[EMPTY RESPONSE]"
 
         except Exception as exc:
             status = _error_status(exc)
             message = str(exc)
 
-            # Context/token limit: reduce max_tokens and retry (no key/model change)
-            if _is_context_error(exc) and max_tok and max_tok > 512:
-                slot_cfg["max_tokens"] = max_tok // 2
-                print(
-                    f"{YELLOW}[{pid}/{model_name}] Context/token limit hit. "
-                    f"Reducing max_tokens to {slot_cfg['max_tokens']} and retrying.{RESET}"
+            # ── Context / token limit ───────────────────────────────────────
+            # The payload did not fit the model's window.  Before shrinking
+            # the output cap or handing the work to another model, compress
+            # the oldest passes of the context: the reasoning details, tool
+            # calls and tool outputs are replaced by a digest and the raw
+            # text is archived, so the model can pull it back by id and
+            # continue the work instead of losing the thread.  This is what
+            # keeps a multi-day task alive on one model.
+            #
+            # The trigger is the provider's own answer, not a local guess.
+            # A registry of "context limits per model" is a guess, and the
+            # guess was wrong: the registry claimed 256K for a model whose
+            # endpoint enforces 8K, so the compression never ran on the
+            # model that actually overflowed.  When the provider states the
+            # limit, that number is the budget; when it does not, the whole
+            # context is compressed and the request is tried again.
+            if _is_context_error(exc):
+                ctx_key = (pid, model_name)
+                attempt = context_compress_attempts.get(ctx_key, 0)
+                limit_tokens = _parse_context_limit(exc)
+
+                if limit_tokens:
+                    # The provider said how big the window really is.  The
+                    # output cap has to fit inside it too: a slot that asks
+                    # for more output tokens than the whole window leaves no
+                    # room for the prompt at all.
+                    clamped = _clamp_max_tokens(max_tok, limit_tokens,
+                                              tool_tokens)
+                    if clamped is not None and clamped != max_tok:
+                        slot_max_tokens[ctx_key] = clamped
+                        max_tok = clamped
+                        print(
+                            f"{YELLOW}[{pid}/{model_name}] Provider reports a "
+                            f"{limit_tokens:,}-token context window — lowering "
+                            f"max_tokens to {clamped:,} for this request."
+                            f"{RESET}"
+                        )
+
+                # The tool catalogue is part of the payload and cannot be
+                # compressed.  When the catalogue alone does not fit the
+                # window the provider stated, no amount of compression can
+                # save the request.
+                catalogue_too_big = bool(
+                    limit_tokens
+                    and tool_tokens + _MIN_PROMPT_TOKENS + _MIN_OUTPUT_TOKENS
+                    > limit_tokens
                 )
-                continue
+
+                if attempt < 2:
+                    if attempt >= 1 and catalogue_too_big:
+                        print(
+                            f"{YELLOW}[{pid}/{model_name}] The tool catalogue "
+                            f"(~{tool_tokens:,} tokens) does not fit the "
+                            f"{limit_tokens:,}-token window on its own — "
+                            f"skipping this model.{RESET}"
+                        )
+                        slot += 1
+                        last_slot = -1
+                        continue
+                    context_compress_attempts[ctx_key] = attempt + 1
+                    target = ""
+                    if attempt == 0 and limit_tokens:
+                        # The provider stated the window: compress the
+                        # history until it fits that window, with the tool
+                        # catalogue and the output cap taken off the top.
+                        budget = _context_input_budget(
+                            limit_tokens, max_tok, tool_tokens)
+                        squeezed, new_base, creport = _cc.fit_to_budget(
+                            messages, budget, head_len=base_len)
+                        target = f"fit ~{budget:,} tokens"
+                    else:
+                        # No window stated — or the first attempt did not
+                        # fit: compress everything that can be compressed.
+                        level = 2 if attempt == 0 else 3
+                        squeezed, new_base, creport = _cc.compress_forced(
+                            messages, head_len=base_len, level=level)
+                        target = f"level {level}"
+                    if creport.get("compressed") and squeezed is not messages:
+                        messages = _sanitize_messages_for_provider(
+                            squeezed, pid, model_name=model_name,
+                            preserve_native_reasoning=True,
+                        )
+                        base_len = new_base
+                        ids = ", ".join(creport.get("archive_ids", []))
+                        print(
+                            f"{YELLOW}[{pid}/{model_name}] Context limit hit. "
+                            f"Compressed {creport.get('passes')} old segment(s) "
+                            f"({target}); raw archived as {ids}. "
+                            f"Retrying the same model.{RESET}"
+                        )
+                        continue
+
+                # Compression cannot free anything more — shrink the output
+                # cap for *this request only* and try again.
+                #
+                # The local variable is updated as well: the retry below is
+                # sent from this loop, so shrinking only the request-local
+                # dict would have changed nothing until the next slot.
+                if max_tok and max_tok > _MIN_OUTPUT_TOKENS:
+                    max_tok = max_tok // 2
+                    slot_max_tokens[ctx_key] = max_tok
+                    print(
+                        f"{YELLOW}[{pid}/{model_name}] Context/token limit hit. "
+                        f"Reducing max_tokens to {max_tok} for this "
+                        f"request and retrying.{RESET}"
+                    )
+                    continue
+
+                # The context is compressed to the bone, the output cap is at
+                # its floor and the payload still does not fit: this model
+                # cannot serve the request.  Move on to the next one instead
+                # of retrying the same hopeless request ten times.
+                if attempt >= 2 or catalogue_too_big:
+                    print(
+                        f"{YELLOW}[{pid}/{model_name}] Context still does not "
+                        f"fit after compression — skipping this model.{RESET}"
+                    )
+                    slot += 1
+                    last_slot = -1
+                    continue
 
             # Track consecutive same-status-code errors persistently across
             # all API calls. A success resets the counter to 0. When the same
@@ -1447,6 +2408,22 @@ def _ask_with_slots(
                 pid, model_name, status, error_count,
                 _SAME_STATUS_THRESHOLD, message=message,
             )
+
+            # A provider that rejects the *image payload* can usually
+            # still answer the same model without the picture.  Strip the
+            # images and retry the model once before abandoning it —
+            # otherwise one screenshot would cost the whole model slot.
+            if status == 400 and not images_stripped:
+                stripped = _strip_images(messages)
+                if stripped is not messages:
+                    images_stripped = True
+                    messages = stripped
+                    last_slot = -1
+                    print(
+                        f"{YELLOW}[{pid}/{model_name}] Provider rejected the "
+                        f"image payload (400). Retrying without images.{RESET}"
+                    )
+                    continue
 
             # HTTP 400 — the request itself is malformed, so every key of this
             # account will fail the same way.  Retrying the same key (or
@@ -1477,6 +2454,7 @@ def _ask_with_slots(
             # for this model and switch to the next available key.
             exhausted_keys.setdefault((pid, model_name), set()).add(api_key)
             _persistent_exhausted_keys.setdefault(_pkey, set()).add(api_key)
+            _exhausted_key_timestamps.setdefault(_pkey, {})[api_key] = time.time()
             remaining = len(API_KEYS.get(pid, [])) - len(
                 _get_exhausted_keys(pid, model_name, exhausted_keys)
             )
@@ -1492,8 +2470,9 @@ def _ask_with_slots(
             )
 
             # Reset the same-status streak for this slot; the next key
-            # gets a fresh count. The exhausted key stays in
-            # _persistent_exhausted_keys until a success clears it.
+            # gets a fresh count. The exhausted key stays blocked until
+            # either a success clears it (via _reset_error_counters) or
+            # the _EXHAUSTED_COOLDOWN window elapses (via _get_exhausted_keys).
             forced_retry_key = None
             last_slot = -1
             _consecutive_error_status[_pkey] = None

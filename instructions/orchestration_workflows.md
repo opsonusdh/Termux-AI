@@ -208,3 +208,23 @@ When adding a new capability:
 | State injection into `ask_ai()` system prompt | Agent state belongs only in `run_agent_step()` |
 | Orchestrating tasks that could run sequentially in one thread | Unnecessary complexity — prove the flat loop works first |
 | Retrying a failing approach without consulting reflection log | Systematic failures require root cause analysis, not more retries |
+
+---
+
+## 9. Sub-Agent Delegation & Intelligence Tiers
+
+### Sub-Agent Role & Authority Constraints
+- **Evidence Gatherers Only:** Sub-agents act strictly as workers to collect data, run experiments, grep codebases, or diagnose failures.
+- **No Policy Authority:** Sub-agents must never modify or decide system-level rules, security constraints, or architectural policies. All policy evaluation belongs exclusively to the supervising agent.
+
+### Multi-Step Project Delegation Workflow
+1. **Initialize Project:** Use `initialize_project` to set global task goals.
+2. **Decompose Tasks:** Use sub-AI reasoning to break large goals into sequential subtasks.
+3. **Register Subtasks:** Register discrete goals via `add_subtask`.
+4. **Delegate Work:** Dispatch bounded steps to sub-agents with appropriate intelligence tiers via `delegate_subtask`.
+5. **Verify & Update:** Review sub-agent output against acceptance criteria and update status with `update_subtask`.
+6. **Synthesize & Report:** Present a coherent, verified final report to the user.
+
+### Routing Tiers & Request Size Budgets
+- **Intelligence Tiers:** Routed through `core/models.py` by level (`high`, `medium`, `low`). The fallback ladder only degrades downward, never escalates.
+- **Curated Tool Catalogs:** Sending full tool catalogs (70+ schemas, ~46KB JSON) causes provider token-per-minute errors (e.g. Groq HTTP 413). Sub-agents receive a curated core toolkit (~12KB) by default, and oversized tool responses must be truncated before being re-ingested.

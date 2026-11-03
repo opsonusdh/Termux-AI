@@ -9,14 +9,27 @@ GRAY  = "\033[90m"
 RED   = "\033[31m"
 RESET = "\033[0m"
 
-# Default timeout for Wi-Fi scan (can hang if Wi-Fi is off)
-WIFI_SCAN_TIMEOUT = 15
+# Default timeout for Wi-Fi scan (can hang if Wi-Fi is off).
+# A scan of the visible networks is the *fallback* for the network check —
+# ``termux-wifi-connectioninfo`` answers the question faster — so the scan
+# must not eat the whole diagnosis budget.
+WIFI_SCAN_TIMEOUT = 10
 
-def get_wifi_scan_info() -> list:
-    """Retrieve Wi-Fi scan information as parsed JSON list/dict."""
+def get_wifi_scan_info(quiet: bool = False) -> list:
+    """Retrieve Wi-Fi scan information as parsed JSON list/dict.
+
+    ``quiet=True`` suppresses the ``[EXECUTING]`` / ``[OUT]`` trace.
+
+    The background diagnosis probe runs on a thread while the chat prompt is
+    already on screen.  A trace printed there lands in the middle of the
+    user's line — and in the raw-mode fallback input path it staircases
+    across the screen, because a bare "\\n" no longer returns the cursor to
+    column 0.  The probe only needs the data, so it asks for silence.
+    """
     if sys.platform == "win32":
         try:
-            print(f"{GRAY}[EXECUTING] netsh wlan show networks mode=bssid{RESET}")
+            if not quiet:
+                print(f"{GRAY}[EXECUTING] netsh wlan show networks mode=bssid{RESET}")
             res = subprocess.run(
                 ["netsh", "wlan", "show", "networks", "mode=bssid"],
                 capture_output=True, text=True, timeout=10
@@ -50,21 +63,26 @@ def get_wifi_scan_info() -> list:
                 })
             return networks
         except subprocess.TimeoutExpired:
-            print(f"{RED}[ERR] Windows Wi-Fi scan timed out{RESET}")
+            if not quiet:
+                print(f"{RED}[ERR] Windows Wi-Fi scan timed out{RESET}")
             return [{"error": "Windows Wi-Fi scan timed out"}]
         except Exception as e:
-            print(f"{RED}[ERR] Failed to get Windows Wi-Fi scan info: {e}{RESET}")
+            if not quiet:
+                print(f"{RED}[ERR] Failed to get Windows Wi-Fi scan info: {e}{RESET}")
             return [{"error": str(e)}]
 
     try:
-        print(f"{GRAY}[EXECUTING] termux-wifi-scaninfo{RESET}")
+        if not quiet:
+            print(f"{GRAY}[EXECUTING] termux-wifi-scaninfo{RESET}")
         result = subprocess.check_output(['termux-wifi-scaninfo'], text=True, timeout=WIFI_SCAN_TIMEOUT)
-        if result.strip():
+        if result.strip() and not quiet:
             print(f"{GRAY}[OUT]\n{result.strip()}{RESET}")
         return json.loads(result)
     except subprocess.TimeoutExpired:
-        print(f"{RED}[ERR] termux-wifi-scaninfo timed out after {WIFI_SCAN_TIMEOUT}s (Wi-Fi may be disabled){RESET}")
+        if not quiet:
+            print(f"{RED}[ERR] termux-wifi-scaninfo timed out after {WIFI_SCAN_TIMEOUT}s (Wi-Fi may be disabled){RESET}")
         raise RuntimeError(f"termux-wifi-scaninfo timed out after {WIFI_SCAN_TIMEOUT}s (Wi-Fi may be disabled)")
     except Exception as e:
-        print(f"{RED}[ERR] Failed to get Wi-Fi scan info: {e}{RESET}")
+        if not quiet:
+            print(f"{RED}[ERR] Failed to get Wi-Fi scan info: {e}{RESET}")
         raise RuntimeError(f"Failed to get Wi‑Fi scan info: {e}")

@@ -26,6 +26,8 @@ from typing import Iterable, List, Tuple
 
 import paths
 from core import shell_parse
+from core import app_config
+from core import notifier
 
 # Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,12 +43,11 @@ TEMP_ROOT = os.path.join(WORKSPACE, ".tmp")
 # reading a different file than the /autonomous command writes to, with no
 # error) the moment paths.py's definition ever changed.
 CONFIG_PATH = paths.CONFIG_FILE
-DEFAULT_CONFIG = {
-    "stt_path": os.path.join(BASE_DIR, "Termux-STT"),
-    "tts_enabled": False,
-    "show_details": False,
-    "autonomous": False,
-}
+# The canonical default set lives in core/app_config.py.  Three modules used
+# to carry their own copy of it and they drifted: this one never learned
+# about the "notify" flag, so a config.json it created was missing a key
+# the interface expected.
+DEFAULT_CONFIG = dict(app_config.DEFAULT_CONFIG)
 
 # Keep the scratch area available.
 os.makedirs(TEMP_ROOT, exist_ok=True)
@@ -57,8 +58,24 @@ if not os.path.exists(CONFIG_PATH):
         json.dump(DEFAULT_CONFIG, f, indent=4)
 
 
+#: Override flag for the autonomy setting.
+#:
+#: With ``autonomous: true`` in config.json the gate approves every command
+#: except ``api.keys`` references — which makes the gate itself impossible to
+#: exercise, and turns "the user asked for autonomy" into "no permission check
+#: ever runs again".  Dropping this file into the scratch directory forces the
+#: interactive gate back on without touching config.json, so the behaviour can
+#: be observed (and tested) the way the user experiences it.
+DISABLE_AUTONOMOUS_FILE = os.path.join(TEMP_ROOT, "disable_autonomous")
+
+
 def is_autonomous() -> bool:
-    """Check if autonomous mode is enabled in config.json."""
+    """Check if autonomous mode is enabled in config.json.
+
+    The scratch-directory override flag wins over the config setting.
+    """
+    if os.path.exists(DISABLE_AUTONOMOUS_FILE):
+        return False
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -135,6 +152,20 @@ API_KEYS_PATHS = [
 #   api\.keys   — the literal filename
 #   (?![\w.])   — not followed by word-char or dot
 _API_KEYS_REF = re.compile(r"(?<![\w.])api\.keys(?![\w.])")
+
+# Credential files belonging to the account plugins.  These hold OAuth client
+# secrets and refresh tokens, so they are gated exactly like api.keys: a
+# refresh token is a long-lived credential that grants mailbox, calendar and
+# Drive access, and it must not be readable just because it does not happen to
+# be named api.keys.
+_GOOGLE_SECRET_NAMES = {"google_oauth.json", "google_pending_auth.json"}
+
+_GOOGLE_SECRETS_REF = re.compile(
+    r"(?<![\w.-])(?:google_oauth\.json|google_pending_auth\.json)(?![\w.-])"
+)
+
+#:\s The directory holding the per-service OAuth tokens.
+_GOOGLE_TOKENS_DIRNAME = "google_tokens"
 
 # Unconditionally blocked – these touch system state no AI should touch.
 FORBIDDEN_COMMANDS = {
@@ -287,6 +318,35 @@ def _is_api_keys_template(path: str) -> bool:
     return os.path.basename(p) == "api.keys.template"
 
 
+def _is_google_secret_file(path: str) -> bool:
+    """True for Google OAuth credentials and stored refresh tokens.
+
+    Covers ``config/google_oauth.json``, the pending-auth state file and every
+    token under ``data/google_tokens/``.  These are long-lived credentials for
+    the user's mailbox, calendar and Drive, so they are gated in every mode —
+    the same rule that protects ``api.keys``.
+    """
+    try:
+        p = _expand_path(path)
+    except Exception:
+        return False
+    if os.path.basename(p) in _GOOGLE_SECRET_NAMES:
+        return True
+    return _commonpath_is_inside(
+        os.path.join(AI_ROOT, "data", _GOOGLE_TOKENS_DIRNAME), p
+    )
+
+
+def _segment_references_google_secret(segment: str) -> bool:
+    """True if a command mentions a Google credential file by name."""
+    if _GOOGLE_SECRETS_REF.search(segment or ""):
+        return True
+    # The token directory can also be referenced by its bare name.  A leading
+    # '/' is fine (``data/google_tokens/``), a leading word character is not
+    # (``mygoogle_tokens`` is a different file).
+    return bool(re.search(r"(?<![\w.-])google_tokens(?![\w-])", segment or ""))
+
+
 def _segment_references_api_keys(segment: str) -> bool:
     """True if a shell-command segment mentions ``api.keys`` anywhere — as a
     read target, write target, source argument, or inside inline (``-c``) code.
@@ -315,6 +375,14 @@ def _path_verdict(path: str) -> Tuple[bool, str]:
         return True, (
             f"path '{rel}' is the api.keys secrets file; "
             f"explicit permission required (api.keys.template is allowed)"
+        )
+
+    # Google OAuth credentials and refresh tokens are gated the same way.
+    if _is_google_secret_file(path):
+        rel = os.path.relpath(_expand_path(path), AI_ROOT)
+        return True, (
+            f"path '{rel}' holds Google OAuth credentials; "
+            f"explicit permission required in all modes"
         )
 
     if _is_protected(path):
@@ -628,6 +696,10 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
             if _segment_references_api_keys(inline):
                 return True, "inline code references the api.keys secrets file"
 
+            # So are the Google OAuth credentials and refresh tokens.
+            if _segment_references_google_secret(inline):
+                return True, "inline code references a Google OAuth credential file"
+
             for pdir in PROTECTED_DIRS:
                 name = os.path.basename(pdir)
                 if pdir in inline or name in inline:
@@ -695,6 +767,13 @@ def _tokens_needs_permission(tokens: List[str], raw: str) -> Tuple[bool, str]:
             "explicit permission required in all modes"
         )
 
+    # ... and the Google credential files are in the same class.
+    if _segment_references_google_secret(raw):
+        return True, (
+            "command references a Google OAuth credential file; "
+            "explicit permission required in all modes"
+        )
+
     # A directory change alters the meaning of every following relative path
     # in the shell chain. Require explicit approval instead of pretending we
     # can safely infer arbitrary shell working-directory state here.
@@ -756,11 +835,11 @@ def command_needs_permission(cmd: str) -> bool:
     # individual segments: it can sit somewhere that is not a command of its
     # own — a ``for`` word list, a loop header, an assignment — while the
     # command that finally reads the file only mentions a variable.
-    if _segment_references_api_keys(cmd):
+    if _segment_references_api_keys(cmd) or _segment_references_google_secret(cmd):
         return True
 
     if is_autonomous():
-        # api.keys is the one thing that stays gated in autonomous mode.
+        # Credential files are the one thing that stays gated in autonomous mode.
         return False
 
     segments = _split_shell_chain(cmd)
@@ -786,10 +865,12 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
     # assignment — while the command that finally reads the file only
     # mentions a variable.
     references_api_keys = _segment_references_api_keys(cmd)
+    references_google_secrets = _segment_references_google_secret(cmd)
+    references_secrets = references_api_keys or references_google_secrets
 
     # In autonomous mode, auto-approve all segments EXCEPT those that
-    # reference the api.keys secrets file.  api.keys is gated in every mode.
-    if is_autonomous() and not references_api_keys:
+    # reference a credential file.  Those are gated in every mode.
+    if is_autonomous() and not references_secrets:
         return True, "Autonomous mode active (permission gate bypassed)"
 
     requests: List[Tuple[str, str]] = []
@@ -799,9 +880,17 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
             "command references the api.keys secrets file; "
             "explicit permission required in all modes"
         )))
+    if references_google_secrets and not references_api_keys:
+        requests.append((cmd, (
+            "command references a Google OAuth credential file; "
+            "explicit permission required in all modes"
+        )))
 
     for segment in segments:
-        if references_api_keys and _segment_references_api_keys(segment):
+        if references_secrets and (
+            _segment_references_api_keys(segment)
+            or _segment_references_google_secret(segment)
+        ):
             # Already reported above, as the whole command.
             continue
         needs, reason = _segment_needs_permission(segment)
@@ -834,6 +923,12 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
             )
     except Exception:
         pass
+
+    # The runtime is about to block on the user's answer.  If the terminal is
+    # in the background — the normal state on a phone — nothing on screen
+    # says that the AI is waiting, so push a notification.  With "notify"
+    # switched off this is a no-op.
+    notifier.permission(requests)
 
     while True:
         try:

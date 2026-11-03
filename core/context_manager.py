@@ -64,6 +64,29 @@ if _ROOT not in sys.path:
 
 import paths
 
+# ── Singleton registration ─────────────────────────────────────────────────
+# This module is imported under two names in this codebase: "core.context_manager"
+# and the bare "context_manager" — llm_client.py and interface.py put core/ on
+# sys.path and import their siblings by their bare names.  Python treats those
+# as two different modules, so this file would be executed twice and each copy
+# would keep its own chunk index and summary store.  A chunk written through
+# one copy would then be invisible to the other, and the model would be told
+# "Chunk '7' not found" for a chunk that demonstrably exists on disk.
+#
+# Registering the module under both names guarantees a single instance and a
+# single store, whatever order the imports happen in.
+sys.modules.setdefault("context_manager", sys.modules[__name__])
+sys.modules.setdefault("core.context_manager", sys.modules[__name__])
+try:
+    # Also bind it as an attribute of the package, so that
+    # "from core import context_manager" resolves to this same object.
+    import importlib as _importlib
+    _pkg = _importlib.import_module("core")
+    if getattr(_pkg, "context_manager", None) is not sys.modules[__name__]:
+        _pkg.context_manager = sys.modules[__name__]
+except Exception:
+    pass
+
 # ── Session memory integration ──────────────────────────────────────────────
 try:
     from core.session_memory.integration import (
@@ -424,8 +447,18 @@ def _msg_to_history(msg: dict) -> list[dict]:
 
     if role == "tool":
         # tool_call_id lives at the message level, not inside content
-        tc_id   = msg.get("tool_call_id", "")
-        tc_body = content if isinstance(content, str) else json.dumps(content)
+        tc_id = msg.get("tool_call_id", "")
+        if isinstance(content, list):
+            # A multimodal tool result (text parts plus image markers).
+            # The list shape has to survive into the history, otherwise the
+            # picture is lost for every turn after the one that produced it.
+            # The markers hold a *path*, not the pixels, so the stored chunk
+            # stays small.
+            tc_body = content
+        elif isinstance(content, str):
+            tc_body = content
+        else:
+            tc_body = json.dumps(content)
         return [{"role": "tool", "tool_call_id": tc_id, "content": tc_body}]
 
     return []
