@@ -1745,7 +1745,9 @@ TOOLS_DESCRIPTION = [
                             "(shell, read_file, write_file, find_replace, list_directory, "
                             "search_files, search_in_files, index_files, browse_web, "
                             "http_request, get_datetime). Pass an explicit list to widen "
-                            "or narrow it."
+                            "or narrow it. A name that no delegated worker can run is "
+                            "reported back in the report instead of being dropped "
+                            "silently."
                         ),
                         "items": {"type": "string"},
                     },
@@ -5096,6 +5098,57 @@ def _delegate_reasoning_text(reasoning, reasoning_details) -> str:
     return ""
 
 
+def _select_sub_tools(available_tools: list | None, tool_call_iterations: int):
+    """Decide which tools a delegated worker gets — and which it loses.
+
+    Returns ``(schemas, granted, dropped)``:
+
+    * ``schemas`` — the tool schemas to advertise (``None`` = no tools at all),
+    * ``granted`` — the names the worker can actually run,
+    * ``dropped``  — the names the caller asked for that cannot be granted.
+
+    A name that cannot be granted is *not* silently discarded: a worker that
+    quietly loses a tool is worse than one that is told it never had it,
+    because the manager reads the report and assumes the work was done with
+    the toolkit it asked for.  An explicitly empty ``available_tools`` still
+    means "text-only" and is not a loss.
+    """
+    if tool_call_iterations <= 0:
+        return None, [], []
+
+    if available_tools is None:
+        requested = set(_SUBAGENT_DEFAULT_TOOLS)
+    else:
+        requested = {str(name) for name in available_tools}
+
+    granted = requested & set(_SUB_TOOL_FUNCS)
+    dropped = sorted(requested - granted)
+
+    schemas = None
+    if granted:
+        schemas = [
+            t for t in TOOLS_DESCRIPTION
+            if t.get("function", {}).get("name") in granted
+        ]
+    return schemas, sorted(granted), dropped
+
+
+def _dropped_tool_note(dropped: list[str], granted: list[str]) -> str:
+    """The sentence that says which requested tools a worker could not get.
+
+    A delegated worker that silently loses a tool is worse than one that is
+    told it never had the tool: the manager reads the report and assumes the
+    work was done with the toolkit it asked for.
+    """
+    names = ", ".join(f"'{name}'" for name in dropped)
+    if granted:
+        return (f"requested tool(s) not available to a delegated worker: {names} "
+                f"— the worker runs with {', '.join(granted)} instead")
+    return (f"requested tool(s) not available to a delegated worker: {names} "
+            f"— the worker runs text-only, because none of the tools it was "
+            f"asked for could be granted")
+
+
 def _print_delegate_request(
     task: str,
     context: str,
@@ -5166,7 +5219,9 @@ def delegate_subtask(
             If None, the core delegation toolkit (``_SUBAGENT_DEFAULT_TOOLS``)
             is provided — the full tool set is far too large for several
             providers' request limits.  If empty list, no tools are provided
-            (text-only).
+            (text-only).  A name that no delegated worker can run is reported
+            back — on screen, in the live log and in the report itself —
+            instead of being dropped without a word.
         tool_call_iterations: Max tool-calling rounds (0 disables tools).
         system_prompt: Override for the sub-AI system prompt.
     """
@@ -5234,23 +5289,26 @@ def delegate_subtask(
     # Determine which tools to expose to the sub-AI.
     # Only tools that _dispatch_sub_tool can actually execute are advertised —
     # otherwise the sub-AI is offered a tool whose dispatch would reject it.
-    sub_tools = None
-    sub_tool_names: set[str] = set()
-    if tool_call_iterations > 0:
-        if available_tools is None:
-            sub_tool_names = set(_SUBAGENT_DEFAULT_TOOLS) & set(_SUB_TOOL_FUNCS)
-        else:
-            sub_tool_names = set(available_tools) & set(_SUB_TOOL_FUNCS)
-        if sub_tool_names:
-            sub_tools = [
-                t for t in TOOLS_DESCRIPTION
-                if t.get("function", {}).get("name") in sub_tool_names
-            ]
+    #
+    # A name the caller asked for that cannot be granted is *reported*, not
+    # dropped in silence.  The old code simply intersected the requested list
+    # with the registry, so a name the registry does not know disappeared:
+    # the worker ran without the tool it was supposed to get, and when every
+    # requested name disappeared it ran with no tools at all — with nothing
+    # on screen, in the log, or in the report to say so.
+    sub_tools, granted_tools, dropped_tools = _select_sub_tools(
+        available_tools, tool_call_iterations
+    )
 
     # The full command the manager AI handed over is always logged.  On
     # screen it is shown in full only when the details are expanded — the
     # collapsed view keeps the single header line printed above.
-    granted_tools = sorted(sub_tool_names)
+    if dropped_tools:
+        # Say it out loud: on screen for the user, in the log for a session
+        # that is cut short, and in the report for the manager that asked.
+        note = _dropped_tool_note(dropped_tools, granted_tools)
+        runtime_log.log_note(note, "delegate:tools")
+        print(f"{YELLOW}[DELEGATE] {note}{RESET}")
     runtime_log.log_delegate_request(
         task=task,
         context=context,
@@ -5496,6 +5554,13 @@ def delegate_subtask(
                     f"task={task[:60].strip()}{'...' if len(task) > 60 else ''}]\n"
                     f"{'-' * 60}\n"
                 )
+                if dropped_tools:
+                    # The manager gets the note too — it is the one that asked
+                    # for the tool and has to know what the worker really had.
+                    header += (
+                        f"[NOTE] {_dropped_tool_note(dropped_tools, granted_tools)}\n"
+                        f"{'-' * 60}\n"
+                    )
                 return header + content.strip()
 
             # Response was truncated or had no content but reasoning exists —
@@ -8114,6 +8179,28 @@ def _format_todos(data: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _todo_text(entry) -> str:
+    """Normalise one entry of the ``tasks`` argument into plain text.
+
+    The tool is called by a model, and a model sometimes hands the list back
+    as objects (``{"description": "..."}``) instead of strings.  The old code
+    called ``.strip()`` on whatever arrived and died with *"'dict' object has
+    no attribute 'strip'"* — the whole call was lost, and the error said
+    nothing about which argument was wrong.
+    """
+    if entry is None:
+        return ""
+    if isinstance(entry, str):
+        return entry.strip()
+    if isinstance(entry, dict):
+        for key in ("description", "text", "task", "content", "title"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+    return str(entry).strip()
+
+
 def manage_todos(
     action: str,
     title: str | None = None,
@@ -8149,8 +8236,9 @@ def manage_todos(
         task_texts = tasks if tasks else ([text] if text else [])
         next_id = 1
         for desc in task_texts:
-            if desc and desc.strip():
-                new_tasks.append({"id": next_id, "text": desc.strip(), "done": False})
+            desc = _todo_text(desc)
+            if desc:
+                new_tasks.append({"id": next_id, "text": desc, "done": False})
                 next_id += 1
         data = {"title": new_title, "tasks": new_tasks, "next_id": next_id}
         _save_todos(data)
@@ -8161,9 +8249,10 @@ def manage_todos(
         task_texts = tasks if tasks else ([text] if text else [])
         added = 0
         for desc in task_texts:
-            if desc and desc.strip():
+            desc = _todo_text(desc)
+            if desc:
                 tid = data["next_id"]
-                data["tasks"].append({"id": tid, "text": desc.strip(), "done": False})
+                data["tasks"].append({"id": tid, "text": desc, "done": False})
                 data["next_id"] = tid + 1
                 added += 1
         if title:
@@ -8428,11 +8517,36 @@ def manage_plugin(action: str = "list", plugin: str = "", code: str = "") -> str
 # the advertised schema list and the executable set in sync — a sub-AI can no
 # longer be offered a tool whose dispatch would reject it.
 #
-# Deliberately NOT exposed to a sub-AI:
-#   * delegate_subtask — recursion is not allowed for delegated workers
-#   * initialize_project / add_subtask / update_subtask — these mutate the
-#     parent agent's project state and belong to the main agent only
-#   * retrieve_chunk / list_chunks — context browsing stays with the main agent
+# Deliberately NOT exposed to a sub-AI: the list below (``_SUB_AI_EXCLUDED_TOOLS``)
+# names every one of them with the reason — it is the single source of truth,
+# and the test suite checks the registry against it so the two cannot drift.
+#
+# The archive tools (retrieve_archive / list_archives) *are* exposed: they are
+# read-only, and they are exactly what a worker needs when the task is "check
+# how much of this was already done and continue" — the archive holds the raw
+# text of every compressed context segment.
+
+
+def _sub_retrieve_archive(archive_id: str, offset: int = 0,
+                           limit: int = 20000) -> str:
+    """Read a compressed context segment back (delegated-worker entry point).
+
+    The import is local so that ``core.tools`` does not depend on the
+    compression module at import time; the two modules do not import each
+    other, but keeping the dependency one-way makes that obvious.
+    """
+    from core import context_compressor
+    return context_compressor.retrieve_archive(
+        archive_id, offset=offset, limit=limit
+    )
+
+
+def _sub_list_archives() -> str:
+    """List the archived context segments (delegated-worker entry point)."""
+    from core import context_compressor
+    return context_compressor.list_archives()
+
+
 _SUB_TOOL_FUNCS: dict = {
     # Core file / shell tools
     "shell":                      shell,
@@ -8450,6 +8564,9 @@ _SUB_TOOL_FUNCS: dict = {
     # Memory / delegation helpers
     "save_memory":                save_memory,
     "retrieve_memory":            retrieve_memory,
+    # Compressed context (read-only: a worker can check what was already done)
+    "retrieve_archive":           _sub_retrieve_archive,
+    "list_archives":              _sub_list_archives,
     "intermediate_print":         intermediate_print,
     "manage_todos":               manage_todos,
     "ask_user":                   ask_user,
@@ -8513,4 +8630,20 @@ _SUB_TOOL_FUNCS: dict = {
     "toggle_torch":               toggle_torch,
     "get_hostname":               get_hostname,
     "get_uptime":                 get_uptime,
+}
+
+
+# The tools that exist as schemas but are deliberately *not* runnable by a
+# delegated worker, with the reason.  This list is the single source of truth
+# for the exclusions: the test suite asserts that the registry above matches
+# it exactly, so the code and its documentation cannot drift apart the way
+# they did when the archive tools were added without being mentioned here.
+_SUB_AI_EXCLUDED_TOOLS: dict[str, str] = {
+    "delegate_subtask": "recursion is not allowed for delegated workers",
+    "initialize_project": "mutates the parent agent's project state",
+    "add_subtask": "mutates the parent agent's project state",
+    "update_subtask": "mutates the parent agent's project state",
+    "manage_plugin": "enabling a plugin changes shared configuration",
+    "retrieve_chunk": "context browsing stays with the main agent",
+    "list_chunks": "context browsing stays with the main agent",
 }

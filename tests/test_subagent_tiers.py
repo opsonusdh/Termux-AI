@@ -673,3 +673,66 @@ def test_an_empty_balance_route_fails_over_without_shrinking(fake_llm, monkeypat
                     if c["model"] == budgeted["name"]]
     assert len(budget_calls) == 1
     assert budget_calls[0]["max_tokens"] == budgeted["max_tokens"]
+
+
+# ── what the worker really gets ──────────────────────────────────────────────
+
+def test_a_tool_that_cannot_be_granted_is_reported_to_the_manager(fake_llm):
+    """The manager must learn that its worker did not get the tool it asked for.
+
+    The old code intersected the requested names with the worker registry and
+    dropped the rest without a word — so a worker could run without the tool
+    it was supposed to get and the report looked perfectly normal.
+    """
+    fake_llm["behaviour"] = lambda kwargs: _FakeRaw(_FakeResponse("answer"))
+
+    out = tools.delegate_subtask(
+        task="do the thing",
+        intelligence="high",
+        available_tools=["shell", "manage_plugin"],
+    )
+
+    assert "answer" in out
+    assert "manage_plugin" in out
+    assert "not available to a delegated worker" in out
+
+
+def test_a_worker_that_gets_no_tool_at_all_says_so(fake_llm):
+    """When every requested tool is unavailable the report must say it."""
+    fake_llm["behaviour"] = lambda kwargs: _FakeRaw(_FakeResponse("answer"))
+
+    out = tools.delegate_subtask(
+        task="do the thing",
+        intelligence="high",
+        available_tools=["manage_plugin"],
+    )
+
+    assert "text-only" in out
+
+
+def test_the_archive_tools_reach_the_worker(fake_llm):
+    """A worker asked for the archive tools is actually offered them."""
+    fake_llm["behaviour"] = lambda kwargs: _FakeRaw(_FakeResponse("answer"))
+
+    tools.delegate_subtask(
+        task="check what was already done",
+        intelligence="high",
+        available_tools=["retrieve_archive", "list_archives"],
+    )
+
+    calls = _route_calls(fake_llm)
+    assert calls, "the provider must have been called"
+    advertised = [t["function"]["name"] for t in (calls[0].get("tools") or [])]
+    assert "retrieve_archive" in advertised
+    assert "list_archives" in advertised
+
+
+def test_the_default_toolkit_reaches_the_worker(fake_llm):
+    """The built-in toolkit is advertised as it is."""
+    fake_llm["behaviour"] = lambda kwargs: _FakeRaw(_FakeResponse("answer"))
+
+    tools.delegate_subtask(task="do the thing", intelligence="high")
+
+    calls = _route_calls(fake_llm)
+    advertised = {t["function"]["name"] for t in (calls[0].get("tools") or [])}
+    assert advertised == set(tools._SUBAGENT_DEFAULT_TOOLS)

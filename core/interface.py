@@ -867,6 +867,9 @@ def chat_loop():
     banner_lines = ui.banner("Termux-AI", "Terminal AI ready.")
     if banner_lines:
         print(banner_lines)
+        # A rule separates the header from the status row below it, so the
+        # settings are not read as part of the banner.
+        print(ui.rule())
 
     # STT import notices (missing optional deps, VAD fallbacks)
     for line in STT_IMPORT_NOTICES:
@@ -876,10 +879,13 @@ def chat_loop():
     detail_state = "EXPANDED" if display_state.is_expanded() else "COLLAPSED"
     ai_mode = "AUTONOMOUS" if config.get("autonomous", False) else "NON-AUTONOMOUS"
     tts_mode = "voice" if (HAS_STT and config.get("tts_enabled")) else "text"
+    notify_on = bool(config.get("notify", True))
     print(ui.status_row([
         ("mode", ai_mode, "info"),
         ("details", detail_state, "muted"),
         ("input", tts_mode, "muted"),
+        ("notify", "ON" if notify_on else "OFF",
+         "ok" if notify_on else "muted"),
     ]))
 
     # Keyboard hint line.
