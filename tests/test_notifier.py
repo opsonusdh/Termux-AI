@@ -301,3 +301,117 @@ def test_every_module_shares_the_same_default_set():
     assert set(permissions.DEFAULT_CONFIG) == set(app_config.DEFAULT_CONFIG)
     assert set(tools.app_config.DEFAULT_CONFIG) == set(app_config.DEFAULT_CONFIG)
     assert "notify" in permissions.DEFAULT_CONFIG
+
+# ── the /notify command ───────────────────────────────────────────────────────
+# The command is the user's handle on the flag, so it has to be honest:
+# say what it did, report the state that is really in force, and prove the
+# plumbing when it is switched on.
+
+@pytest.fixture
+def interface(tmp_path, monkeypatch):
+    """The chat interface, pointed at a throwaway config.json."""
+    from core import interface as iface
+
+    target = tmp_path / "config.json"
+    with open(target, "w", encoding="utf-8") as fh:
+        json.dump({"notify": True}, fh)
+    monkeypatch.setattr(iface, "CONFIG_PATH", str(target))
+
+    # The test notification must not reach the phone.
+    fired: list[tuple] = []
+    monkeypatch.setattr(
+        iface, "_send_notification",
+        lambda title, message: fired.append((title, message)),
+    )
+    return iface, str(target), fired
+
+
+def stored_flag(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh).get("notify")
+
+
+def test_notify_false_writes_the_flag_and_says_so(interface, capsys):
+    iface, path, fired = interface
+    assert iface._handle_notify_command("/notify false") is True
+    assert stored_flag(path) is False
+    out = capsys.readouterr().out
+    assert "OFF" in out
+    assert fired == []
+
+
+def test_notify_true_writes_the_flag_and_fires_one_test(interface, capsys):
+    iface, path, fired = interface
+    assert iface._handle_notify_command("/notify true") is True
+    assert stored_flag(path) is True
+    assert "ON" in capsys.readouterr().out
+    assert len(fired) == 1
+    assert fired[0][0] == "Termux-AI: Notifications enabled"
+
+
+def test_notify_status_reports_the_stored_state(interface, capsys):
+    iface, path, fired = interface
+    iface._handle_notify_command("/notify false")
+    capsys.readouterr()
+
+    assert iface._handle_notify_command("/notify status") is True
+    assert "OFF" in capsys.readouterr().out
+
+
+def test_notify_status_reads_the_file_not_the_import_snapshot(interface,
+                                                               capsys):
+    """The notifier reads config.json at every prompt — the status command
+    must not report the import-time copy, or the two can disagree."""
+    iface, path, fired = interface
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"notify": False}, fh)
+    iface.config = dict(iface.config, notify=True)
+
+    iface._handle_notify_command("/notify status")
+    assert "OFF" in capsys.readouterr().out
+
+
+def test_notify_toggle_flips_the_stored_state(interface, capsys):
+    iface, path, fired = interface
+
+    assert iface._handle_notify_command("/notify toggle") is True
+    assert stored_flag(path) is False
+    assert fired == []
+
+    assert iface._handle_notify_command("/notify toggle") is True
+    assert stored_flag(path) is True
+    assert len(fired) == 1
+    assert "ON" in capsys.readouterr().out
+
+
+def test_notify_toggle_reads_the_file_not_the_import_snapshot(interface):
+    iface, path, fired = interface
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"notify": False}, fh)
+    iface.config = dict(iface.config, notify=True)
+
+    iface._handle_notify_command("/notify toggle")
+    assert stored_flag(path) is True
+
+
+def test_a_command_that_is_not_notify_is_not_consumed(interface):
+    iface, path, fired = interface
+    assert iface._handle_notify_command("/not") is False
+    assert iface._handle_notify_command("/notify") is True
+
+
+def test_a_notify_typo_shows_the_usage_instead_of_being_sent_to_the_model(
+        interface, capsys):
+    iface, path, fired = interface
+    assert iface._handle_notify_command("/notify wat") is True
+    out = capsys.readouterr().out
+    assert "Usage:" in out
+    assert "toggle" in out
+
+
+def test_the_notify_command_is_offered_in_the_help(interface, capsys):
+    iface, path, fired = interface
+    iface._show_help()
+    out = capsys.readouterr().out
+    assert "/notify" in out
+    assert "toggle" in out

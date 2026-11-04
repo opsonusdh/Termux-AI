@@ -240,8 +240,14 @@ Switch it without touching the file:
 ```
 YOU > /notify true      # on — and a test notification proves the plumbing
 YOU > /notify false     # off — the AI stops pinging you while it waits
+YOU > /notify toggle    # flip it (reads the current state from disk first)
 YOU > /notify status    # what is it doing right now?
 ```
+
+`/notify status` reads `config/config.json` at that moment, so it reports the
+state the runtime is actually in — even if the file was edited by hand while
+the session was running. An unrecognised argument (`/notify wat`) shows the
+usage instead of being sent to the model as a chat message.
 
 To disable it permanently: set `"notify": false` in `config/config.json`.
 A missing Termux:API package is not an error — the notification is simply

@@ -119,6 +119,94 @@ def _update_config(**kwargs) -> dict:
     os.replace(tmp, CONFIG_PATH)
     return data
 
+
+def _read_config() -> dict:
+    """The stored configuration, read fresh from disk.
+
+    The module-level ``config`` is a snapshot taken at import time.  The
+    notifier reads ``config.json`` at every prompt, so a status command has
+    to read the same file — otherwise the two can disagree (e.g. the flag was
+    edited by hand while the session was running) and the command reports a
+    state the runtime is not actually in.
+    """
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = dict(config)
+    return data
+
+
+def _handle_notify_command(command_low: str) -> bool:
+    """Handle a ``/notify`` command.  Returns True when it was consumed.
+
+    The command used to switch the flag silently — no output at all, so
+    "/notify true" looked like it had been ignored.  It now confirms what it
+    did, reports the current state on request, and proves the plumbing works
+    by sending one test notification when notifications are switched on.
+    """
+    global config
+
+    if command_low in ("/notify true", "/notify on", "/notify enable",
+                       "notify true", "notify on"):
+        config = _update_config(notify=True)
+        print(ui.notice("ok", "Notifications: ON — you will be pinged when "
+                              "the AI needs your permission, a confirmation "
+                              "or an answer."))
+        _send_notification("Termux-AI: Notifications enabled",
+                           "Notifications are on. The AI will ping you when "
+                           "it needs a permission, a confirmation or an "
+                           "answer.")
+        return True
+
+    if command_low in ("/notify false", "/notify off", "/notify disable",
+                       "notify false", "notify off"):
+        config = _update_config(notify=False)
+        print(ui.notice("muted", "Notifications: OFF — the AI will no "
+                                "longer ping you while it waits."))
+        return True
+
+    if command_low in ("/notify toggle", "notify toggle"):
+        # Read the current value from disk, not from the import-time
+        # snapshot, so the toggle reflects what is really in force.
+        new_state = not bool(_read_config().get("notify", True))
+        config = _update_config(notify=new_state)
+        if new_state:
+            print(ui.notice("ok", "Notifications: ON — you will be pinged "
+                                  "when the AI needs your permission, a "
+                                  "confirmation or an answer."))
+            _send_notification("Termux-AI: Notifications enabled",
+                               "Notifications are on. The AI will ping you "
+                               "when it needs a permission, a confirmation or "
+                               "an answer.")
+        else:
+            print(ui.notice("muted", "Notifications: OFF — the AI will no "
+                                    "longer ping you while it waits."))
+        return True
+
+    if command_low in ("/notify", "/notify status", "notify",
+                       "notify status"):
+        on = bool(_read_config().get("notify", True))
+        print(ui.notice("ok" if on else "muted",
+                        f"Notifications: {'ON' if on else 'OFF'}"))
+        if on:
+            print(ui.hint("A notification is pushed when the AI waits for "
+                          "a permission, a confirmation or an answer."))
+        return True
+
+    # A "/notify ..." with an argument that is not one of the four known
+    # ones is still a notify command — a typo.  Consume it and show the
+    # usage instead of letting it fall through to the model as a chat
+    # message, which is what every unrecognised slash command does.
+    if command_low.startswith("/notify ") or command_low.startswith("notify "):
+        print(ui.notice("warn", "Usage: /notify [true|false|toggle|status]"))
+        return True
+
+    return False
+
+
 # Notices emitted by the STT module while it is imported.  Collected rather
 # than printed inline; see the comment inside the try block below.
 STT_IMPORT_NOTICES: list[str] = []
@@ -722,8 +810,9 @@ def _show_help() -> None:
         "/expand /e   (show every tool argument, the full write payload,",
         "              the delegation command and the sub-AI's tool output)",
         "/collapse /c",
-        "/notify [true|false|status]   (ping me when the AI waits for a",
-        "                             permission, a confirmation or an answer)",
+        "/notify [true|false|toggle|status]   (ping me when the AI waits",
+        "                             for a permission, a confirmation or an",
+        "                             answer)",
         "/normal /chat",
         "/help /commands",
     ]
@@ -1075,31 +1164,7 @@ def chat_loop():
         # no output at all, so "/notify true" looked like it had been
         # ignored.  It now confirms, reports the current state, and proves
         # the plumbing works by sending one test notification.
-        if command_low in ("/notify true", "/notify on", "/notify enable",
-                           "notify true", "notify on"):
-            config = _update_config(notify=True)
-            print(ui.notice("ok", "Notifications: ON — you will be pinged when "
-                                "the AI needs your permission, a confirmation "
-                                "or an answer."))
-            _send_notification("Termux-AI: Notifications enabled",
-                               "Notifications are on. The AI will ping you when "
-                               "it needs a permission, a confirmation or an "
-                               "answer.")
-            continue
-        if command_low in ("/notify false", "/notify off", "/notify disable",
-                           "notify false", "notify off"):
-            config = _update_config(notify=False)
-            print(ui.notice("muted", "Notifications: OFF — the AI will no "
-                                    "longer ping you while it waits."))
-            continue
-        if command_low in ("/notify", "/notify status", "notify",
-                           "notify status"):
-            state = "ON" if config.get("notify", True) else "OFF"
-            tone = "ok" if config.get("notify", True) else "muted"
-            print(ui.notice(tone, f"Notifications: {state}"))
-            if config.get("notify", True):
-                print(ui.hint("A notification is pushed when the AI waits for "
-                              "a permission, a confirmation or an answer."))
+        if _handle_notify_command(command_low):
             continue
         if command_low in ("/help", "/commands"):
             _show_help()
