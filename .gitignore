@@ -7,6 +7,7 @@ api.keys.bak
 config/api.keys
 config/api.keys.bak
 config/google_oauth.json
+config/config.json
 config/*.tmp
 config/test_*.json
 log.txt
