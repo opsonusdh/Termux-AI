@@ -4,8 +4,6 @@ All notable changes to Termux-AI will be documented in this file.
 
 ---
 
-## [Unreleased]
-
 ## [3.3.1] - 2026-11-05
 
 ### Added

@@ -12,7 +12,7 @@
     "sk-or-v1-..."
   ],
   "ollama": [
-    "your-ollama-cloud-key"
+    "..."
   ],
   "ollama-local": [
     "No-Need"
