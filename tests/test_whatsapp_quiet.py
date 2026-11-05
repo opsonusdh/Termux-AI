@@ -34,7 +34,24 @@ if os.path.join(REPO_ROOT, "core") not in sys.path:
     sys.path.insert(0, os.path.join(REPO_ROOT, "core"))
 
 from core import plugin_runtime
-from core.whatsapp_manager import WhatsAppManager
+
+try:
+    from core.whatsapp_manager import WhatsAppManager
+    _TERMINUX_WP_MISSING = False
+except FileNotFoundError:
+    # Termux-WP is optional — the README says so.  Without its checkout the
+    # WhatsApp manager refuses to import (it cannot render a pairing code
+    # without the qrcode-terminal module), and a fresh clone has no
+    # Termux-WP at all.  Importing it at module level used to abort the
+    # *whole* suite with a collection error; only the tests that need the
+    # real manager are skipped now, and the rest still run.
+    WhatsAppManager = None
+    _TERMINUX_WP_MISSING = True
+
+requires_terminux_wp = pytest.mark.skipif(
+    _TERMINUX_WP_MISSING,
+    reason="Termux-WP is not installed — the WhatsApp manager cannot be imported",
+)
 
 # ``tests/conftest.py`` stubs ``plugin_runtime.setup`` for every test — the
 # real one starts a gateway, and the pairing path kills one.  The original
@@ -110,6 +127,7 @@ def enabled_calls(monkeypatch):
 
 # ── 1. the pairing code is captured, never printed ────────────────────────────
 
+@requires_terminux_wp
 def test_a_pairing_qr_event_prints_nothing(capsys):
     """The event loop must stay silent when the gateway asks for a scan."""
     manager = WhatsAppManager()
@@ -123,6 +141,7 @@ def test_a_pairing_qr_event_prints_nothing(capsys):
     assert manager.current_qr() == QR_PAYLOAD
 
 
+@requires_terminux_wp
 def test_the_status_event_does_not_reprint_the_qr(capsys):
     """The gateway replays its status on every reconnect — with the QR in it.
 
@@ -139,6 +158,7 @@ def test_the_status_event_does_not_reprint_the_qr(capsys):
     assert manager.current_qr() == QR_PAYLOAD
 
 
+@requires_terminux_wp
 def test_the_qr_is_rendered_only_when_it_is_asked_for(capsys, monkeypatch):
     """show_qr() is the single place the code is drawn."""
     manager = WhatsAppManager()
@@ -161,12 +181,14 @@ def test_the_qr_is_rendered_only_when_it_is_asked_for(capsys, monkeypatch):
     assert calls[0][1]["env"]["QR_CODE"] == QR_PAYLOAD
 
 
+@requires_terminux_wp
 def test_show_qr_without_a_code_does_nothing(capsys):
     manager = WhatsAppManager()
     assert manager.show_qr() is False
     assert capsys.readouterr().out == ""
 
 
+@requires_terminux_wp
 def test_a_linked_session_forgets_the_pairing_code():
     """Once the session is linked the code is worthless — drop it."""
     manager = WhatsAppManager()
@@ -180,6 +202,7 @@ def test_a_linked_session_forgets_the_pairing_code():
 
 # ── 2. "Connected and ready. My number: …" is gone ───────────────────────────
 
+@requires_terminux_wp
 def test_connecting_does_not_print_the_number(capsys):
     """The owner's number must not land in the middle of the chat."""
     manager = WhatsAppManager()
@@ -203,6 +226,7 @@ def test_the_connected_banner_is_gone_from_the_source():
     assert "My number:" not in source
 
 
+@requires_terminux_wp
 def test_a_status_change_stays_quiet(capsys):
     manager = WhatsAppManager()
     manager._on_message(None, _event("SYSTEM_STATUS", {"state": "INITIALIZING"}))
@@ -302,6 +326,7 @@ def test_setup_waits_for_the_pairing_state_before_deciding(monkeypatch, enabled_
     assert fake.killed == 0
 
 
+@requires_terminux_wp
 def test_wait_for_pairing_state_waits_for_a_decided_state(monkeypatch):
     manager = WhatsAppManager()
     states = iter(["INITIALIZING", "INITIALIZING", "READY"])
@@ -311,6 +336,7 @@ def test_wait_for_pairing_state_waits_for_a_decided_state(monkeypatch):
     assert manager.wait_for_pairing_state(timeout=5, poll=0.01) == "READY"
 
 
+@requires_terminux_wp
 def test_wait_for_pairing_state_gives_up(monkeypatch):
     manager = WhatsAppManager()
     monkeypatch.setattr(manager, "gateway_state",
@@ -321,6 +347,7 @@ def test_wait_for_pairing_state_gives_up(monkeypatch):
 
 # ── 4. the listener does not outlive the plugin ───────────────────────────────
 
+@requires_terminux_wp
 def test_stopping_the_manager_closes_the_listener():
     manager = WhatsAppManager()
     ws = _FakeWS()
@@ -333,6 +360,7 @@ def test_stopping_the_manager_closes_the_listener():
     assert ws.closed is True
 
 
+@requires_terminux_wp
 def test_stopping_the_server_stops_the_listener():
     """A disabled plugin must not keep listening for messages."""
     manager = WhatsAppManager()

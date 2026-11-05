@@ -190,3 +190,56 @@ The config uses concise WhatsApp replies.
 ```
 
 The first statement is about conversation history. The second is about current filesystem state. They are different claims and require different proof.
+
+---
+
+## 9. Closing a Conversation (`/session new`)
+
+`/session new` is the `/clear` of Termux-AI. It wipes the chat history, the agent
+history and the chunk context the model is fed; the next message starts from a blank
+slate.
+
+It deliberately does **not**:
+- re-run the startup UI (no banner, no status row, no hint line),
+- leave agent mode (`/agent` stays in agent mode),
+- touch the preferences, the display state or the plugins.
+
+The wipe is **durable**: the chunk store is not deleted — a **context boundary** is
+moved forward and persisted (`data/context_session.json`), so the closed conversation
+stops being injected into every request and does not come back after a restart. The
+chunks stay retrievable with `retrieve_chunk`, so the model can still dig out earlier
+work when the user asks about it. The session draft is archived as a normal saved
+session rather than dropped.
+
+**Do not "fix" a closed session by deleting chunks.** The boundary is the mechanism;
+deleting the store destroys the history the model is still allowed to reach.
+
+---
+
+## 10. Reactive Context Compression & Archiving
+
+### Reactive Triggering
+- Compression triggers **reactively**, when the provider reports a context-length
+  limit (or HTTP 405/413/422/431). A registry of "context limits per model" was a
+  guess and was wrong about the endpoints that actually overflowed — the provider's
+  own answer is the budget.
+- The provider's stated ceiling is parsed from the error and used as the compression
+  budget, with the system prompt, the tool catalogue and the output cap taken off the
+  top.
+
+### Archive Mechanics (`logs/context_archive.jsonl`)
+- When older context is compressed, the raw reasoning, tool inputs and tool outputs
+  are written to `logs/context_archive.jsonl` under a stable id (`A1`, `A2`, …).
+- A marker left in the conversation names that id, so the model can page the raw text
+  back with `retrieve_archive(id, offset, limit)` and list every segment with
+  `list_archives()`. The digest is a summary; the archive is the evidence.
+
+### Compression Invariants
+1. **JSON Validity:** Tool-call `arguments` must stay parseable JSON. Truncate
+   individual property values — never the argument blob.
+2. **Tool Pairing:** A tool call and its result are never decoupled.
+3. **No Unanswered Tool Calls:** Never leave an assistant tool call without its
+   matching result turn.
+4. **Compression Precedence:** History turns absorb compression before the live turn
+   is altered. The system prompt, the recent turns and the prompt being answered are
+   never reduced to a stub.

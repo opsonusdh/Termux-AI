@@ -1,0 +1,28 @@
+{
+    "capabilities": [
+        {
+            "name": "validate_execution",
+            "module": "agent.validator",
+            "function": "validate_execution",
+            "description": "Validate execution results against JSON schema. Returns Success or Failure."
+        },
+        {
+            "name": "execute_plan",
+            "module": "agent.executor",
+            "function": "execute_plan",
+            "description": "Wrap plan execution with reflection recording and validation."
+        },
+        {
+            "name": "attempt_correction",
+            "module": "reflection.self_correction",
+            "function": "attempt_correction",
+            "description": "Inspect latest reflection log and retry failed plans."
+        },
+        {
+            "name": "orchestrate",
+            "module": "orchestration.manager",
+            "function": "Manager",
+            "description": "Sequential multi-worker task orchestration via IPC."
+        }
+    ]
+}

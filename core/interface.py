@@ -16,6 +16,7 @@ if _ROOT not in sys.path:
 import paths
 
 # Project imports
+from core.__main__ import VERSION
 from llm_client import ask_ai, ask_agent, get_last_response_metadata
 from core.renderer import render_markdown_terminal, GRAY, RESET, RED, YELLOW, GREEN, BLUE, CYAN
 from core.input_handler import get_interactive_input
@@ -46,9 +47,11 @@ try:
         delete_session,
         finalize_session,
         get_session_draft,
+        archive_current_draft,
     )
 except Exception:
     list_sessions = resume_session = delete_session = finalize_session = get_session_draft = None
+    archive_current_draft = None
 
 # Config
 BASE_DIR    = _ROOT
@@ -287,16 +290,98 @@ def _get_diag_history():
 display_state.configure(CONFIG_PATH)
 
 
-def _handle_session_command(command: str) -> None:
-    """Handle /session subcommands: list, resume, save, delete, draft."""
-    if list_sessions is None:
-        print(ui.notice("error", "Session memory module not available"))
+def _format_session_time(value: str) -> str:
+    """A compact, readable timestamp for the session list.
+
+    The stored timestamps are ISO strings with microseconds; the list only
+    needs "2026-11-03 14:32".
+    """
+    if not value:
+        return ""
+    text = str(value).replace("T", " ")
+    if "." in text:
+        text = text.split(".", 1)[0]
+    return text.strip()
+
+
+def _render_session_list(sessions: list) -> None:
+    """Pretty-print the saved sessions.
+
+    The old version printed the raw Python list — a wall of dict repr that
+    says nothing at a glance and wraps badly on a phone.  This is the same
+    terminal chrome the rest of the interface uses: a heading, one aligned
+    block per session, and the summary underneath it.
+    """
+    if not sessions:
+        print(ui.banner("Sessions", "none saved yet"))
+        print(ui.hint("Nothing saved yet — '/session save' writes the current "
+                      "session here, '/session new' closes the current one."))
+        print()
         return
 
+    print(ui.banner("Sessions", f"{len(sessions)} saved"))
+
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        session_id = str(session.get("session_id", "") or "(unnamed)")
+        started = _format_session_time(session.get("started", "")) or "—"
+        ended = _format_session_time(session.get("ended", "")) or "in progress"
+        steps = session.get("step_count", 0)
+        tokens = session.get("token_estimate", 0)
+
+        print(f"  {CYAN}{session_id}{RESET}")
+        rows = [
+            ("started", started),
+            ("ended", ended),
+            ("steps", f"{steps}"),
+            ("tokens", f"~{tokens:,}"),
+        ]
+        for line in ui.key_value_rows(rows, key_width=7, indent=4, tone="muted"):
+            print(line)
+
+        summary = str(session.get("summary", "") or "").strip()
+        if summary:
+            summary = ui.clip(summary, max(40, ui.term_width() - 6))
+            for line in ui.wrap(summary, ui.term_width() - 6, "    "):
+                print(f"{GRAY}{line}{RESET}")
+        print()
+
+
+def _reset_conversation_context(history: list, agent_history: list) -> dict:
+    """Wipe the conversation context — and nothing else.
+
+    This is the "/clear" of Termux-AI: the chat history, the agent history
+    and the chunk context the model is fed go away, so the next message
+    starts from a blank slate.
+
+    What is deliberately *not* touched: the mode (agent or chat), the
+    preferences in config.json, the display state, the plugins and the
+    terminal chrome.  The mode is not even a parameter here, so it cannot
+    be reset by accident.
+    """
+    report = {
+        "history": len(history),
+        "agent_history": len(agent_history),
+    }
+    history.clear()
+    agent_history.clear()
+    report.update(_cm.reset_context())
+    return report
+
+
+def _handle_session_command(command: str, on_new=None) -> None:
+    """Handle /session subcommands: list, new, resume, save, delete, draft.
+
+    ``on_new`` is the callback that starts a fresh conversation.  The chat
+    loop passes one that also clears its own history lists; without it the
+    command still resets the chunk context.
+    """
     parts = command.strip().split()
     if len(parts) < 2:
-        print(ui.hint("Usage: /session <list|resume|save|delete|draft> [session_id]"))
+        print(ui.hint("Usage: /session <list|new|resume|save|delete|draft> [session_id]"))
         print(ui.hint("  /session list           — List all saved sessions"))
+        print(ui.hint("  /session new            — Start a fresh conversation (keeps the mode)"))
         print(ui.hint("  /session resume <id>    — Resume a session (injects context)"))
         print(ui.hint("  /session save             — Finalize current session draft"))
         print(ui.hint("  /session delete <id>    — Delete a saved session"))
@@ -306,21 +391,30 @@ def _handle_session_command(command: str) -> None:
     sub = parts[1].lower()
 
     try:
+        if sub == "new":
+            _start_new_session(on_new)
+            return
+
+        if list_sessions is None:
+            print(ui.notice("error", "Session memory module not available"))
+            return
+
         if sub == "list":
-            result = list_sessions()
-            print(result)
+            _render_session_list(list_sessions())
 
         elif sub == "resume":
             if len(parts) < 3:
                 print(ui.notice("error", "Usage: /session resume <session_id>"))
                 return
             session_id = parts[2]
-            print(ui.notice("info", f"Resuming session {session_id}..."))
             result = resume_session(session_id)
-            print(ui.notice("ok", "Resumed"))
+            if isinstance(result, dict) and result.get("error"):
+                print(ui.notice("error", str(result["error"])))
+                return
+            print(ui.notice("ok", f"Session {session_id} loaded."))
             # The resumed context would need to be injected into the current history
             # For now, just show the session content
-            print(result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
 
         elif sub == "save":
             print(ui.notice("info", "Finalizing current session..."))
@@ -347,10 +441,51 @@ def _handle_session_command(command: str) -> None:
 
         else:
             print(ui.notice("error", f"Unknown subcommand: {sub}"))
-            print(ui.hint("Available: list, resume, save, delete, draft"))
+            print(ui.hint("Available: list, new, resume, save, delete, draft"))
 
     except Exception as e:
         print(ui.notice("error", f"Session error: {e}"))
+
+
+def _start_new_session(on_new=None) -> dict:
+    """Close the current conversation and start a fresh one.
+
+    The old conversation is not thrown away: the chunk store keeps it (the
+    model can still retrieve it when the user asks about earlier work) and
+    the session draft is written out as a saved session.
+
+    The mode, the preferences and the terminal chrome stay exactly as they
+    are — this is a context wipe, not a restart.
+    """
+    if on_new is None:
+        on_new = lambda: _reset_conversation_context([], [])
+
+    archived = None
+    if archive_current_draft is not None:
+        try:
+            archived = archive_current_draft()
+        except Exception as exc:
+            print(ui.notice("warn", f"The session draft could not be archived: {exc}"))
+
+    report = on_new() or {}
+
+    print(ui.notice("ok", "New session — the conversation context is cleared."))
+
+    dropped = report.get("dropped_chunks", 0)
+    if dropped:
+        print(ui.hint(f"{dropped} earlier chunk(s) stay on disk and can still be "
+                      "retrieved if you ask about that work."))
+    if archived:
+        print(ui.hint(f"The previous session was saved to {archived}."))
+
+    print(ui.hint("Mode, preferences and plugins are unchanged."))
+
+    runtime_log.log_note(
+        "new session — conversation context cleared "
+        f"(chunks dropped from the active context: {dropped})",
+        "session",
+    )
+    return report
 
 
 def _plugin_state(plugin_name: str, info: dict | None = None) -> dict:
@@ -806,7 +941,8 @@ def _show_help() -> None:
         "/plugin list | /plugin setup <name> | /plugin status <name>",
         "/plugin enable <name> | /plugin disable <name>",
         "/plugin disconnect <name>",
-        "/session [list|resume|save|delete|draft]",
+        "/session [list|new|resume|save|delete|draft]",
+        "/session new   (fresh conversation — the mode and your settings stay)",
         "/expand /e   (show every tool argument, the full write payload,",
         "              the delegation command and the sub-AI's tool output)",
         "/collapse /c",
@@ -949,11 +1085,31 @@ def chat_loop():
     agent_mode = False
     _diag_injected = False
 
+    def _new_session() -> dict:
+        """Start a fresh conversation without touching the mode or the UI.
+
+        The chat history, the agent history and the chunk context go away;
+        the mode (``agent_mode``), the preferences, the plugins and the
+        terminal chrome stay exactly as they are.  This is a context wipe,
+        not a restart — nothing here reprints the banner, the status row or
+        the hints.
+
+        The diagnosis is re-armed as well: it was injected into the old
+        context, which no longer exists, so a fresh conversation would
+        otherwise start without any knowledge of the device it runs on.
+        The probe itself is not run again — the data it collected is still
+        here.
+        """
+        nonlocal _diag_injected
+        _diag_injected = False
+        return _reset_conversation_context(history, agent_history)
+
     # ── Startup UI ──────────────────────────────────────────────────────
     # The banner, import notices, and a single status row replace the old
     # scattered prints so the terminal always shows a clean, aligned header.
 
-    banner_lines = ui.banner("Termux-AI", "Terminal AI ready.")
+    banner_lines = ui.banner("Termux-AI", "Terminal AI ready.",
+                              version=VERSION)
     if banner_lines:
         print(banner_lines)
         # A rule separates the header from the status row below it, so the
@@ -1171,7 +1327,7 @@ def chat_loop():
             continue
         # Session memory commands
         if command_low.startswith("/session"):
-            _handle_session_command(command)
+            _handle_session_command(command, on_new=_new_session)
             continue
 
         # Plugin commands

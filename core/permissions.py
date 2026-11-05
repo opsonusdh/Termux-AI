@@ -28,6 +28,7 @@ import paths
 from core import shell_parse
 from core import app_config
 from core import notifier
+from core.renderer import render_code_snippet
 
 # Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -902,7 +903,15 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
 
     print("\n[PERMISSION] The AI wants to run:")
     for segment, reason in requests:
-        print(f"  {segment}")
+        # The command is highlighted as bash and drawn in the same gutter box
+        # the markdown renderer uses for code blocks, so what is about to run
+        # reads like the code it is — not like a wall of plain text.
+        snippet = render_code_snippet(segment, "bash")
+        if snippet:
+            for line in snippet:
+                print(line)
+        else:
+            print(f"  {segment}")
         print(f"  Reason: {reason}")
 
     try:

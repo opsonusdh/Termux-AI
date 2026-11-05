@@ -268,9 +268,21 @@ def key_value_rows(
     return rows
 
 
-def banner(name: str, subtitle: str = "", tagline: str = "") -> str:
-    """The application header shown once at startup."""
+def banner(name: str, subtitle: str = "", tagline: str = "",
+           version: str = "") -> str:
+    """The application header shown once at startup.
+
+    ``version`` is printed on its own line between the name and the
+    subtitle, so the header reads:
+
+        ▌ Termux-AI
+          v3.3.1
+          Terminal AI ready.
+    """
     lines = [f"{CYAN}{BOLD}▌{RESET} {BOLD}{name}{RESET}"]
+    if version:
+        text = version if version.startswith("v") else f"v{version}"
+        lines.append(f"  {DIM}{text}{RESET}")
     if subtitle:
         lines.append(f"  {GRAY}{subtitle}{RESET}")
     if tagline:

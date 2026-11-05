@@ -44,6 +44,7 @@ from core.models import (
     normalize_intelligence_level,
 )
 from core import shell_runner
+from core import html_markdown
 from core import google_api
 from core import google_oauth
 from core import runtime_log
@@ -500,15 +501,22 @@ TOOLS_DESCRIPTION = [
         "function": {
             "name": "browse_web",
             "description": (
-                "Fetch a URL and convert readable content into structured markdown. "
+                "Fetch a URL and turn its content into structured Markdown. "
                 "Uses a headless Chromium browser (via Chrome DevTools Protocol) to "
                 "properly render JavaScript-heavy pages, single-page applications, and "
                 "dynamically loaded content. Supports CSS selectors to target specific "
                 "elements. Falls back to requests+BeautifulSoup if Chromium is unavailable. "
                 "The browser is closed again when the call returns; use the 'browser' tool "
                 "when you need to keep a page alive and interact with it over several calls. "
-                "By default a screenshot of the page is captured and attached to the reply "
-                "so a multimodal model can look at it. "
+                "The content is read from the DOM, so headings, lists, links and tables "
+                "survive and the furniture nobody reads (navigation, footers, cookie "
+                "banners) is dropped. The page is given up to 10 seconds to finish filling "
+                "itself in before it is read, so a search engine that loads its results "
+                "late does not come back empty. "
+                "A screenshot is taken ONLY if you ask for one (screenshot=true); it is "
+                "never captured on the side. "
+                "Use 'search' to pull out one element — a class name, an id, a tag name or "
+                "a CSS selector — together with everything inside it. "
                 "Never guess click coordinates: add a 'find' action to list the page's "
                 "buttons, links and fields — each with the label a human would read and "
                 "a ready-to-use CSS selector — and then click by 'text' or 'index'. The "
@@ -536,9 +544,10 @@ TOOLS_DESCRIPTION = [
                         "type": "boolean",
                         "description": (
                             "Capture the page and attach the image to the reply so the "
-                            "model can see it. Default true."
+                            "model can see it. Set this to true ONLY when you actually "
+                            "want to look at the page — no picture is taken otherwise."
                         ),
-                        "default": True,
+                        "default": False,
                     },
                     "extract_html": {
                         "type": "boolean",
@@ -548,6 +557,19 @@ TOOLS_DESCRIPTION = [
                             "attributes and data-* values. Default false."
                         ),
                         "default": False,
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": (
+                            "Look for one element on the page and return it together "
+                            "with everything inside it, as Markdown. The query may be "
+                            "a class name (a class written with spaces matches an "
+                            "element carrying all of those classes, e.g. 'weather "
+                            "data'), an id, a tag name ('div', 'a') or a full CSS "
+                            "selector ('#results .row'). Use it when you know what "
+                            "the page holds but not what it calls it."
+                        ),
+                        "default": "",
                     },
                     "actions": {
                         "type": "array",
@@ -676,8 +698,15 @@ TOOLS_DESCRIPTION = [
                 "page, with its cookies and form state intact. Use action='close' with "
                 "the id to shut the browser down when you are done. "
                 "action='list' shows the open sessions. "
-                "A screenshot of the page is captured and attached to the reply by "
-                "default, so a multimodal model can see what the page looks like. "
+                "The page is read as Markdown built from the DOM: headings, lists, "
+                "links and tables survive, and the furniture nobody reads (navigation, "
+                "footers, cookie banners) is dropped. The page is given up to 10 "
+                "seconds to finish filling itself in before it is read, so a search "
+                "engine that loads its results late does not come back empty. "
+                "A screenshot is taken ONLY if you ask for one (screenshot=true); it is "
+                "never captured on the side. "
+                "Use 'search' to pull out one element — a class name, an id, a tag name "
+                "or a CSS selector — together with everything inside it. "
                 "To click something, do not guess coordinates: run a 'find' action to "
                 "list the page's buttons, links and fields with their labels and "
                 "ready-to-use CSS selectors, then click by 'text' or 'index' — the "
@@ -727,9 +756,10 @@ TOOLS_DESCRIPTION = [
                         "type": "boolean",
                         "description": (
                             "Capture the page and attach the image to the reply so the "
-                            "model can see it. Default true."
+                            "model can see it. Set this to true ONLY when you actually "
+                            "want to look at the page — no picture is taken otherwise."
                         ),
-                        "default": True,
+                        "default": False,
                     },
                     "extract_html": {
                         "type": "boolean",
@@ -738,6 +768,19 @@ TOOLS_DESCRIPTION = [
                             "inspect the DOM structure, attributes and data-* values."
                         ),
                         "default": False,
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": (
+                            "Look for one element on the page and return it together "
+                            "with everything inside it, as Markdown. The query may be "
+                            "a class name (a class written with spaces matches an "
+                            "element carrying all of those classes, e.g. 'weather "
+                            "data'), an id, a tag name ('div', 'a') or a full CSS "
+                            "selector ('#results .row'). Use it when you know what "
+                            "the page holds but not what it calls it."
+                        ),
+                        "default": "",
                     },
                     "actions": {
                         "type": "array",
@@ -2123,7 +2166,8 @@ TOOLS_DESCRIPTION = [
             "description": (
                 "Ask the user a question with optional multiple-choice options. "
                 "Returns the user\'s answer as a string. If options are provided, "
-                "the user can select by number (1, 2, 3...) or type a custom answer. "
+                "the user can select by number (1, 2, 3...) or type an answer of "
+                "their own — a typed answer is returned to you exactly as written. "
                 "Use this when you need clarification, confirmation, or a decision from the user."
             ),
             "parameters": {
@@ -2135,7 +2179,10 @@ TOOLS_DESCRIPTION = [
                     },
                     "options": {
                         "type": "array",
-                        "description": "Optional list of answer options. User can select by number.",
+                        "description": (
+                            "Optional list of answer options. The user can select by "
+                            "number or type an answer of their own instead."
+                        ),
                         "items": {
                             "type": "string"
                         },
@@ -3935,7 +3982,8 @@ def _fallback_match_text(soup, label):
     return None
 
 
-def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000, actions: list = None) -> str:
+def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
+                         actions: list = None, search: str = "") -> str:
     """
     Fallback scraper using requests + BeautifulSoup.
     Used when Chrome/Chromium is not available.
@@ -4086,11 +4134,30 @@ def _web_scrape_fallback(url: str, selector: str = None, max_chars: int = 12000,
         # collapsed panel on the page, as if all of them were visible at once.
         _strip_hidden_content(soup, base_url=url, headers=headers)
 
-        if selector:
+        # The page is handed over as Markdown built from the DOM, the same
+        # way the browser path does it, so the model gets the structure and
+        # not a wall of loose lines.
+        search = (search or "").strip()
+        if search:
+            found = html_markdown.find_elements(soup, search)
+            if not found:
+                return (f"[WARNING] Nothing on the page matched '{search}'. "
+                        "Try a CSS selector, or a class name the page uses.")
+            blocks = []
+            for index, el in enumerate(found[:html_markdown.MAX_MATCHES], 1):
+                heading = f"{index}. {html_markdown.describe_element(el)}"
+                block = html_markdown.element_to_markdown(el, base_url=url,
+                                                         heading=heading)
+                if block:
+                    blocks.append(block)
+            text = "\n\n".join(blocks)
+        elif selector:
             target = soup.select(selector)
-            text = "\n".join(el.get_text(separator="\n", strip=True) for el in target)
+            text = "\n\n".join(
+                html_markdown.html_to_markdown(str(el), base_url=url)
+                for el in target)
         else:
-            text = soup.get_text(separator="\n", strip=True)
+            text = html_markdown.html_to_markdown(str(soup), base_url=url)
 
         # Prepend action notes if any
         if action_notes:
@@ -4160,8 +4227,15 @@ _IMAGE_ATTACHMENT_LOCK = threading.Lock()
 _IMAGE_DATA_URI_CACHE: dict[str, tuple] = {}
 
 
-def queue_image_attachment(path: str, label: str = "") -> str:
+def queue_image_attachment(path: str, label: str = "",
+                          explicit: bool = True) -> str:
     """Queue an image file so the next LLM request can include it.
+
+    ``explicit`` says whether the model actually asked for the picture.  An
+    image nobody asked for is not handed over: a model that cannot see
+    images would have to be swapped for one that can, and the conversation
+    would silently change models halfway through for a picture nobody
+    wanted.
 
     Returns the absolute path that was queued, or "" when the file does not
     exist (a missing screenshot must never break the tool call that produced
@@ -4179,6 +4253,7 @@ def queue_image_attachment(path: str, label: str = "") -> str:
         _IMAGE_ATTACHMENTS.append({
             "path": absolute,
             "label": label or os.path.basename(absolute),
+            "explicit": bool(explicit),
         })
     return absolute
 
@@ -4386,6 +4461,318 @@ def _browser_extract_html(session: dict, selector: str = "") -> str:
     if err:
         return f"[ERROR] HTML extraction failed: {err}"
     return text if isinstance(text, str) else (str(text) if text else "")
+
+
+# ── WAITING FOR THE PAGE TO FILL ITSELF IN ───────────────────────────────────
+# A page can report a finished load while its background script is still
+# filling the result list.  A search engine is the classic case: the load
+# event fires, the page is "complete", and the results are still empty.
+# Reading or photographing the page at that moment produces an empty
+# screen and an empty answer.
+#
+# The page is therefore given a moment to settle: the browser has to say
+# "complete" *and* the content has to stop changing.  When the page is
+# still busy after the timeout, the wait is given up on and the caller
+# carries on with whatever is on the page -- a half-filled page beats no
+# page at all.
+_BROWSER_CONTENT_TIMEOUT = 10.0     # seconds the page gets to settle
+_BROWSER_CONTENT_POLL = 0.35        # seconds between two checks
+
+# A page that has been quiet for this long is done.  The number matters:
+# a search engine fires its load event while the results are still on
+# their way, and the page then keeps growing for seconds.  Two identical
+# readings a third of a second apart prove nothing -- there are quiet
+# patches in the middle of a page filling itself in.
+_BROWSER_CONTENT_SETTLE = 1.5       # seconds the page has to stay unchanged
+
+
+def _browser_wait_for_content(session: dict,
+                              timeout: float | None = None) -> dict:
+    """Wait until the page has stopped changing.
+
+    The page has to report itself as complete *and* to stay unchanged for
+    a moment before it is believed.  A page that never settles does not
+    fail the call: ``settled`` is then False and the caller reports that
+    the content may be incomplete.
+    """
+    ws = session.get("ws")
+    if not ws:
+        return {"settled": False, "waited": 0.0, "info": {}}
+    if timeout is None:
+        timeout = _BROWSER_CONTENT_TIMEOUT
+
+    started = time.monotonic()
+    deadline = started + max(0.0, float(timeout or 0))
+    previous = None
+    info: dict = {}
+    unreadable = 0
+    quiet_since = started
+
+    while True:
+        mid = session["msg_id"]
+        session["msg_id"] = mid + 1
+        js = (
+            "(function(){var b=document.body;var res=0;"
+            "try{res=performance.getEntriesByType('resource').length;}catch(e){}"
+            "if(!b){return JSON.stringify({ready:document.readyState,len:0,nodes:0,html:0,res:res});}"
+            "var t=b.innerText||b.textContent||'';"
+            "return JSON.stringify({ready:document.readyState,len:t.length,"
+            "nodes:b.getElementsByTagName('*').length,html:(b.innerHTML||'').length,"
+            "res:res});})()"
+        )
+        value, err = _evaluate_js(ws, js, msg_id=mid, timeout=5)
+        parsed = None
+        if not err and value:
+            try:
+                parsed = json.loads(value)
+            except (ValueError, TypeError):
+                parsed = None
+        if isinstance(parsed, dict) and "ready" in parsed:
+            info = parsed
+            unreadable = 0
+        else:
+            # The page did not answer.  There is nothing to wait for then, so
+            # the wait is given up on instead of burning the whole timeout.
+            unreadable += 1
+            if unreadable >= 2:
+                return {"settled": False,
+                        "waited": round(time.monotonic() - started, 2),
+                        "info": info,
+                        "error": "the page did not report its state"}
+        fingerprint = (info.get("ready"), info.get("len"),
+                       info.get("nodes"), info.get("html"),
+                       info.get("res"))
+        now = time.monotonic()
+        if fingerprint == previous:
+            # Nothing changed since the last look.
+            pass
+        elif fingerprint == session.get("_content_fp"):
+            # Nothing changed since the *previous* wait -- the page has
+            # been quiet since then, and the wait does not start over.
+            quiet_since = session.get("_content_fp_since", now)
+        else:
+            # The page just changed; the clock for "quiet" starts again.
+            quiet_since = now
+        previous = fingerprint
+        session["_content_fp"] = fingerprint
+        session["_content_fp_since"] = quiet_since
+        if (info.get("ready") == "complete"
+                and (now - quiet_since) >= _BROWSER_CONTENT_SETTLE):
+            return {"settled": True, "waited": round(now - started, 2),
+                    "info": info}
+        if now >= deadline:
+            return {"settled": False, "waited": round(now - started, 2),
+                    "info": info}
+        time.sleep(_BROWSER_CONTENT_POLL)
+
+
+def _browser_content_note(report: dict) -> str:
+    """The line that tells the model the page was still busy."""
+    if not report or report.get("settled"):
+        return ""
+    return ("\n[NOTE] The page was still filling itself in after "
+            f"{report.get('waited', 0):.0f}s. The content below may be "
+            "incomplete -- wait a moment and read it again if something "
+            "important is missing.")
+
+
+# ── READING THE PAGE AS MARKDOWN ─────────────────────────────────────────────
+
+# The junk that is stripped out of the DOM before it is converted: it is
+# never readable content and it makes the page twice as big.
+_DOM_JUNK = ("var junk=c.querySelectorAll('script,style,noscript,template,"
+             "svg,canvas');for(var j=0;j<junk.length;j++){junk[j].remove();}")
+
+
+def _browser_extract_markdown(session: dict, selector: str = "") -> str:
+    """Read the page's DOM and turn it into Markdown.
+
+    The DOM is read instead of the page's text because the text has no
+    structure at all: no headings, no lists, no links, and no way to tell
+    which part of the page a sentence belongs to.  The Markdown keeps the
+    structure and drops the furniture (navigation, footers, cookie
+    banners, hidden panels) a reader never looks at.
+    """
+    ws = session.get("ws")
+    if not ws:
+        return "[ERROR] Browser session has no DevTools connection."
+    mid = session["msg_id"]
+    session["msg_id"] = mid + 1
+
+    if selector:
+        safe_selector = selector.replace("'", "\\'")
+        js = (
+            "(function(){var els=document.querySelectorAll('" + safe_selector + "');"
+            "if(!els||els.length===0){return JSON.stringify({count:0,htmls:[]});}"
+            "var htmls=[];"
+            "for(var i=0;i<els.length;i++){var c=els[i].cloneNode(true);"
+            + _DOM_JUNK +
+            "htmls.push(c.outerHTML||'');}"
+            "return JSON.stringify({count:els.length,htmls:htmls});})()"
+        )
+    else:
+        js = (
+            "(function(){var b=document.body;"
+            "if(!b){return JSON.stringify({count:0,htmls:[]});}"
+            "var c=b.cloneNode(true);"
+            + _DOM_JUNK +
+            "return JSON.stringify({count:1,htmls:[c.outerHTML||'']});})()"
+        )
+
+    raw, err = _evaluate_js(ws, js, msg_id=mid, timeout=20)
+    if err:
+        return f"[ERROR] DOM extraction failed: {err}"
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        payload = None
+    if not isinstance(payload, dict):
+        return "[ERROR] The page returned an unreadable DOM."
+
+    htmls = payload.get("htmls") or []
+    if not htmls:
+        if selector:
+            return (f"[WARNING] Selector \"{selector}\" matched no elements "
+                    "on the page.")
+        return ("[WARNING] The page has no content yet. It may still be "
+                "loading -- wait a moment and read it again.")
+
+    base_url = str(session.get("url", "") or "")
+    parts = []
+    for chunk in htmls:
+        markdown = html_markdown.html_to_markdown(str(chunk), base_url=base_url)
+        if markdown:
+            parts.append(markdown)
+    if not parts:
+        return "[WARNING] The page has no readable content."
+    return "\n\n".join(parts)
+
+
+# ── FINDING AN ELEMENT ON THE PAGE ───────────────────────────────────────────
+# The model often knows *what* it is after ("the weather box", "the result
+# list") but not what the page calls it.  The ``search`` argument lets it
+# ask for an element by class name, by id, by tag name or by a full CSS
+# selector, and the whole subtree of every match comes back as Markdown.
+
+_SEARCH_MAX_MATCHES = html_markdown.MAX_MATCHES
+
+
+def _classify_search_query(query: str) -> str:
+    """Decide how a ``search`` query should be read.
+
+    A query that looks like a CSS selector is used as one.  A tag name is
+    matched as a tag.  Anything else is looked up as an id first and as a
+    class name after that -- a class name written with spaces ("weather
+    data") matches an element carrying both of those classes.
+
+    The decision lives in the converter so that the browser and the
+    no-browser fallback cannot drift apart.
+    """
+    return html_markdown.classify_query(query)
+
+
+def _browser_search_js(query: str, mode: str) -> str:
+    """The JavaScript that collects the elements a search query matches."""
+    return (
+        "(function(){var q=" + json.dumps(query) + ";var mode=" + json.dumps(mode) + ";"
+        "var els=[];var error='';"
+        "try{"
+        "if(mode==='selector'||mode==='tag'){"
+        "els=Array.prototype.slice.call(document.querySelectorAll(q));}"
+        "else if(mode==='id'){var e=document.getElementById(q);els=e?[e]:[];}"
+        "else{var tokens=q.toLowerCase().split(/\\s+/).filter(function(t){"
+        "return t.length>0;});"
+        "els=Array.prototype.slice.call(document.querySelectorAll('*')).filter("
+        "function(el){if(!el.classList){return false;}"
+        "var cl=Array.prototype.slice.call(el.classList).map(function(c){"
+        "return String(c).toLowerCase();});"
+        "return tokens.every(function(t){return cl.indexOf(t)!==-1;});});}"
+        "}catch(e){error=String(e);}"
+        "var total=els.length;var capped=els.slice(0," + str(_SEARCH_MAX_MATCHES) + ");"
+        "var out=[];"
+        "for(var i=0;i<capped.length;i++){var el=capped[i];var c=el.cloneNode(true);"
+        + _DOM_JUNK +
+        "out.push({tag:String(el.tagName||'?').toLowerCase(),id:el.id||'',"
+        "cls:el.getAttribute('class')||'',html:c.outerHTML||''});}"
+        "return JSON.stringify({total:total,elements:out,error:error,mode:mode});})()"
+    )
+
+
+def _browser_search_payload(session: dict, query: str, mode: str) -> dict:
+    """Run one search query in the page and return what it matched."""
+    ws = session.get("ws")
+    if not ws:
+        return {}
+    mid = session["msg_id"]
+    session["msg_id"] = mid + 1
+    raw, err = _evaluate_js(ws, _browser_search_js(query, mode),
+                            msg_id=mid, timeout=20)
+    if err:
+        return {"error": err}
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {"error": "unreadable result"}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _browser_search(session: dict, query: str, base_url: str = "") -> str:
+    """Find elements on the page and report them as a Markdown structure.
+
+    Every match is reported together with everything inside it, so the
+    model gets the whole box ("temperature: 20 C", "sky state: Clear",
+    "AQI: 42") and not just its name.
+    """
+    ws = session.get("ws")
+    if not ws:
+        return "[ERROR] Browser session has no DevTools connection."
+    q = (query or "").strip()
+    if not q:
+        return ("[ERROR] search needs a class name, an id, a tag name or a "
+                "CSS selector.")
+
+    mode = _classify_search_query(q)
+    payload = _browser_search_payload(session, q, mode)
+    if not payload.get("elements") and mode == "id":
+        # The query was probably meant as a class name.
+        mode = "class"
+        payload = _browser_search_payload(session, q, mode)
+
+    if payload.get("error"):
+        return (f"[WARNING] The search for '{q}' failed: "
+                f"{payload.get('error')}")
+
+    elements = payload.get("elements") or []
+    total = int(payload.get("total") or 0)
+    if not elements:
+        return (f"[WARNING] Nothing on the page matched '{q}' "
+                f"(looked for it as {mode}). Try a CSS selector, or run a "
+                "'find' action to see what the page actually calls its "
+                "elements.")
+
+    lines = [f"--- search: {q} ---"]
+    if total > len(elements):
+        lines.append(f"{total} elements matched; the first "
+                     f"{len(elements)} are shown.")
+    else:
+        lines.append(f"{total} element(s) matched.")
+
+    base_url = base_url or str(session.get("url", "") or "")
+    for index, item in enumerate(elements, 1):
+        html = str(item.get("html", "") or "")
+        if not html:
+            continue
+        soup = BeautifulSoup(html, "html.parser")
+        found = soup.find(True)
+        if found is None:
+            continue
+        heading = f"{index}. {html_markdown.describe_element(found)}"
+        body = html_markdown.element_to_markdown(found, base_url=base_url,
+                                                 heading=heading)
+        if body:
+            lines.append("")
+            lines.append(body)
+    return "\n".join(lines).strip()
 
 
 # Screenshots are only useful for the turn that captured them (and the few
@@ -4627,7 +5014,10 @@ def _browser_start(url: str = "") -> tuple[dict | None, str]:
             return None, f"[ERROR] Navigation to {url} failed: {err_msg}"
         _loaded, session["msg_id"] = _wait_for_load(
             ws, timeout=15, msg_id=session["msg_id"])
-        time.sleep(0.8)
+        # The page can report a finished load while its background script is
+        # still filling the result list, so the content is given a moment to
+        # settle before anything is read from it.
+        _browser_wait_for_content(session)
 
     _browser_update_state(session)
     return session, ""
@@ -4652,8 +5042,9 @@ def browser(
     selector: str = "",
     actions: list | None = None,
     max_chars: int = 12000,
-    screenshot: bool = True,
+    screenshot: bool = False,
     extract_html: bool = False,
+    search: str = "",
 ) -> str:
     """Drive a persistent, reusable browser session.
 
@@ -4675,12 +5066,25 @@ def browser(
                         a position.
       * ``navigate``  -- load a new URL in an existing session.
       * ``screenshot``-- capture the current viewport.
-      * ``state``     -- report URL, title, session health and page text.
+      * ``state``     -- report URL, title, session health and page content.
       * ``close``     -- terminate the browser and free its resources.
       * ``list``      -- list the open sessions.
 
-    When ``screenshot`` is true the viewport is captured and the picture is
-    attached to the reply, so a multimodal model can look at the page.
+    The page is read as Markdown built from the DOM: headings stay headings,
+    lists stay lists, links stay links, and the furniture nobody reads
+    (navigation, footers, cookie banners) is dropped.  The page is given up
+    to ten seconds to finish filling itself in before it is read, so a
+    search engine that loads its results late does not come back empty.
+
+    A screenshot is taken **only** when ``screenshot`` is true.  It is never
+    taken on the side: an unasked-for picture would have to be handed to a
+    model that cannot see images, which would then swap the model out from
+    under the conversation.
+
+    ``search`` looks for one element on the page and reports it together
+    with everything inside it.  The query may be a class name (even one
+    written with spaces, like ``weather data``), an id, a tag name or a full
+    CSS selector.
 
     When ``extract_html`` is true the raw ``outerHTML`` of the page (or of the
     element matched by ``selector``) is also returned, so the model can see
@@ -4691,6 +5095,7 @@ def browser(
     action = (action or "open").strip().lower()
     max_chars = max(1000, min(50000, int(max_chars or 12000)))
     selector = selector or ""
+    search = (search or "").strip()
 
     if action == "list":
         return _browser_session_list()
@@ -4714,19 +5119,25 @@ def browser(
             if not ok:
                 return "[ERROR] Action failed: " + msg
         _browser_update_state(session)
-        text = _browser_extract_text(session, selector)
+        ready = _browser_wait_for_content(session)
+        if search:
+            content = _browser_search(session, search,
+                                      base_url=str(session.get("url", "")))
+        else:
+            content = _browser_extract_markdown(session, selector)
         shot = _browser_screenshot(session, label=session["id"]) if screenshot else None
         if shot:
             queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
-        if len(text) > max_chars:
-            text = text[:max_chars]
+        if len(content) > max_chars:
+            content = content[:max_chars]
         html_text = ""
         if extract_html:
             html_text = _browser_extract_html(session, selector)
         out = (_browser_header(session, shot)
-               + "\n--- page text ---\n" + text
+               + "\n--- page (markdown) ---\n" + content
                + ("\n--- page html ---\n" + html_text if extract_html else "")
                + (_format_action_results(action_results) if action_results else "")
+               + _browser_content_note(ready)
                + ("\n[Keep using browser_id='" + session["id"]
                   + "' to interact with this page.]"
                   if session.get("id") else ""))
@@ -4756,7 +5167,6 @@ def browser(
                 err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
                 return "[ERROR] Navigation to " + url + " failed: " + err_msg
             _wait_for_load(session["ws"], timeout=15)
-            time.sleep(0.6)
 
         elif action == "screenshot":
             shot = _browser_screenshot(session, label=browser_id)
@@ -4786,10 +5196,16 @@ def browser(
                 if shot:
                     queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
                     lines.append(_browser_header(session, shot))
-            text = _browser_extract_text(session, selector)
-            if len(text) > max_chars:
-                text = text[:max_chars]
-            lines.append("\n--- page text ---\n" + text)
+            ready = _browser_wait_for_content(session)
+            if search:
+                content = _browser_search(session, search,
+                                          base_url=str(session.get("url", "")))
+            else:
+                content = _browser_extract_markdown(session, selector)
+            if len(content) > max_chars:
+                content = content[:max_chars]
+            lines.append("\n--- page (markdown) ---\n" + content)
+            lines.append(_browser_content_note(ready))
             if extract_html:
                 html_text = _browser_extract_html(session, selector)
                 lines.append("\n--- page html ---\n" + html_text)
@@ -4798,7 +5214,7 @@ def browser(
         else:
             # act / interact: perform the actions, then show the updated
             # page state.  The action results have to travel with the page
-            # text -- an evaluate action's return value lives there.
+            # content -- an evaluate action's return value lives there.
             if not actions:
                 return ("[ERROR] browser(action='act') requires an actions list "
                         "(click/input/wait/scroll/press/select/evaluate).")
@@ -4813,28 +5229,34 @@ def browser(
         # here -- falling out of the branch instead would report the action
         # as unknown even though it had already been carried out.
         _browser_update_state(session)
-        text = _browser_extract_text(session, selector)
+        ready = _browser_wait_for_content(session)
+        if search:
+            content = _browser_search(session, search,
+                                      base_url=str(session.get("url", "")))
+        else:
+            content = _browser_extract_markdown(session, selector)
         shot = _browser_screenshot(session, label=browser_id) if screenshot else None
         if shot:
             queue_image_attachment(shot, "screenshot of " + str(session.get("url", "")))
-        if len(text) > max_chars:
-            text = text[:max_chars]
+        if len(content) > max_chars:
+            content = content[:max_chars]
         html_text = ""
         if extract_html:
             html_text = _browser_extract_html(session, selector)
         return (_browser_header(session, shot)
-                + "\n--- page text ---\n" + text
+                + "\n--- page (markdown) ---\n" + content
                 + ("\n--- page html ---\n" + html_text if extract_html else "")
-                + (_format_action_results(action_results) if action_results else ""))
+                + (_format_action_results(action_results) if action_results else "")
+                + _browser_content_note(ready))
 
     return ("[ERROR] Unknown browser action '" + str(action) + "'. "
             "Use one of: open, act, navigate, screenshot, state, close, list.")
 
 def browse_web(url: str, selector: str = "", max_chars: int = 12000,
-               actions: list = None, screenshot: bool = True,
-               extract_html: bool = False) -> str:
+               actions: list = None, screenshot: bool = False,
+               extract_html: bool = False, search: str = "") -> str:
     """
-    Fetch a URL and convert readable content into structured text.
+    Fetch a URL and turn its content into structured Markdown.
 
     Uses a headless Chromium browser via the Chrome DevTools Protocol to
     properly render JavaScript-heavy pages, single-page applications, and
@@ -4846,6 +5268,12 @@ def browse_web(url: str, selector: str = "", max_chars: int = 12000,
     coordinates. Falls back to requests+BeautifulSoup if
     Chromium is unavailable.
 
+    The content is read from the DOM and converted to Markdown, so headings,
+    lists, links and tables survive the trip and the furniture nobody reads
+    (navigation, footers, cookie banners) is dropped.  The page gets up to
+    ten seconds to finish filling itself in before it is read, so a search
+    engine that loads its results late does not come back empty.
+
     The browser is closed again when the call finishes.  To keep a page
     alive across calls — and to click through it step by step — use the
     ``browser`` tool instead, which hands back a session id.
@@ -4856,10 +5284,15 @@ def browse_web(url: str, selector: str = "", max_chars: int = 12000,
         max_chars:    Maximum characters of extracted text (default 12000).
         actions:      Optional list of actions to perform before extraction.
         screenshot:   Capture the viewport and attach it to the reply so a
-                      multimodal model can look at the page (default True).
+                      multimodal model can look at the page (default False —
+                      a screenshot is taken only when it is asked for).
         extract_html: Also return the raw outerHTML of the page or matched
                       element(s) so the model can see the DOM structure
                       (default False).
+        search:       Look for one element and report it with everything
+                      inside it.  The query may be a class name (even one
+                      written with spaces, like "weather data"), an id, a tag
+                      name or a CSS selector.
     """
     max_chars = max(1000, min(50000, int(max_chars or 12000)))
 
@@ -4867,7 +5300,8 @@ def browse_web(url: str, selector: str = "", max_chars: int = 12000,
     if not session:
         # Chromium is unavailable or refused to start: fall back to the
         # plain HTTP scraper rather than failing the call outright.
-        return _web_scrape_fallback(url, selector, max_chars, actions)
+        return _web_scrape_fallback(url, selector, max_chars, actions,
+                                    search=search)
 
     try:
         action_results: list[str] = []
@@ -4879,9 +5313,15 @@ def browse_web(url: str, selector: str = "", max_chars: int = 12000,
                 return f"[ERROR] Action failed: {msg}"
 
         _browser_update_state(session)
-        text = _browser_extract_text(session, selector)
-        if len(text) > max_chars:
-            text = text[:max_chars]
+        ready = _browser_wait_for_content(session)
+        search = (search or "").strip()
+        if search:
+            content = _browser_search(session, search,
+                                      base_url=str(session.get("url", "")))
+        else:
+            content = _browser_extract_markdown(session, selector)
+        if len(content) > max_chars:
+            content = content[:max_chars]
 
         shot = _browser_screenshot(session, label="browse") if screenshot else None
         if shot:
@@ -4895,11 +5335,12 @@ def browse_web(url: str, selector: str = "", max_chars: int = 12000,
         if shot:
             header += (f"\n[Screenshot saved to {shot} — attached to this "
                        "reply as an image]")
-        out = f"{header}\n--- page text ---\n{text}"
+        out = f"{header}\n--- page (markdown) ---\n{content}"
         if extract_html:
             out += f"\n--- page html ---\n{html_text}"
         if action_results:
             out += _format_action_results(action_results)
+        out += _browser_content_note(ready)
         return out
     except Exception as exc:
         return f"[ERROR] Browse web failed: {exc}"
@@ -8027,6 +8468,29 @@ def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_p
 
 # ── USER INTERACTION TOOLS ────────────────────────────────────────────────────
 
+#: Sentence shown under the option list.  It tells the user that a number is
+#: not the only way to answer: whatever is typed is handed to the AI as-is.
+ASK_USER_HINT = "Type an option number or the answer you want to give the AI:"
+
+
+def _parse_option_choice(text: str):
+    """Return the option number *text* selects, or None when it selects none.
+
+    Plain digits ("2") and the slightly messier forms a phone keyboard
+    produces ("2.", "2)") are accepted.  Anything else — including a whole
+    typed answer — returns None so the caller can treat it as free text.
+    """
+    candidate = (text or "").strip()
+    if candidate.endswith((".", ")")):
+        candidate = candidate[:-1].strip()
+    if not candidate.isdigit():
+        return None
+    try:
+        return int(candidate)
+    except ValueError:
+        return None
+
+
 def ask_user(
     question: str,
     options: list = None,
@@ -8036,69 +8500,73 @@ def ask_user(
 ) -> str:
     """
     Ask the user a question with optional multiple-choice options.
-    
+
     Args:
         question: The question to ask the user.
         options: Optional list of answer options. If provided, user can select by number (1, 2, 3...).
         default: Optional default value (index starting from 1, or string value).
         allow_custom: If True (default), user can type a custom answer instead of selecting an option.
         timeout: Timeout in seconds (0 = no timeout). Not implemented for input().
-    
+
     Returns:
-        The user's answer as a string. If options provided and user selects by number,
-        returns the corresponding option text. Otherwise returns raw input.
+        The user's answer as a string. If options are provided and the user
+        selects by number, the matching option text is returned.  Anything
+        else the user types — a sentence, a word, a value of their own — is
+        returned to the AI exactly as it was written.
     """
     # Build the prompt
     prompt_parts = [question]
-    
+
     if options:
         prompt_parts.append("\nOptions:")
         for i, opt in enumerate(options, 1):
             prompt_parts.append(f"  {i}) {opt}")
-        
+
         if allow_custom:
-            prompt_parts.append("\nEnter number, or type your own answer:")
+            prompt_parts.append(f"\n{ASK_USER_HINT}")
         else:
             prompt_parts.append(f"\nEnter number (1-{len(options)}):")
     else:
         if default is not None:
             prompt_parts.append(f" [{default}]")
         prompt_parts.append(": ")
-    
+
     prompt = "\n".join(prompt_parts) + " "
-    
+
     # The runtime is about to block waiting for the answer.  Push a
     # notification so the user finds out even when the terminal is in the
     # background — with "notify" switched off this is a no-op.
     notifier.question(question, options)
 
-    # Get user input
-    try:
-        user_input = input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        return "[USER CANCELLED]"
-    
-    # Handle empty input with default
-    if not user_input and default is not None:
-        if isinstance(default, int) and options and 1 <= default <= len(options):
-            return options[default - 1]
-        return str(default)
-    
-    # If options provided, try to parse as number
-    if options:
+    # One loop, not recursion: a wrong number only asks again when the user
+    # was picking from the list.  Free text is always a valid answer.
+    while True:
+        # Get user input
         try:
-            choice = int(user_input)
-            if 1 <= choice <= len(options):
-                return options[choice - 1]
-        except ValueError:
-            pass  # Not a number, treat as custom input
-        
-        # If not a valid number and custom not allowed, ask again
-        if not allow_custom:
-            print(f"Please enter a number between 1 and {len(options)}.")
-            return ask_user(question, options, default, allow_custom, timeout)
-    
-    return user_input
+            user_input = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            return "[USER CANCELLED]"
+
+        # Handle empty input with default
+        if not user_input and default is not None:
+            if isinstance(default, int) and options and 1 <= default <= len(options):
+                return options[default - 1]
+            return str(default)
+
+        if not options:
+            return user_input
+
+        # A number inside the range picks that option.
+        choice = _parse_option_choice(user_input)
+        if choice is not None and 1 <= choice <= len(options):
+            return options[choice - 1]
+
+        # Anything else is the user's own answer — it goes to the AI as typed.
+        if allow_custom:
+            return user_input
+
+        # Numbers only, and this one does not exist: ask again.
+        print(f"Please enter a number between 1 and {len(options)}.")
 
 
 def confirm(question: str, default: bool = True) -> bool:

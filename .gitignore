@@ -1,7 +1,14 @@
 workspace
 api.keys
 api.keys.bak
-config*
+# Provider API keys and the OAuth client secret — never commit these.
+# The rest of config/ IS source and must stay tracked: api.keys.template,
+# capability_registry.json, whatsapp_filters.json and config.json.
+config/api.keys
+config/api.keys.bak
+config/google_oauth.json
+config/*.tmp
+config/test_*.json
 log.txt
 logs/ 
 execution_history.jsonl
@@ -35,3 +42,5 @@ reasoning_tmp*
 whatsapp_log.jsonl
 Termux-WP*
 .wwebjs*
+# Notebook checkpoints — an editor artifact, never source.
+.ipynb_checkpoints/

@@ -13,6 +13,10 @@ Every private artifact has a scope:
 | Data | Treat as |
 |---|---|
 | `config/api.keys` | Secret credentials |
+| `config/google_oauth.json` | OAuth client secret |
+| `data/google_tokens/` | Long-lived mailbox/calendar/drive refresh tokens |
+| `data/google_pending_auth.json` | A live PKCE verifier |
+| `data/cli_history` | Prompt history — a pasted credential lands here |
 | WhatsApp chats and logs | Private user communications |
 | SMS messages and phone numbers | Highly sensitive personal data |
 | Location, Wi-Fi scans, battery state | Device telemetry |
@@ -72,7 +76,15 @@ Write only inside project root (`paths.ROOT`) unless the user explicitly authori
 
 Protected files:
 - `config/api.keys`
+- `config/google_oauth.json`
+- `data/google_tokens/`
+- `data/google_pending_auth.json`
+- `data/cli_history`
 - `data/state.json`
 - `.wwebjs_auth/`
 - `logs/chunks.jsonl`
+- `logs/context_archive.jsonl`
 - `memories.txt`
+
+The credential paths are protected in **every** permission mode, including autonomous
+mode — and they are git-ignored, so they cannot reach the remote by accident.

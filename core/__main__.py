@@ -4,6 +4,21 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
+# The version of Termux-AI.
+#
+# This is the one place the version is written down.  The startup banner
+# reads it (core/interface.py imports the constant from here), and the
+# changelog's newest release heading is checked against it by
+# tests/test_version.py, so the number cannot drift away from the release
+# notes.
+#
+# It lives in the entry point because that is the module that says what
+# this program *is*.  The module deliberately has no import-time side
+# effects — everything that starts something sits behind the ``__main__``
+# guard at the bottom — so another module can import it for the constant
+# without waking the chat loop.
+VERSION = "3.3.1"
+
 _CORE = Path(__file__).resolve().parent
 _ROOT = _CORE.parent
 
@@ -32,8 +47,6 @@ def ensure_termux_property() -> None:
         with props_file.open("a", encoding="utf-8") as f:
             f.write(target_line + "\n")
 
-ensure_termux_property()
-
 # The WhatsApp gateway (Termux-WP/bot.js) is started by the plugin runtime,
 # not here.
 #
@@ -51,5 +64,8 @@ ensure_termux_property()
 # The runtime owns the gateway now (core/plugin_runtime.py), and the
 # pairing code is only ever rendered on request ('/plugin setup whatsapp').
 
-from interface import chat_loop
-chat_loop()
+if __name__ == "__main__":
+    ensure_termux_property()
+
+    from interface import chat_loop
+    chat_loop()

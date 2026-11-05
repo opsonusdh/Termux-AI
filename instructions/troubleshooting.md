@@ -64,6 +64,11 @@ python3 -c "import json; json.load(open('path/to/file.json')); print('json OK')"
 | WhatsApp QR/auth loop | Session or bridge issue | Termux-WP logs and `.wwebjs_auth/` |
 | API rate limit | Provider/key rotation | LLM client provider logs |
 | Context references missing | Chunk retrieval issue | `list_chunks`, `retrieve_chunk` |
+| Browser tool returns an empty page | Content not ready yet | the DOM-settle wait (10 s cap) and the warning in the answer itself |
+| Browser tool cannot start | Chromium missing | `which chromium` → `pkg install chromium` |
+| A plugin tool says "connection refused" | The gateway is not running | `core/plugin_runtime.py` — enable the plugin again; the watchdog restarts a dead gateway |
+| "All configured models are currently unavailable" | Every route exhausted | the api.keys providers and the free-only gate in `core/models.py` |
+| A closed conversation came back after a restart | The context boundary was not persisted | `data/context_session.json` |
 
 Do not jump from symptom to rewrite. Identify the class first.
 
@@ -164,9 +169,13 @@ Before changing bridge code, run `node --check Termux-WP/bot.js` if the file exi
 Check before installing:
 
 ```bash
-python3 -c "import requests, bs4, jsonschema, tiktoken; print('python deps OK')"
-pkg list-installed | grep -E 'python|nodejs|clang|cmake|rust'
+python3 -c "import openai, httpx, requests, bs4, jsonschema; print('python deps OK')"
+pkg list-installed | grep -E 'python|nodejs|clang|cmake|rust|chromium'
 ```
+
+`prompt_toolkit` is optional — the runtime falls back to plain `input()` without it.
+`tiktoken` is **not** a dependency of this project; a check that imports it will fail
+for a reason that has nothing to do with the fault you are chasing.
 
 If a dependency is missing and setup expects it, install through the established package manager:
 

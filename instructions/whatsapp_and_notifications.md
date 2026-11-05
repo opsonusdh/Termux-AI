@@ -61,3 +61,25 @@ Use notifications for user-visible completion, failures, reminders, or alerts.
 Use a concise title and content without leaking sensitive secrets.
 
 Use `termux-notification` for persistent notifications, `termux-toast` for brief messages, `termux-vibrate` for haptic feedback.
+
+---
+
+## 6. The WhatsApp Plugin Is Quiet by Design
+
+The gateway talks. The chat must not.
+
+- **The pairing QR is a live secret.** It is *captured*, never printed, and drawn only
+  when the user asks for it (`/plugin setup whatsapp`). Whoever scans it gets
+  read/write access to the account, and the gateway rotates it every few seconds.
+- **`setup` is the pairing path.** Not linked → start the gateway and show the code
+  once. Already linked → a code only means a re-link, so stop the gateway, switch the
+  plugin off and say so. Never decide during `INITIALIZING`: the HTTP port opens before
+  the WhatsApp engine has booted, so wait for `READY` or `QR_REQUIRED`.
+- **No status chatter.** The "connected, my number" banner and the per-state
+  "Status: …" lines are gone. `/plugin status whatsapp` reports the pairing state on
+  request.
+- **Enabling a plugin starts it.** The gateway is launched for you, a dead gateway is
+  restarted with a growing backoff, and an orphaned Chromium holding the WhatsApp
+  profile is cleared before the next start. If the runtime did not come up, say so.
+- **Never use `pkill -f bot.js`** on this device — the pattern matches the running
+  shell itself. Scan `/proc/*/cmdline` for the gateway process instead.

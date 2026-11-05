@@ -21,7 +21,7 @@ The repo provides Python-based file, shell, indexing, memory, model, rendering, 
 ### Available in Termux-AI (via `core/tools.py`):
 - **File operations**: read, write, list, search, rename, delete
 - **Shell execution**: `run_code` with full Termux environment
-- **Web scraping**: `web_scrape` for HTTP/HTML content
+- **Web content (rendered)**: `browse_web` and `browser` — read a page as Markdown (headings, lists, links, tables survive; nav/footer/cookie banners are dropped), pull one element with `search`, and capture a screenshot only when asked (`screenshot=true`); a `find` action lists clickable elements by label/index.
 - **WhatsApp**: status, chats, messages, send, media, groups, contacts
 - **System diagnosis**: battery, weather, storage, memory, network, datetime
 - **Memory**: save, retrieve, list conversation chunks
@@ -85,7 +85,7 @@ When unavailable:
 
 | Capability | Status | Alternative |
 |---|---|---|
-| Browser automation (Playwright, Puppeteer, Selenium) | ❌ Not available | `web_scrape` for static content |
+| Full browser automation (Playwright, Puppeteer, Selenium) | ❌ Not available | `browse_web` / `browser` for rendered content (DOM → Markdown, opt-in `screenshot`, `find`/`search` actions) |
 | Desktop GUI automation | ❌ Not available | Termux API wrappers for device actions |
 | Cloud service connectors (AWS, GCP, Azure) | ❌ Not available | Direct HTTP via `http_request` |
 | Git credentials management | ❌ Not available | SSH keys in `~/.ssh/` |

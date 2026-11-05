@@ -22,13 +22,26 @@ Termux-AI/
 │   ├── llm_client.py           ← ask_ai(), multi-provider routing, key rotation,
 │   │                             tool dispatch, run_agent_step()
 │   ├── context_manager.py      ← Two-layer chunk memory (raw store + active window)
+│   ├── context_compressor.py   ← Progressive context compression + on-disk archive
 │   ├── tools.py                ← All LLM-callable tools, build_memory_block(),
 │   │                             ask_ai_simple(), run_diagnosis(), sleep_mode()
+│   ├── models.py               ← Provider/model registries, free-only + vision gates
+│   ├── app_config.py           ← Canonical default configuration for config.json
+│   ├── html_markdown.py        ← DOM → Markdown converter used by the browser tools
+│   ├── notifier.py             ← System notifications when the runtime waits for input
+│   ├── runtime_log.py          ← Append-as-it-happens session log (capped rotation)
+│   ├── ui.py                   ← Terminal chrome (banner, status row, key/value grids)
 │   ├── PROMPT.md               ← SYSTEM_PROMPT source of truth
 │   ├── display_state.py        ← Visual status display, banners, and task formatting
 │   ├── input_handler.py        ← Terminal input reading and slash-command parsing
 │   ├── renderer.py             ← Markdown → terminal, TTS render helpers, ANSI colors
 │   ├── permissions.py          ← Command safety validation (validate_command)
+│   ├── shell_parse.py          ← Structural shell parser (AST-level command splitting)
+│   ├── shell_runner.py         ← Shell execution with per-stage and total timeouts
+│   ├── session_memory/         ← Session save/resume artifacts
+│   │   ├── README.md
+│   │   ├── integration.py
+│   │   └── session_memory.py
 │   ├── plugin_manager.py       ← Plugin enable/disable state, tool filtering,
 │   │                            Google OAuth service map, auth-aware gating,
 │   │                            runtime activation (enable → start → ready)
@@ -62,33 +75,48 @@ Termux-AI/
 ├── tools/                      ← Termux API hardware/OS wrappers
 │   ├── __init__.py             ← Package marker
 │   ├── tool_wrappers.py        ← Base wrapper abstractions & command runners
+│   ├── wrapper_termux_audio.py
 │   ├── wrapper_termux_battery_status.py
 │   ├── wrapper_termux_brightness.py
+│   ├── wrapper_termux_camera.py
 │   ├── wrapper_termux_clipboard.py
+│   ├── wrapper_termux_contacts.py
+│   ├── wrapper_termux_filepicker.py
 │   ├── wrapper_termux_location.py
+│   ├── wrapper_termux_sensors.py
 │   ├── wrapper_termux_sms.py
 │   ├── wrapper_termux_telephony.py
 │   ├── wrapper_termux_torch.py
 │   ├── wrapper_termux_vibrate.py
 │   ├── wrapper_termux_volume.py
-│   └── wrapper_termux_wifi_scaninfo.py
+│   ├── wrapper_termux_wallpaper.py
+│   ├── wrapper_termux_wifi_scaninfo.py
+│   ├── wrapper_system_hostname.py
+│   └── wrapper_system_uptime.py
 │
-├── config/                     ← Secrets and runtime config (gitignored secrets)
-│   ├── api.keys                ← JSON API keys for providers
+├── config/                     ← Secrets and runtime config
+│   ├── api.keys                ← JSON API keys for providers        (gitignored)
 │   ├── api.keys.template       ← Template for API key configuration
-│   ├── config.json             ← Runtime settings (STT path, TTS toggles, models)
 │   ├── capability_registry.json← Registry for executable sub-AI capabilities
+│   ├── config.json             ← Runtime settings (STT path, TTS toggles, notify)
+│   ├── google_oauth.json       ← Google OAuth client id + secret  (gitignored)
 │   └── whatsapp_filters.json   ← Contact/group filtering rules for WhatsApp
 │
 ├── data/                       ← Persistent state and schemas
 │   ├── state.json              ← Live agent state (written by state_manager)
+│   ├── context_session.json    ← Context boundary: where the active chat starts
+│   ├── google_pending_auth.json← In-flight PKCE verifier              (gitignored)
+│   ├── google_tokens/          ← Per-service OAuth access+refresh tokens (gitignored)
+│   ├── sessions/               ← Saved session artifacts
 │   ├── validator_schema.json   ← JSON schema for execution result validation
-│   └── cli_history             ← Terminal prompt command history
+│   └── cli_history             ← Terminal prompt command history       (gitignored)
 │
 ├── logs/                       ← Execution and chat logs
 │   ├── log.txt                 ← Live session log (real-time, capped at 1M lines)
 │   ├── chunks.jsonl            ← Raw conversation chunk store (append-only)
 │   ├── chunk_summaries.json    ← Progressive summaries keyed by chunk ID
+│   ├── context_archive.jsonl   ← Raw text of compressed context segments
+│   ├── todos.json              ← Persistent task checklist
 │   ├── reflection.jsonl        ← Reflection loop records
 │   ├── whatsapp_log.jsonl      ← WhatsApp interaction history
 │   └── history.jsonl           ← Legacy turn history log
@@ -123,6 +151,11 @@ Termux-AI/
 │   ├── main.py                 ← Local STT audio recorder & whisper handler
 │   ├── download_model.sh       ← Helper script to fetch whisper models
 │   └── whisper.cpp/            ← Embedded whisper C++ inference codebase
+│
+├── tests/                      ← Shipped test suite (pytest)
+│   ├── conftest.py             ← Shared fixtures (plugin-runtime stubs)
+│   ├── fixtures/               ← Evidence fixtures (e.g. sub-agent tool calling)
+│   └── test_*.py               ← One module per behaviour area
 │
 ├── workspace/                  ← Scratch space for agent execution & generated artifacts
 └── docs/                       ← Documentation and historical patches
@@ -184,18 +217,27 @@ reflection.attempt_correction()
   → ReflectionLoop.latest_entry()
   → if result.validation == 'Failure':
       → agent.executor.execute_plan(plan)   ← re-runs
+```
+
+---
+
 ## Commands & Controls
 
 | Command | Behaviour |
 |---------|-----------|
 | `/autonomous on` | Enable autonomous mode (bypasses permission prompts for shell commands) |
 | `/autonomous off` | Disable autonomous mode (restores interactive permission prompts) |
+| `/autonomous status` / `/autonomous toggle` | Report or flip the autonomous flag |
 | `/expand` / `/collapse` | Toggle detailed tool/reasoning outputs in the terminal |
+| `/notify true\|false\|status\|toggle` | Configure notifications; test ping when switched on |
 | `/agent` | Run one agent step (Supervisor → Worker → Critic, one task) |
 | `/agent auto` | Run agent steps in a loop until no pending tasks or failure |
-
-Agent state lives in `data/state.json`. Initialize a project and add subtasks via
-the `initialize_project` and `add_subtask` LLM tools.
+| `/agent [prompt]` | Direct agent prompt with custom instructions |
+| `/normal` / `/chat` | Leave agent mode for ordinary chat |
+| `/session new` | Close the current conversation context; keep mode/plugins |
+| `/session list\|resume\|save\|delete\|draft` | Manage persisted sessions |
+| `/plugin list\|status\|setup\|enable\|disable\|disconnect` | Plugin state and activation |
+| `/help` / `/commands` | The command list |
 
 Agent state lives in `data/state.json`. Initialize a project and add subtasks via
 the `initialize_project` and `add_subtask` LLM tools.

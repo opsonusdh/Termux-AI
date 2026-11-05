@@ -144,7 +144,7 @@ def note_on_question(chunk_id: int, question: str) -> None:
 #
 # In context_manager.py, add these imports at the top:
 #
-#     from workspace.session_memory.integration import (
+#     from core.session_memory.integration import (
 #         note_on_chunk_open,
 #         note_on_chunk_close,
 #         note_on_tool_call,

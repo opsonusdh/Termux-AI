@@ -16,7 +16,9 @@ import paths
 from agent import state_manager
 from openai import OpenAI
 import httpx
-from core.renderer import RED, YELLOW, RESET, GRAY, GREEN, BLUE, CYAN, MAG, DIM
+from core.renderer import (RED, YELLOW, RESET, GRAY, GREEN, BLUE, CYAN, MAG, DIM,
+                           highlight_code, highlight_lines, language_for_path,
+                           render_code_block_lines, render_code_snippet)
 from core import tools as _tool_runtime
 from core import runtime_log
 from core.tools import *
@@ -565,6 +567,24 @@ def _find_vision_slot(model_slots: list[dict], start: int) -> int | None:
     return None
 
 
+def _wants_vision_switch(attachments: list[dict], pid: str,
+                         model_name: str | None,
+                         already_switched: bool) -> bool:
+    """Whether the turn has to move to a model that can see images.
+
+    Only a picture the model *asked for* counts.  A picture nobody asked
+    for must never change the model underneath the conversation: the model
+    would silently stop being the one the user chose, and for a picture
+    that was never requested in the first place.
+    """
+    if already_switched:
+        return False
+    wanted = [att for att in attachments if att.get("explicit", True)]
+    if not wanted:
+        return False
+    return not model_supports_vision(pid, model_name)
+
+
 def _append_image_message(messages: list[dict], attachments: list[dict]) -> None:
     """Hand the pictures a tool produced to the model.
 
@@ -578,12 +598,18 @@ def _append_image_message(messages: list[dict], attachments: list[dict]) -> None
     """
     if not attachments:
         return
+    # A picture the model did not ask for is not handed over: handing it
+    # over would force a swap to a vision-capable model, and the
+    # conversation would change models for a picture nobody wanted.
+    wanted = [att for att in attachments if att.get("explicit", True)]
+    if not wanted:
+        return
     parts: list[dict] = [{
         "type": "text",
         "text": ("[Screenshot(s) captured by the tool above — this is what "
                  "the page looks like.]"),
     }]
-    for att in attachments:
+    for att in wanted:
         parts.append({
             "type": "orion_image",
             "path": att.get("path", ""),
@@ -1042,6 +1068,102 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
     return {"lines": lines, "tool_name": name}
 
 
+# ── syntax-highlighted code snippets ─────────────────────────────────────────
+
+#: ``read_file`` returns its lines with a ``12| `` prefix.  The prefix is
+#: stripped before the code reaches the lexer — otherwise every line would
+#: start at column 0 and the indentation structure of the file would be lost —
+#: and it is put back afterwards.
+_NUMBERED_LINE_RE = re.compile(r"^(\s*\d+\| ?)(.*)$")
+
+
+def _highlight_numbered_code(text: str, lang: str) -> list[str]:
+    """Highlight a numbered file listing, keeping the numbers out of the lexer."""
+    if not text:
+        return []
+    prefixes: list[str] = []
+    bodies: list[str] = []
+    for line in text.split("\n"):
+        m = _NUMBERED_LINE_RE.match(line)
+        prefixes.append(m.group(1) if m else "")
+        bodies.append(m.group(2) if m else line)
+    highlighted = highlight_code("\n".join(bodies), lang).split("\n")
+    if len(highlighted) != len(bodies):
+        # The highlighter changed the line count — keep its output rather than
+        # pairing a line number with the wrong line.
+        return highlighted
+    return [prefix + line for prefix, line in zip(prefixes, highlighted)]
+
+
+def _tool_snippet(name: str, args: dict, header: dict) -> tuple[list[str], str, str]:
+    """Split a tool header into its meta lines and the code snippet it shows.
+
+    Returns ``(meta_lines, language, code)``.
+
+    * ``shell`` shows the command it is about to run — always bash.
+    * ``write_file`` shows the content it is about to write — highlighted with
+      the lexer of the *target file's* extension.
+    * every other tool shows no code of its own.
+    """
+    lines = list(header.get("lines") or [])
+    if name == "shell" and len(lines) > 1:
+        return lines[:1], "bash", "\n".join(lines[1:])
+    if name == "write_file" and "content:" in lines:
+        idx = lines.index("content:")
+        path = str(args.get("path", "") or "")
+        return lines[:idx + 1], language_for_path(path), "\n".join(lines[idx + 1:])
+    return lines, "", ""
+
+
+def _tool_display_parts(name: str, args: dict, header: dict, expanded: bool) -> list[tuple[str, str]]:
+    """The lines shown for one tool call, as ``(text, kind)`` pairs.
+
+    ``kind`` is ``"tag"`` for the tool tag, ``"body"`` for the meta lines and
+    ``"raw"`` for code that carries its own colours.  A highlighted snippet is
+    never wrapped in the dim tool colour — the dim attribute would dull the
+    very colours the highlighter produced.
+    """
+    meta, lang, code = _tool_snippet(name, args, header)
+    parts: list[tuple[str, str]] = []
+    for i, line in enumerate(meta):
+        parts.append((line, "tag" if i == 0 else "body"))
+    if code.strip():
+        if expanded:
+            snippet = render_code_snippet(code, lang)
+        else:
+            snippet = highlight_lines(code, lang)
+        parts.extend((line, "raw") for line in snippet)
+    return parts
+
+
+def _print_tool_display(name: str, args: dict, header: dict, expanded: bool, colors: dict) -> None:
+    """Print one tool call's header, with its code snippet syntax-highlighted."""
+    for text, kind in _tool_display_parts(name, args, header, expanded):
+        if kind == "tag":
+            print(f"{colors['tag']}{text}{RESET}")
+        elif kind == "body":
+            print(f"{colors['body']}{text}{RESET}")
+        else:
+            print(text)
+
+
+def _print_tool_output(tool_name: str, args: dict, output: str, body_color: str) -> None:
+    """Print what a tool returned.
+
+    ``read_file`` hands back the *source* of a file, so it is highlighted with
+    the lexer of that file's extension and drawn in the same gutter box the
+    markdown renderer uses for code blocks.  Everything else stays plain text
+    — a command's stdout is not necessarily code, and colouring it as bash
+    would be a guess.
+    """
+    if tool_name == "read_file" and output and not output.startswith("[ERROR]"):
+        lang = language_for_path(str(args.get("path", "") or ""))
+        for line in render_code_block_lines(_highlight_numbered_code(output, lang), lang):
+            print(line)
+        return
+    print(f"{body_color}{output}{RESET}")
+
+
 def _print_tool_header(name: str, args: dict, expanded: bool) -> str:
     """Print the tag/preview line(s) of one tool call and return its colour key.
 
@@ -1052,9 +1174,7 @@ def _print_tool_header(name: str, args: dict, expanded: bool) -> str:
     """
     header = _tool_header_lines(name, args, expanded)
     colors = _TOOL_COLORS.get(header["tool_name"], _TOOL_COLORS["default"])
-    for i, line in enumerate(header["lines"]):
-        color = colors["tag"] if i == 0 else colors["body"]
-        print(f"{color}{line}{RESET}")
+    _print_tool_display(name, args, header, expanded, colors)
     return header["tool_name"]
 
 
@@ -1193,8 +1313,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 selector = g("selector", None),
                                 max_chars = int(g("max_chars", 12000)),
                                 actions  = g("actions", None),
-                                screenshot = _safe_bool(g("screenshot", True)),
+                                screenshot = _safe_bool(g("screenshot", False)),
                                 extract_html = _safe_bool(g("extract_html", False)),
+                                search   = g("search", ""),
                            ),
         "browser":         lambda: browser(
                                 action     = g("action", "open"),
@@ -1203,8 +1324,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 selector   = g("selector", None),
                                 actions    = g("actions", None),
                                 max_chars  = int(g("max_chars", 12000)),
-                                screenshot = _safe_bool(g("screenshot", True)),
+                                screenshot = _safe_bool(g("screenshot", False)),
                                 extract_html = _safe_bool(g("extract_html", False)),
+                                search     = g("search", ""),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
         "intermediate_print": lambda: intermediate_print(
@@ -1512,10 +1634,8 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
     if fn:
         expanded = display_state.is_expanded()
         header = _tool_header_lines(name, args, expanded)
-        header_lines = header["lines"]
         tool_name = header["tool_name"]
         colors = _TOOL_COLORS.get(tool_name, _TOOL_COLORS["default"])
-        tag_color = colors["tag"]
         body_color = colors["body"]
         end_color = colors["end"]
 
@@ -1530,10 +1650,7 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         except Exception as exc:
             elapsed = time.monotonic() - started
             runtime_log.log_tool_result(name, str(exc), elapsed, error=True)
-            for i, line in enumerate(header_lines):
-                # First line is tag, rest are body
-                color = tag_color if i == 0 else body_color
-                print(f"{color}{line}{RESET}")
+            _print_tool_display(name, args, header, expanded, colors)
             if expanded:
                 print(f"{body_color}[OUTPUT]{RESET}")
                 print(f"{body_color}{exc}{RESET}")
@@ -1554,12 +1671,10 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
         # turn ends.
         runtime_log.log_tool_result(name, normalized, elapsed)
 
-        for i, line in enumerate(header_lines):
-            color = tag_color if i == 0 else body_color
-            print(f"{color}{line}{RESET}")
+        _print_tool_display(name, args, header, expanded, colors)
         if expanded:
             print(f"{body_color}[OUTPUT]{RESET}")
-            print(f"{body_color}{normalized}{RESET}")
+            _print_tool_output(tool_name, args, normalized, body_color)
         print(f"{end_color}[TOOL DONE] ({elapsed:.2f}s){RESET}")
 
         return normalized
@@ -2115,13 +2230,15 @@ def _ask_with_slots(
 
                     _append_image_message(messages, turn_attachments)
 
-                    # The tool produced a picture, but the model that is
-                    # running cannot see images — it would only get a note
-                    # saying the image was dropped.  Move the turn to a
-                    # vision-capable model so the screenshot is actually
-                    # usable.  The switch happens at most once per turn.
-                    if (turn_attachments and not vision_switched
-                            and not model_supports_vision(pid, model_name)):
+                    # The tool produced a picture the model asked for, but the
+                    # model that is running cannot see images — it would only
+                    # get a note saying the image was dropped.  Move the turn
+                    # to a vision-capable model so the screenshot is actually
+                    # usable.  The switch happens at most once per turn, and
+                    # only for a picture that was asked for: an unasked-for
+                    # picture must never change the model.
+                    if _wants_vision_switch(turn_attachments, pid, model_name,
+                                            vision_switched):
                         vision_index = _find_vision_slot(model_slots, slot)
                         if vision_index is not None:
                             vision_switched = True

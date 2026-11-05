@@ -220,3 +220,43 @@ When adding a new capability:
 | State injection into `ask_ai()` system prompt | Agent state belongs only in `run_agent_step()` |
 | Orchestrating tasks that could run sequentially in one thread | Unnecessary complexity — prove the flat loop works first |
 | Retrying a failing approach without consulting reflection log | Systematic failures require root cause analysis, not more retries |
+
+---
+
+## 9. Delegated Sub-Tasks (`delegate_subtask`)
+
+`delegate_subtask` is the in-process delegation path: one sub-AI, a bounded tool loop,
+a structured report back to the manager.
+
+| Argument | Meaning |
+|---|---|
+| `task` | The imperative instruction the sub-AI works from |
+| `context` | Background it cannot read for itself (paths, findings, constraints) |
+| `intelligence` | `high` \| `medium` \| `low` — **the tier, not a model id** |
+| `available_tools` | The tools the worker may run; anything dropped is named in the report |
+| `tool_call_iterations` | The tool-loop budget (`0` disables tool access) |
+| `system_prompt` | Optional override of the delegation-focused prompt |
+
+### Tiers (`core/models.py` → `SUBAGENT_TIERS`)
+The tiers are ordered by measured capability, not by model name:
+- **high** — the strongest free reasoning models,
+- **medium** — the balanced workhorses,
+- **low** — the cheap and fast end.
+
+The ladder only goes **down**: a `high` task that nobody can serve degrades to
+`medium` and then `low`; a `medium` task never climbs to a frontier model the caller
+did not ask for.
+
+### Rules
+- Every route in the tiers must be **free** and **verified for tool calling**.
+  `free_route_violations()` and `model_supports_tools()` are the machine checks; the
+  test suite fails on a violation rather than trusting a convention.
+- A worker gets a **curated toolkit**, not the whole arsenal — advertising every
+  schema pushed several providers over their request-size limit. A requested tool that
+  cannot be granted is **named** on screen, in the log and in the report; it is never
+  dropped silently.
+- `retrieve_archive` and `list_archives` are read-only and available to workers — they
+  are exactly what a worker needs to check how much of a task was already done and
+  continue from there.
+- The report is the deliverable: the worker's output, the tools it used, and anything
+  it could not do.

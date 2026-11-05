@@ -177,7 +177,17 @@ def test_deactivate_stops_the_runtime(isolated_manager, monkeypatch):
 # ── the node gateway lifecycle ───────────────────────────────────────────────
 
 def _whatsapp_manager():
-    from whatsapp_manager import whatsapp_manager
+    """The WhatsApp manager module — skipped when Termux-WP is not installed.
+
+    The manager refuses to import without the Termux-WP checkout (it needs
+    the qrcode-terminal module to draw a pairing code), and Termux-WP is
+    optional: a fresh clone has none.  Without this guard the gateway tests
+    failed on such a clone instead of skipping what they cannot check.
+    """
+    try:
+        from whatsapp_manager import whatsapp_manager
+    except (ImportError, FileNotFoundError) as exc:
+        pytest.skip(f"Termux-WP is not installed: {exc}")
     return whatsapp_manager
 
 
@@ -449,6 +459,9 @@ def test_the_watchdog_restarts_a_gateway_that_died(monkeypatch):
 def test_runtime_uses_the_same_manager_instance_as_the_tools():
     """Two copies of the manager would mean two listeners and two states."""
     import core.tools as tools_mod
+
+    if not getattr(tools_mod, "WP_AVAILABLE", False):
+        pytest.skip("Termux-WP is not installed — there is no manager to compare")
 
     from_runtime = plugin_runtime._whatsapp_manager()
     assert from_runtime is tools_mod.whatsapp_manager

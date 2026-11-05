@@ -1,0 +1,20 @@
+{
+  "google": [
+    "AIza..."
+  ],
+  "nvidia": [
+    "nvapi-..."
+  ],
+  "groq": [
+    "gsk_..."
+  ],
+  "openrouter": [
+    "sk-or-v1-..."
+  ],
+  "ollama": [
+    "your-ollama-cloud-key"
+  ],
+  "ollama-local": [
+    "No-Need"
+  ]
+}

@@ -24,6 +24,20 @@ This directory defines how Orion thinks, works, and makes decisions. The documen
 
 ---
 
+## The Modular Skills Mirror
+
+Every rule above also exists as a **modular skill** under `instructions/skills/`, and the
+skill copy is the one the runtime actually routes to: `instructions/skills/INDEX.md`
+picks the core skills a task needs (`core/bootstrap`, `core/coding`,
+`core/verification`, …), and the selected `SKILL.md` is read before any work starts.
+The manuals in this directory are the long-form versions of the same rules.
+
+When the two disagree, the **skill** is the operative one — that is what the agent
+loads. Keep them in step: a rule that changes in a manual has to change in its skill
+too, or the next task follows the older rule.
+
+---
+
 ## Project Layout Quick Reference
 
 ```

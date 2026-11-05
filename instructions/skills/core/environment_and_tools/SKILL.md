@@ -146,8 +146,17 @@ This ensures `import tools` resolves to `core/tools.py`, not to the `tools/` pac
 | File | Purpose | Gitignored |
 |---|---|---|
 | `config/api.keys` | LLM provider API keys (JSON) | ✓ |
-| `config/config.json` | Runtime settings (STT path, TTS toggle) | ✓ |
+| `config/api.keys.template` | Placeholder shape of `api.keys` — the file a user copies | ✗ |
+| `config/config.json` | Runtime settings (STT path, TTS toggle, `notify`) | ✗ |
 | `config/capability_registry.json` | Module/function capability registry | ✗ |
+| `config/google_oauth.json` | Google OAuth client id + secret | ✓ |
+| `data/google_tokens/` | Per-service OAuth access + refresh tokens | ✓ |
+| `data/google_pending_auth.json` | In-flight PKCE verifier | ✓ |
+| `data/cli_history` | Prompt history — a pasted credential lands here | ✓ |
+
+Only the ✓ rows are secrets. Everything else in `config/` is source and stays tracked;
+the template, the capability registry and the WhatsApp filters must be in the
+repository or a fresh clone has nothing to copy.
 
 Always load via `paths` constants — never hardcode paths.
 
@@ -157,6 +166,28 @@ Always load via `paths` constants — never hardcode paths.
 
 1. **Check first.** Run `pip list | grep <package>` or `import <package>` before installing.
 2. **Standard library first.** Prefer `json`, `subprocess`, `multiprocessing`, `pathlib`, `sqlite3`, and `threading`.
-3. **Required packages** (installed by `setup.sh`): `openai`, `requests`, `beautifulsoup4`, `jsonschema`, `tiktoken`
-4. **Termux system packages** — install via `pkg install <package>`, not `apt`. Never run `pkg remove` or system-level changes without explicit user authorization.
-5. **Python packages** — use `pip install`, not `pkg install python-<package>` unless explicitly needed for binary wheels.
+3. **Required packages** (installed by `setup.sh`): `openai`, `httpx`, `requests`, `beautifulsoup4`, `jsonschema`
+4. **Optional packages** — `prompt_toolkit` (richer prompt, multi-line editing, persistent history; the runtime falls back to plain `input()` without it) and `edge-tts` + `mpv` (voice output). `tiktoken` is **not** used by this project — do not install it on our behalf.
+5. **Termux system packages** — install via `pkg install <package>`, not `apt`. Never run `pkg remove` or system-level changes without explicit user authorization. `chromium` is needed for the browser tools.
+6. **Python packages** — use `pip install`, not `pkg install python-<package>` unless explicitly needed for binary wheels.
+
+---
+
+## 8. Browser Tools
+
+`browse_web` and `browser` drive a real Chromium over the DevTools protocol.
+
+| Fact | Detail |
+|---|---|
+| Dependency | Chromium — `pkg install chromium` |
+| Profile directory | `workspace/.browser/` — `/tmp` is not writable on Termux and does not exist on Windows |
+| Screenshots | `workspace/screenshots/` — only the 60 most recent are kept |
+| Session lifetime | A `browser` session idles out after 5 minutes; an `atexit` hook closes the rest |
+
+Rules:
+- The page is read as **Markdown from the DOM** (`core/html_markdown.py`), never as raw `innerText`.
+- Wait for the DOM to **settle** (1.5 s of quiet, hard cap 10 s) instead of trusting the load event — a search engine reports "loaded" while the results are still arriving.
+- A screenshot is taken **only when the model asks for one** (`screenshot=true`). An unasked-for screenshot is never attached to the reply and can never move the turn to a vision model.
+- Never guess a click target: run the `find` action, then click by label, index or selector. The position is resolved against the live DOM at the moment of the click.
+
+Without Chromium the tools fall back to a no-JS scraper that answers in the same Markdown shape.

@@ -35,3 +35,19 @@ def _stub_plugin_runtime(monkeypatch):
     monkeypatch.setattr(plugin_runtime, "deactivate", lambda name: dict(stub))
     monkeypatch.setattr(plugin_runtime, "status", lambda name: dict(stub))
     monkeypatch.setattr(plugin_runtime, "setup", lambda name: dict(stub))
+
+
+@pytest.fixture(autouse=True)
+def _fast_browser_settle(monkeypatch):
+    """Keep the browser tests quick.
+
+    Before a page is read, the browser tools wait for it to stop changing:
+    a search engine fires its load event while the results are still on
+    their way, so "the page has loaded" and "the page is ready" are two
+    different moments.  The wait is a moment long in the tests; the tests
+    that are about the wait itself set their own numbers.
+    """
+    from core import tools
+
+    monkeypatch.setattr(tools, "_BROWSER_CONTENT_SETTLE", 0.05)
+    monkeypatch.setattr(tools, "_BROWSER_CONTENT_POLL", 0.01)

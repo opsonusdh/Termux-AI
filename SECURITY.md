@@ -44,7 +44,8 @@ Examples include:
 - unsafe shell command construction
 - command validation bypasses
 - unauthorized file writes
-- leaks involving `api.keys`
+- leaks involving `api.keys`, the OAuth client secret or a refresh token
+- a WhatsApp pairing QR or session token reaching the terminal or a log
 - unwanted access to `core/`
 - broken permission boundaries
 - unsafe logging or memory handling
@@ -54,11 +55,21 @@ Examples include:
 ## Sensitive Files and Paths
 
 These paths deserve extra care:
-- `api.keys`
+- `config/api.keys` — every provider key
+- `config/google_oauth.json` — the Google OAuth client secret
+- `data/google_tokens/` — long-lived refresh tokens for Gmail, Calendar and Drive
+- `data/google_pending_auth.json` — a live PKCE verifier
+- `data/cli_history` — the prompt history; a pasted credential ends up here
 - `core/`
 - `Termux-STT/`
 - `memories.txt`
-- `log.txt`
+- `logs/` — conversations, tool output and the compressed-context archive
+- `logs/log.txt`
+- `.wwebjs_auth/` — the paired WhatsApp session
+
+The credential files are git-ignored, and they are protected in **every** permission
+mode — including autonomous mode. A WhatsApp pairing code is a live secret too: it is
+captured and drawn only when the user asks for it, never printed on its own.
 
 Do not commit secrets, tokens, or personal data into the repository. Git history remembers everything like a vindictive archivist.
 

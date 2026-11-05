@@ -87,6 +87,29 @@ class _DeadProc:
         return 1
 
 
+def _page_evaluate(params, body="page body"):
+    """Answer every probe the browser tools send to a page.
+
+    The tools ask for three different things: the page state, the state of
+    the content (is it still filling itself in?) and the DOM itself, which
+    is what the Markdown is built from.
+    """
+    expr = params.get("expression", "")
+    if "location.href" in expr:
+        return _string_value(json.dumps(
+            {"url": "http://example.test", "title": "Example"}))
+    if "document.readyState" in expr:
+        return _string_value("complete")
+    if "getElementsByTagName" in expr:
+        return _string_value(json.dumps(
+            {"ready": "complete", "len": len(body), "nodes": 3, "html": 120}))
+    if "outerHTML" in expr:
+        return _string_value(json.dumps(
+            {"count": 1,
+             "htmls": [f"<html><body><p>{body}</p></body></html>"]}))
+    return _string_value(body)
+
+
 # ── 1. clicking anywhere on the page ─────────────────────────────────────────
 
 class TestCoordinateClicks:
@@ -350,7 +373,7 @@ class TestSessionHealth:
         assert health["process_alive"] is False
 
     def test_the_state_action_reports_the_health(self, monkeypatch):
-        ws = FakeWS({"Runtime.evaluate": lambda p: _string_value("page body")})
+        ws = FakeWS({"Runtime.evaluate": _page_evaluate})
         session = {"id": "b9", "proc": _LiveProc(), "ws": ws, "msg_id": 1,
                    "url": "http://example.test", "title": "Example",
                    "created": time.time(), "last_used": time.time(),
@@ -411,15 +434,10 @@ class TestActionResults:
 
     def _evaluate(self, params):
         expr = params.get("expression", "")
-        if "location.href" in expr:
-            return _string_value(json.dumps(
-                {"url": "http://example.test", "title": "Example"}))
-        if "document.readyState" in expr:
-            return _string_value("complete")
         if "getBoundingClientRect" in expr:
             return _string_value(json.dumps(
                 {"x": 10, "y": 20, "width": 30, "height": 40}))
-        return _string_value("page body")
+        return _page_evaluate(params)
 
     def test_the_act_action_returns_the_page_state(self, monkeypatch):
         ws = FakeWS({"Runtime.evaluate": self._evaluate})

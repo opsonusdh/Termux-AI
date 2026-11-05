@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import textwrap
@@ -201,6 +202,77 @@ def highlight_code(code: str, lang: str = '', style: str = 'monokai') -> str:
         return highlighted.rstrip('\n')
     except Exception:
         return code
+
+
+# ============================================================
+# Language detection
+# ============================================================
+
+#: File extension → pygments lexer name.  This is how a file's *own* contents
+#: are highlighted: the extension of the file that was read or written decides
+#: the lexer, instead of guessing from the text.
+_EXTENSION_LANGUAGES: dict[str, str] = {
+    ".py": "python", ".pyi": "python", ".pyw": "python",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript",
+    ".json": "json", ".jsonc": "json",
+    ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".ksh": "bash",
+    ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
+    ".ini": "ini", ".cfg": "ini", ".conf": "ini",
+    ".html": "html", ".htm": "html", ".xml": "xml", ".css": "css",
+    ".scss": "scss", ".sass": "sass", ".less": "less",
+    ".md": "markdown", ".markdown": "markdown", ".rst": "rst",
+    ".txt": "text", ".log": "text", ".csv": "csv", ".tsv": "csv",
+    ".sql": "sql", ".php": "php", ".rb": "ruby", ".java": "java",
+    ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".scala": "scala",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".cs": "csharp", ".go": "go", ".rs": "rust",
+    ".dart": "dart", ".lua": "lua", ".pl": "perl", ".pm": "perl",
+    ".r": "r", ".ps1": "powershell", ".bat": "batch", ".cmd": "batch",
+    ".diff": "diff", ".patch": "diff", ".vue": "vue", ".svelte": "svelte",
+    ".graphql": "graphql", ".gql": "graphql", ".proto": "protobuf",
+    ".tf": "terraform", ".mk": "makefile", ".cmake": "cmake",
+}
+
+#: Extension-less files that are still worth a lexer of their own.
+_FILENAME_LANGUAGES: dict[str, str] = {
+    "makefile": "makefile", "gnumakefile": "makefile",
+    "dockerfile": "docker", "containerfile": "docker",
+    "cmakelists.txt": "cmake",
+    ".bashrc": "bash", ".bash_profile": "bash", ".zshrc": "bash",
+    ".profile": "bash", ".env": "bash",
+}
+
+
+def language_for_path(path: str) -> str:
+    """Return the pygments language name for *path*.
+
+    The extension of the file decides the lexer; a handful of well-known
+    extension-less files (Makefile, Dockerfile, .bashrc) are recognised by
+    name.  An unknown path returns ``""`` — the highlighter then renders the
+    text plainly instead of guessing wrong.
+    """
+    if not path:
+        return ""
+    name = os.path.basename(str(path).strip().rstrip("/\\"))
+    if not name:
+        return ""
+    lowered = name.lower()
+    if lowered in _FILENAME_LANGUAGES:
+        return _FILENAME_LANGUAGES[lowered]
+    ext = os.path.splitext(lowered)[1]
+    return _EXTENSION_LANGUAGES.get(ext, "")
+
+
+def highlight_lines(code: str, lang: str = "") -> List[str]:
+    """Highlight *code* and return it as a list of ANSI-coloured lines.
+
+    The line count matches the input — Pygments neither merges nor splits
+    lines — so a caller can zip the result with its own per-line metadata.
+    """
+    if not code:
+        return []
+    return highlight_code(code, lang).split("\n")
 
 
 # ============================================================
@@ -627,23 +699,16 @@ def fit_column_widths(max_widths: Sequence[int], term_width: int, min_col_width:
     return widths
 
 
-def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int, highlight: bool = True) -> List[str]:
-    """
-    Render a fenced code block using a modern CLI open-right gutter style.
-    Anchored with top (╭── lang ──) and bottom (╰──) borders with a left accent bar (│ ),
-    allowing clean line rendering without rigid right-border clipping or double-box distortion.
-    
-    Now supports syntax highlighting via pygments when available.
+def _code_block_frame(code_lines: Sequence[str], lang_str: str, term_width: int) -> List[str]:
+    """Draw the open-right gutter box around *code_lines*.
+
+    The lines are taken as they are — highlighted or not.  Splitting the frame
+    out of the highlighter lets a caller colour the code first (the file
+    reader strips the ``12| `` line-number prefixes before the lexer sees the
+    source) and still get exactly the same box.
     """
     clean_lang = (lang_str or "").strip()
-    code_text = "\n".join(code_lines)
-    
-    # Apply syntax highlighting if enabled and pygments available
-    if highlight:
-        highlighted = highlight_code(code_text, clean_lang)
-        if highlighted != code_text:
-            code_lines = highlighted.split('\n')
-    
+
     max_line_width = max((display_width(x) for x in code_lines), default=20)
 
     # Compute header/footer width bounded by terminal size
@@ -661,6 +726,55 @@ def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int
         rendered.append(f"{GRAY}│{RESET} {code_line}")
     rendered.append(bottom)
     return rendered
+
+
+def _render_code_block(code_lines: Sequence[str], lang_str: str, term_width: int, highlight: bool = True) -> List[str]:
+    """
+    Render a fenced code block using a modern CLI open-right gutter style.
+    Anchored with top (╭── lang ──) and bottom (╰──) borders with a left accent bar (│ ),
+    allowing clean line rendering without rigid right-border clipping or double-box distortion.
+
+    Now supports syntax highlighting via pygments when available.
+    """
+    clean_lang = (lang_str or "").strip()
+    code_text = "\n".join(code_lines)
+
+    # Apply syntax highlighting if enabled and pygments available
+    if highlight:
+        highlighted = highlight_code(code_text, clean_lang)
+        if highlighted != code_text:
+            code_lines = highlighted.split('\n')
+
+    return _code_block_frame(code_lines, clean_lang, term_width)
+
+
+def render_code_snippet(code: str, lang: str = "", term_width: int | None = None) -> List[str]:
+    """Render a standalone code snippet the way the markdown renderer draws a
+    fenced code block: syntax-highlighted, inside the open-right gutter box,
+    labelled with the language.
+
+    This is the display path used by the tool viewer and by the permission
+    prompt, so a shell command or a file's contents look the same wherever
+    they are shown.
+    """
+    if code is None:
+        return []
+    text = str(code)
+    if not text.strip():
+        return []
+    width = term_width if term_width else term_size()[0]
+    return _render_code_block(text.split("\n"), (lang or "").strip(), width, highlight=True)
+
+
+def render_code_block_lines(lines: Sequence[str], lang: str = "", term_width: int | None = None) -> List[str]:
+    """Frame *already highlighted* lines in the same gutter box.
+
+    Used when the caller has to transform the code before it is coloured — the
+    file reader strips the ``12| `` line-number prefixes so the lexer sees the
+    real source, and puts them back afterwards.
+    """
+    width = term_width if term_width else term_size()[0]
+    return _code_block_frame(list(lines), (lang or "").strip(), width)
 
 
 def render_table(raw_rows: List[List[str]], term_width: int, header_color: str = BOLD + CYAN, border_color: str = GRAY) -> str:

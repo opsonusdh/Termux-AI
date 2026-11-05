@@ -196,3 +196,21 @@ The first statement is about conversation history. The second is about current f
 2. **Tool Pairing:** A tool call and its result must never be decoupled. If a call is preserved, its result must be preserved.
 3. **No Unanswered Tool Calls:** Never leave an assistant tool call without its corresponding tool result turn.
 4. **Compression Precedence:** History turns absorb compression before the current live turn is altered.
+
+---
+
+## 10. Closing a Conversation (`/session new`)
+
+`/session new` wipes the chat history, the agent history and the chunk context the
+model is fed; the next message starts from a blank slate. It deliberately does not
+re-run the startup UI, does not leave agent mode, and does not touch the
+preferences, the display state or the plugins.
+
+The wipe is durable: the chunk store is not deleted — a **context boundary** is moved
+forward and persisted (`data/context_session.json`), so the closed conversation stops
+being injected into every request and does not come back after a restart, while the
+chunks stay retrievable with `retrieve_chunk`. The session draft is archived as a
+normal saved session rather than dropped.
+
+**Do not "fix" a closed session by deleting chunks** — the boundary is the mechanism,
+and deleting the store destroys the history the model is still allowed to reach.

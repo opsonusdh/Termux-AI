@@ -176,3 +176,43 @@ If any, **MUST** fix errors that are found.
 - **Type Hints:** Use explicit typing and `X | Y` for Union types.
 - **Pattern Matching:** Use `match ... case` statements where suitable.
 - **Context Managers:** Always use `with` statements for resource management.
+
+---
+
+## 10. Module Import & Singleton Invariants
+
+- **Importing Permissions:** `core/permissions.py` must always be imported as
+  `from core import permissions` (or `from core.permissions import ...`), never as a
+  top-level `import permissions` — that creates a duplicate module instance with
+  isolated state, and the permission gate stops being the gate.
+- **Module Shadowing (`tools`):** `core/tools.py` is imported as `tools`, shadowing the
+  `tools/` package in `sys.modules`. Platform wrappers are loaded by file path
+  (`spec_from_file_location`) or re-exported through `core/tools.py`.
+- **Dual Module Registration:** Stateful core modules (context manager, context
+  compressor) register themselves in `sys.modules` under both `core.<name>` and bare
+  `<name>`, so two import styles cannot end up with two separate instances.
+
+---
+
+## 11. LLM Client, Model Registries & Output Separation
+
+- **Type Hints & Docstrings:** Public functions carry explicit type hints and a
+  docstring that says what the function guarantees.
+- **Centralized Provider Endpoints:** Provider base URLs live only in `core/models.py`
+  (`PROVIDERS`). Tools and agents look up `PROVIDERS[pid]["base_url"]` instead of
+  hardcoding an endpoint.
+- **Immutable Model Registries:** Never mutate `MODEL_SLOTS`, `AGENT_MODEL_SLOTS` or
+  the image registry at runtime. A per-request override (a reduced `max_tokens`, a
+  lowered reasoning effort) belongs in a **request-local** dictionary — one over-long
+  prompt must not degrade that model for the rest of the process.
+- **Free-only and tool-calling gates:** Every route in the chat rotation, the agent
+  rotation and the sub-agent tiers must be servable without paid credits, and every
+  model offered to a sub-AI must have verified tool calling. `free_route_violations()`
+  and `model_supports_tools()` are the machine checks; the test suite fails on a
+  violation rather than trusting a convention.
+- **Key Exhaustion & Cooldown:** Persistent error tracking in `llm_client.py` rotates
+  keys after 10 consecutive same-status failures (429 rate limits, for example) and
+  applies a timed cooldown before retrying an exhausted key.
+- **Working Trace Decoupling:** Internal narration never leaks into the answer the
+  user reads. `core/llm_client.py` separates the working trace from the final answer
+  and shows the trace in its own labelled, collapsable block.

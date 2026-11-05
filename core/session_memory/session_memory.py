@@ -252,6 +252,30 @@ def finalize_session(
     return str(session_file)
 
 
+def archive_current_draft() -> Optional[str]:
+    """Write the current draft out as a saved session, without an LLM call.
+
+    Used by "/session new": the draft describes the conversation that is
+    being closed, so it is kept as a normal saved session instead of being
+    thrown away.  Returns the path of the saved record, or None when there
+    was nothing worth saving.
+
+    The compression model is deliberately *not* used here — this runs while
+    the user waits for their next prompt, and a sub-agent round trip there
+    would make the command feel slow for no benefit.
+    """
+    with _draft_lock:
+        draft = _load_draft()
+
+    if not draft.get("steps"):
+        return None
+
+    path = finalize_session(use_small_model=False)
+    if not path or path.startswith("[ERROR"):
+        return None
+    return path
+
+
 def _compress_with_small_model(draft: dict, intelligence: str, max_tokens: int) -> Optional[dict]:
     """
     Use delegate_subtask to compress the draft with a low-tier sub-AI.
@@ -446,7 +470,7 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m workspace.session_memory <command> [args]")
+        print("Usage: python -m core.session_memory.session_memory <command> [args]")
         print("Commands:")
         print("  list                    - List all sessions")
         print("  resume <session_id>     - Load and show session")

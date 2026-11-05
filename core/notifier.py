@@ -83,7 +83,7 @@ def push(title: str, content: str) -> bool:
         body = body[:_MAX_CONTENT - 3].rstrip() + "..."
     try:
         subprocess.run(
-            ["termux-notification", "--title", str(title), "--content", body],
+            ["termux-notification", "--title", str(title), "--content", body, "--priority", "high"],
             capture_output=True,
             timeout=_TIMEOUT,
         )

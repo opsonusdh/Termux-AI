@@ -17,7 +17,7 @@ logs/session_<timestamp>.json    -- Finalized, compressed session record
 The system is designed to be called from `context_manager.py` at key points:
 
 ```python
-from workspace.session_memory.integration import (
+from core.session_memory.integration import (
     note_on_chunk_open,
     note_on_chunk_close,
     note_on_tool_call,
@@ -48,7 +48,7 @@ note_on_error(chunk_id, "Permission denied", "Reading api.keys", "User approved"
 ### 2. Manual note-taking (from agent code)
 
 ```python
-from workspace.session_memory import append_session_note
+from core.session_memory import append_session_note
 
 append_session_note(
     note_type="decision",      # decision, action, finding, file_change, question, error, summary
@@ -84,23 +84,43 @@ session_data = resume_session("2026-10-23_15-56-07")
 # Returns full session dict with steps, decisions, files_modified, etc.
 ```
 
+## Slash Commands
+
+The same surface is available from the chat loop:
+
+```
+YOU > /session list         # saved sessions, rendered as a readable list
+YOU > /session save         # save the current conversation
+YOU > /session resume <id>  # continue a saved session
+YOU > /session new          # close the current conversation, keep mode/plugins
+YOU > /session delete <id>  # remove a saved session
+YOU > /session draft        # show the in-progress draft
+```
+
+`/session new` is the one that changes the runtime state: it moves the **context
+boundary** forward (`data/context_session.json`) instead of deleting anything, so the
+chunks stay retrievable with `retrieve_chunk` while the closed conversation stops
+being fed to the model.
+
+---
+
 ## CLI Usage
 
 ```bash
 # List all sessions
-python workspace/session_memory/session_memory.py list
+python core/session_memory/session_memory.py list
 
 # Resume a session (shows full JSON)
-python workspace/session_memory/session_memory.py resume 2026-10-23_15-56-07
+python core/session_memory/session_memory.py resume 2026-10-23_15-56-07
 
 # Delete a session
-python workspace/session_memory/session_memory.py delete 2026-10-23_15-56-07
+python core/session_memory/session_memory.py delete 2026-10-23_15-56-07
 
 # Show current draft
-python workspace/session_memory/session_memory.py draft
+python core/session_memory/session_memory.py draft
 
 # Finalize current draft
-python workspace/session_memory/session_memory.py finalize
+python core/session_memory/session_memory.py finalize
 ```
 
 ## Session File Format
@@ -128,7 +148,7 @@ python workspace/session_memory/session_memory.py finalize
   ],
   "files_modified": [
     "core/context_manager.py",
-    "workspace/session_memory/session_memory.py"
+    "core/session_memory/session_memory.py"
   ],
   "tools_used": [
     "read_file",
@@ -172,12 +192,11 @@ python workspace/session_memory/session_memory.py finalize
 
 Add to `context_manager.py` imports:
 ```python
-from workspace.session_memory.integration import (
+from core.session_memory.integration import (
     note_on_chunk_open,
     note_on_chunk_close,
     note_on_tool_call,
     note_on_file_edit,
-    note_on_decision,
     note_on_error,
 )
 ```

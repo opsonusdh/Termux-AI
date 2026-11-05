@@ -27,6 +27,12 @@ Active context assembly  (build_history)
     The current turn's user message is NOT included here; ask_ai() receives
     it as the prompt= argument.
 
+Context boundary  (data/context_session.json)
+    The lowest chunk id that still belongs to the active conversation.
+    "/session new" moves it forward: the older chunks stay in the store and
+    stay retrievable, but build_history() stops injecting them.  The marker
+    is persisted, so a restart does not bring the closed conversation back.
+
 Integration points  (minimal — three changes across two files)
     llm_client.py ask_ai():
         _cm.set_tool_context(messages[base_len:])   # ONE LINE before return
@@ -103,6 +109,8 @@ except Exception:
 # ── Paths ──────────────────────────────────────────────────────────────────
 CHUNKS_FILE    = paths.CHUNKS_FILE
 SUMMARIES_FILE = paths.CHUNK_SUMMARIES_FILE
+# Where the active conversation context starts.  See ``reset_context()``.
+CONTEXT_SESSION_FILE = paths.CONTEXT_SESSION_FILE
 os.makedirs(paths.LOGS_DIR, exist_ok=True)
 
 # ── Tunables ───────────────────────────────────────────────────────────────
@@ -121,13 +129,59 @@ SUMMARIZER_MODEL     = "gemini-2.5-flash-lite"
 # _next_id        : next parent ID to assign (recovered from max(parent_ids)+1)
 # _current_chunk  : partially assembled chunk for the turn in progress
 # _pending_context: tool messages captured from ask_ai() for the open chunk
+# _active_from    : the lowest chunk id that still belongs to the *active*
+#                   conversation context.  Chunks below it stay on disk and
+#                   stay retrievable, but they are no longer injected into
+#                   the model's context — this is what "/session new" moves.
 _parent_ids:      list[int]              = []
 _chunk_index:     dict                   = {}   # int | str → entry dict
 _summaries:       dict[int, dict]        = {}
 _next_id:         int                    = 1
 _current_chunk:   dict | None            = None
 _pending_context: list[dict]             = []
+_active_from:     int                    = 1
 _lock             = threading.Lock()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The context boundary
+# ══════════════════════════════════════════════════════════════════════════
+
+def _load_boundary() -> int:
+    """Read the persisted context boundary (the oldest active chunk id).
+
+    A missing or unreadable file means "everything is active" — the same
+    state a fresh install is in.
+    """
+    try:
+        with open(CONTEXT_SESSION_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        value = int(data.get("active_from", 1))
+        return max(1, value)
+    except Exception:
+        return 1
+
+
+def _persist_boundary(active_from: int) -> bool:
+    """Persist the context boundary.  Returns True when it was written."""
+    try:
+        os.makedirs(os.path.dirname(CONTEXT_SESSION_FILE), exist_ok=True)
+        tmp = CONTEXT_SESSION_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "active_from": int(active_from),
+                    "updated": datetime.now().isoformat(),
+                },
+                f,
+                indent=2,
+            )
+        os.replace(tmp, CONTEXT_SESSION_FILE)
+        return True
+    except Exception:
+        # The boundary is a convenience, not a hard requirement: if it cannot
+        # be written the context is still reset for this run.
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -135,7 +189,7 @@ _lock             = threading.Lock()
 # ══════════════════════════════════════════════════════════════════════════
 
 def _load() -> None:
-    global _parent_ids, _chunk_index, _summaries, _next_id
+    global _parent_ids, _chunk_index, _summaries, _next_id, _active_from
 
     _parent_ids  = []
     _chunk_index = {}
@@ -161,6 +215,12 @@ def _load() -> None:
     # Recover next available parent ID
     int_ids  = [eid for eid in _chunk_index if isinstance(eid, int)]
     _next_id = (max(int_ids) + 1) if int_ids else 1
+
+    # The persisted boundary can only be as high as the chunks that actually
+    # exist: a chunk file that was rotated away must not leave the boundary
+    # pointing past the end of the store, or the next chunk written would be
+    # born outside the active context.
+    _active_from = max(1, min(_load_boundary(), _next_id))
 
     _summaries = {}
     if os.path.exists(SUMMARIES_FILE):
@@ -483,11 +543,18 @@ def build_history() -> list[dict]:
       [assistant] ...
 
     The current turn's user message is NOT here — ask_ai() gets it as prompt=.
+
+    Chunks from before the context boundary (see ``reset_context()``) are
+    not part of the active context: they stay on disk and stay retrievable,
+    but they are not injected here.
     """
     with _lock:
         parent_ids = list(_parent_ids)
         summaries  = dict(_summaries)
         index      = dict(_chunk_index)
+        active_from = _active_from
+
+    parent_ids = [pid for pid in parent_ids if pid >= active_from]
 
     if not parent_ids:
         return []
@@ -533,6 +600,60 @@ def build_history() -> list[dict]:
                 history.extend(_msg_to_history(msg))
 
     return history
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Session reset  ("/session new")
+# ══════════════════════════════════════════════════════════════════════════
+
+def reset_context() -> dict:
+    """Start a fresh conversation context.
+
+    Everything the model was told before now stops being part of its
+    context: ``build_history()`` returns nothing for the old chunks, so the
+    next request starts from a blank slate.
+
+    The chunks themselves are *not* deleted.  They stay in the store and
+    stay retrievable with ``retrieve_chunk`` / ``list_chunks``, so the model
+    can still dig out an earlier conversation when the user asks about it —
+    it just stops being pushed into every request.
+
+    The new boundary is persisted, so a restart does not resurrect the
+    conversation the user deliberately closed.
+    """
+    global _active_from, _current_chunk, _pending_context
+
+    with _lock:
+        previous = _active_from
+        dropped  = len([pid for pid in _parent_ids if pid >= previous])
+        # _next_id is the id the next chunk will get, so everything from
+        # here on belongs to the new conversation.
+        _active_from = _next_id
+        _current_chunk = None
+        _pending_context = []
+        new_from = _active_from
+
+    persisted = _persist_boundary(new_from)
+
+    return {
+        "dropped_chunks": dropped,
+        "active_from": new_from,
+        "persisted": persisted,
+    }
+
+
+def context_status() -> dict:
+    """A short report of what is in the active context right now."""
+    with _lock:
+        total = len(_parent_ids)
+        active = len([pid for pid in _parent_ids if pid >= _active_from])
+        active_from = _active_from
+    return {
+        "active_chunks": active,
+        "earlier_chunks": total - active,
+        "total_chunks": total,
+        "active_from": active_from,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -630,6 +751,12 @@ def _summarize_old_chunks() -> None:
     with _lock:
         parent_ids = list(_parent_ids)
         summaries  = dict(_summaries)
+        active_from = _active_from
+
+    # Chunks from an earlier conversation are not summarised any more: they
+    # are no longer part of the active context, so compressing them would
+    # spend an LLM call on text nobody is shown.
+    parent_ids = [pid for pid in parent_ids if pid >= active_from]
 
     # Only chunks outside the raw recency window are eligible
     eligible = parent_ids[:max(0, len(parent_ids) - RAW_RECENCY_WINDOW)]

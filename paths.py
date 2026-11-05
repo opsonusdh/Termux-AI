@@ -56,6 +56,11 @@ HISTORY_FILE          = os.path.join(LOGS_DIR,   "history.jsonl")
 LOG_FILE              = os.path.join(LOGS_DIR,   "log.txt")
 CHUNKS_FILE           = os.path.join(LOGS_DIR,   "chunks.jsonl")
 CHUNK_SUMMARIES_FILE  = os.path.join(LOGS_DIR,   "chunk_summaries.json")
+# Where the active conversation context starts.  "/session new" moves this
+# marker forward: the chunks before it stay on disk (and stay retrievable
+# with retrieve_chunk) but are no longer injected into the model's context.
+# It is persisted so a restart does not bring the old conversation back.
+CONTEXT_SESSION_FILE  = os.path.join(DATA_DIR,   "context_session.json")
 # Compressed context segments.  When the assembled history no longer fits the
 # model's context window, the oldest passes (reasoning details, tool calls and
 # tool outputs) are replaced by a digest and the raw text is written here.

@@ -7,7 +7,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 ## Features
 
 - **Multi-provider LLM fallback** — Cycles through Google Gemini, OpenRouter, Groq, NVIDIA, and Ollama (cloud & local) models automatically. Rate-limited or invalid keys rotate to the next key for the same model; a transient server error (500/502/503/504) skips straight to the next model instead of retrying every key for it.
-- **Tool use** — `run_code`, `read_file`, `write_file`, `web_scrape`, `save_memory`, `retrieve_memory`, `index_files`, `intermediate_print`, `sleep_mode`.
+- **Tool use** — `run_code`, `read_file`, `write_file`, `browse_web`, `browser`, `save_memory`, `retrieve_memory`, `index_files`, `intermediate_print`, `sleep_mode`.
 - **Enhanced Tool Suite** — 7 new utility tools added:
   - `search_in_files` - recursive file content search with advanced options and filters
   - `list_directory` - directory listing with configurable depth
@@ -16,6 +16,8 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
   - `delete_file` - secure file/directory deletion with safety checks
   - `http_request` - HTTP client for API calls with comprehensive headers
   - `get_datetime` - current time information in multiple formats
+- **The app knows its own version** — a single `VERSION` constant in `core/__main__.py` is shown in the startup banner (`v3.3.1`), so the build you are talking to is never a guess.
+- **Browser reads pages as Markdown** — `browse_web` and the persistent `browser` tool read the rendered DOM and hand back structure (headings, lists, tables, links), not a wall of text. One element can be pulled out on its own, and a screenshot is taken only when the model asks for one. See [Browser & Web](#browser--web).
 - **Tool call transparency** — every tool call prints a collapsed one-line status by default; `Ctrl+O` (or `/expand`) reveals the full command/path and complete output. See [Tool Call Display](#tool-call-display).
 - **Chunk-based context memory** — Conversation history is divided into stable numbered chunks. Old chunks are progressively compressed (short → micro → one-line summary) in a background thread. Raw chunks are permanently stored and retrievable by ID via `retrieve_chunk` / `list_chunks` tool calls.
 - **Persistent memory** — Two-tier RAG system: personal facts (`memories.txt`) and indexed code/docs (`indexed_memory.txt`).
@@ -40,9 +42,15 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
 | Python 3.10+ | `pkg install python` |
 | Rust / cmake / clang | `pkg install rust cmake clang which` |
 | `openai` SDK | `pip install openai` |
+| `httpx` | `pip install httpx` |
 | `beautifulsoup4` | `pip install beautifulsoup4` |
 | `requests` | `pip install requests` |
 | `jsonschema` | `pip install jsonschema` |
+| `pygments` | `pip install pygments` — syntax highlighting for code blocks, tool calls and the permission prompt; the renderer falls back to plain text without it |
+| **Browser (optional)** | |
+| Chromium | `pkg install chromium` — what `browse_web` and `browser` drive |
+| **Prompt (optional)** | |
+| `prompt_toolkit` | `pip install prompt_toolkit` — multi-line editing and persistent history; the runtime falls back to plain `input()` without it |
 | **Voice (optional)** | |
 | `edge-tts` | `pip install edge-tts` |
 | `mpv` | `pkg install mpv` |
@@ -67,7 +75,7 @@ bash setup.sh
 nano config/api.keys
 ```
 
-`config/api.keys` must be valid JSON:
+`config/api.keys` must be valid JSON — copy `config/api.keys.template` and fill it in:
 
 ```json
 {
@@ -75,10 +83,14 @@ nano config/api.keys
   "openrouter": ["YOUR_OPENROUTER_KEY"],
   "groq":       ["YOUR_GROQ_KEY"],
   "nvidia":     ["YOUR_NVIDIA_KEY"],
-  "ollama":    ["YOUR_OLLAMA_KEY"],
+  "ollama":     ["YOUR_OLLAMA_KEY"],
   "ollama-local": ["No-Need"]
 }
 ```
+
+An **empty list means that provider is skipped** — no key, no warnings about it in the
+rotation. `ollama-local` is a local server and needs no key at all; the `No-Need`
+placeholder is only what tells the loader to select that route.
 
 ```bash
 # 4. Run
@@ -102,59 +114,106 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) • [Groq Consol
 ├── README.md
 ├── SECURITY.md
 ├── agent
-│   ├── __init__.py
-│   ├── executor.py
-│   ├── planner.py
-│   ├── state_manager.py
-│   └── validator.py
+│   ├── __init__.py
+│   ├── executor.py
+│   ├── planner.py
+│   ├── state_manager.py
+│   └── validator.py
 ├── config
-│   ├── api.keys
-│   ├── api.keys.template
-│   ├── capability_registry.json
-│   ├── config.json
-│   └── whatsapp_filters.json
+│   ├── api.keys
+│   ├── api.keys.template
+│   ├── capability_registry.json
+│   ├── config.json
+│   └── whatsapp_filters.json
 ├── core
-│   ├── PROMPT.md
-│   ├── __main__.py
-│   ├── context_manager.py
-│   ├── display_state.py
-│   ├── input_handler.py
-│   ├── interface.py
-│   ├── llm_client.py
-│   ├── permissions.py
-│   ├── models.py
-│   ├── renderer.py
-│   ├── tools.py
-│   └── whatsapp_manager.py
+│   ├── PROMPT.md
+│   ├── __main__.py
+│   ├── app_config.py
+│   ├── context_compressor.py
+│   ├── context_manager.py
+│   ├── display_state.py
+│   ├── google_api.py
+│   ├── google_oauth.py
+│   ├── html_markdown.py
+│   ├── input_handler.py
+│   ├── interface.py
+│   ├── llm_client.py
+│   ├── models.py
+│   ├── notifier.py
+│   ├── permissions.py
+│   ├── plugin_manager.py
+│   ├── plugin_runtime.py
+│   ├── renderer.py
+│   ├── runtime_log.py
+│   ├── session_memory
+│   │   ├── README.md
+│   │   ├── integration.py
+│   │   └── session_memory.py
+│   ├── shell_parse.py
+│   ├── shell_runner.py
+│   ├── tools.py
+│   ├── ui.py
+│   └── whatsapp_manager.py
 ├── data
-│   ├── cli_history
-│   ├── sessions
-│   ├── state.json
-│   └── validator_schema.json
+│   ├── cli_history
+│   ├── context_session.json
+│   ├── google_pending_auth.json
+│   ├── google_tokens
+│   ├── sessions
+│   ├── state.json
+│   └── validator_schema.json
 ├── indexed_memory.txt
+├── instructions
+│   ├── coding.md
+│   ├── communication.md
+│   ├── decision_making.md
+│   ├── environment_and_tools.md
+│   ├── memory_and_context.md
+│   ├── orchestration_workflows.md
+│   ├── readme.md
+│   ├── reasoning.md
+│   ├── release_and_maintenance.md
+│   ├── security_and_privacy.md
+│   ├── tool_efficiency.md
+│   ├── troubleshooting.md
+│   ├── verification.md
+│   ├── whatsapp_and_notifications.md
+│   └── skills
+│       ├── INDEX.md
+│       ├── core
+│       └── imported
 ├── logs
-│   ├── chunk_summaries.json
-│   ├── chunks.jsonl
-│   ├── history.jsonl
-│   ├── log.txt
-│   ├── problem.txt
-│   └── whatsapp_log.jsonl
+│   ├── chunk_summaries.json
+│   ├── chunks.jsonl
+│   ├── context_archive.jsonl
+│   ├── history.jsonl
+│   ├── log.txt
+│   ├── problem.txt
+│   ├── reflection.jsonl
+│   ├── todos.json
+│   └── whatsapp_log.jsonl
 ├── memories.txt
 ├── orchestration
-│   ├── __init__.py
-│   ├── manager.py
-│   ├── orchestrator.py
-│   ├── protocol.py
-│   └── worker.py
+│   ├── __init__.py
+│   ├── manager.py
+│   ├── orchestrator.py
+│   ├── protocol.py
+│   └── worker.py
 ├── paths.py
 ├── reflection
-│   ├── __init__.py
-│   ├── reflector.py
-│   └── self_correction.py
+│   ├── __init__.py
+│   ├── reflector.py
+│   └── self_correction.py
 ├── setup.sh
+├── tests
+│   ├── conftest.py
+│   ├── fixtures
+│   └── test_*.py
 └── tools
     ├── __init__.py
     ├── tool_wrappers.py
+    ├── wrapper_system_hostname.py
+    ├── wrapper_system_uptime.py
     ├── wrapper_termux_audio.py
     ├── wrapper_termux_battery_status.py
     ├── wrapper_termux_brightness.py
@@ -271,7 +330,9 @@ While autonomous mode is on, `run_code` never asks for approval — not for writ
 
 Every tool call prints to the terminal as it runs. Collapsed (the default) gives a one-line status per call; `Ctrl+O` / `/expand` reveals the full command or path plus the complete output (see [Input Controls](#input-controls)).
 
-Running code (`run_code`) — collapsed:
+The code a call shows is **syntax-highlighted**, with the same Pygments highlighter the markdown renderer uses for code blocks. A file's contents are highlighted with the lexer of *that file's* extension; a shell command — and the permission prompt — are always highlighted as **bash**. Expanded, the snippet is drawn in the same gutter box a fenced code block gets.
+
+Running a command (`shell`) — collapsed:
 
 ```
 [EXEC]
@@ -284,10 +345,12 @@ echo "step 3"
 only the first three lines of the command are shown, and expanded shows the rest plus the full output:
 
 ```
-[EXEC]
-echo "step 1"
-echo "step 2"
-echo "step 3"
+[EXEC] | timeout=30
+╭── bash ─────────────
+│ echo "step 1"
+│ echo "step 2"
+│ echo "step 3"
+╰────────────────────
 [OUTPUT]
 step 1
 step 2
@@ -302,13 +365,41 @@ Editing a file (`write_file`) / reading one (`read_file`) — collapsed shows no
 [TOOL DONE] (0.08s)
 ```
 
-expanded:
+expanded — the content that is about to be written is highlighted with the lexer of the **target file**:
 
 ```
 [EDITING FILE] core/llm_client.py | mode: overwrite | lines: 10-25
+content:
+╭── python ─────────────────
+│ def ask_ai(prompt):
+│     return client.chat(...)
+╰───────────────────────────
 [OUTPUT]
-Wrote 16 lines to core/llm_client.py
+Successfully wrote 42 characters to core/llm_client.py.
 [TOOL DONE] (0.08s)
+```
+
+A read brings the file's own source back, highlighted with the lexer of **that file**. The line numbers stay outside the colouring, so the indentation of the source survives the highlighter:
+
+```
+[READING FILE] core/llm_client.py | lines: all
+[OUTPUT]
+╭── python ─────────────────
+│ 10| def ask_ai(prompt):
+│ 11|     return client.chat(...)
+╰───────────────────────────
+[TOOL DONE] (0.08s)
+```
+
+The permission prompt highlights the command it is asking about the same way:
+
+```
+[PERMISSION] The AI wants to run:
+╭── bash ─────────────────
+│ cd /tmp
+╰────────────────────────
+  Reason: working-directory change via 'cd' requires explicit permission
+  Allow all listed actions? [y/n]
 ```
 
 Every other tool follows the same shape — `[TOOL_NAME]` collapsed, every one of its arguments plus a full `[OUTPUT]` block expanded — and a failed call closes with `[TOOL ERROR] (Xs)` instead of `[TOOL DONE]`. This is presentation only: the model always receives the complete tool output regardless of what the terminal happens to be showing.
@@ -338,6 +429,31 @@ A delegated sub-task shows the whole hand-over in expanded mode — the manager'
 [DELEGATE RESULT] shell
     42:def parse(command):
 ```
+
+---
+
+## Browser & Web
+
+Two tools read the web:
+
+| Tool | What it does |
+|---|---|
+| `browse_web` | One-shot: open a URL, read it, close it. |
+| `browser` | A **persistent session** — `open` returns a short id (`b1`), and every later call works on the same live page (scroll position, cookies, half-filled forms). |
+
+The page comes back as **Markdown**, not a wall of text: headings stay headings, lists stay lists, tables stay tables, links keep their target, and the furniture nobody reads — nav bars, footers, cookie banners, hidden panels — is dropped before the conversion starts.
+
+The `search` argument finds **one** element and returns it together with everything inside it. The query may be a class name (a class written with spaces, `weather data`, matches an element carrying all of those classes), an id, a tag name (`div`, `a`) or a full CSS selector (`#results .row`) — so a box of values arrives as a structure instead of three loose lines.
+
+**The page is read when it is ready.** Both tools wait for the DOM to settle (1.5 s of quiet, hard cap 10 s) instead of trusting the load event — a search engine reports "loaded" while the results are still arriving.
+
+**Screenshots are opt-in.** `screenshot=true` (default false) captures the viewport. An unasked-for screenshot is never taken, never attached to the reply, and can never move the turn to a different model.
+
+**Never guess where a button is.** The `find` action lists every visible button, link and form field with the label a human would read and a ready-to-use CSS selector. A click is then aimed by `text`, `index` or `selector`, and the position is resolved against the live DOM at the moment of the click.
+
+Requires Chromium (`pkg install chromium`). Without it the tools fall back to a no-JS scraper that answers in the same Markdown shape.
+
+The Chromium profile and the screenshots live under `workspace/` (`.browser/`, `screenshots/`) — `/tmp` is not writable on Termux. Only the 60 most recent screenshots are kept.
 
 ---
 
@@ -387,6 +503,22 @@ YOU > /collapse    # aliases: /c, /details off, /view collapsed
 
 ---
 
+## Sessions
+
+```
+YOU > /session list         # saved sessions, rendered as a readable list
+YOU > /session save         # save the current conversation
+YOU > /session resume <id>  # continue a saved session
+YOU > /session new          # close the current conversation, keep everything else
+YOU > /session delete <id>  # remove a saved session
+```
+
+`/session new` is the `/clear` of Termux-AI: the chat history, the agent history and the chunk context the model is fed go away, and the next message starts from a blank slate. It deliberately does **not** re-run the startup UI (no banner, no status row) and does not touch the mode (`/agent` stays in agent mode), the preferences, the display state or the plugins.
+
+The wipe is durable: the chunk store is not deleted, a **context boundary** is moved forward and persisted (`data/context_session.json`), so the closed conversation stops being injected into every request and does not come back after a restart — while the chunks themselves stay retrievable with `retrieve_chunk`, so the model can still dig out earlier work when you ask about it. The session draft is archived as a normal saved session rather than dropped.
+
+---
+
 ## Context Memory
 
 Every conversation turn is stored as a numbered chunk in `logs/chunks.jsonl`. The active context window always stays small:
@@ -400,6 +532,12 @@ Every conversation turn is stored as a numbered chunk in `logs/chunks.jsonl`. Th
 ```
 
 Older chunks are compressed progressively in a background thread. The model can call `list_chunks` and `retrieve_chunk` to pull full raw history when needed.
+
+When the assembled context no longer fits the model's window, the oldest passes are
+compressed into a digest and the **raw text is archived on disk**
+(`logs/context_archive.jsonl`). A marker in the conversation names the archive id, so
+the model can pull the original back with `retrieve_archive` and `list_archives` — the
+digest is a summary, the archive is the evidence.
 
 ---
 
@@ -582,6 +720,10 @@ Multiple keys per provider rotate round-robin and are retired on an invalid cred
   "ollama-local": ["No-Need"]
 }
 ```
+
+A provider with an **empty list is skipped** by the rotation. `ollama-local` talks to a
+local server and needs no key — the `No-Need` placeholder is only what tells the loader
+to select that route.
 
 ---
 

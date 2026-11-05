@@ -1,0 +1,94 @@
+{
+    "ignore_all_groups": false,
+    "ignored_contacts": [
+        "919876543210",
+        "Siddhartha \ud83d\ude0e"
+    ],
+    "ignored_groups": [
+        "Group123"
+    ],
+    "muted_threads": {},
+    "exclude_all_groups_except": [],
+    "per_contact": {
+        "57818967240718@lid": {
+            "last_auto_reply_at": "2026-06-07T13:14:08.751980",
+            "cooldown_until": "2026-06-06T13:44:46.141142"
+        },
+        "120363417796365039@g.us": {
+            "last_auto_reply_at": "2026-06-05T18:14:41.887645",
+            "cooldown_until": "2026-06-05T18:44:41.887645"
+        },
+        "280964462858444@lid": {
+            "last_auto_reply_at": "2026-06-05T18:43:47.247622",
+            "cooldown_until": "2026-06-05T19:13:47.247622"
+        },
+        "58197494788351@lid": {
+            "last_auto_reply_at": "2026-06-06T18:52:29.677084"
+        },
+        "84130238885941@lid": {
+            "last_auto_reply_at": "2026-06-10T16:09:05.853532"
+        },
+        "134376776032339@lid": {
+            "last_auto_reply_at": "2026-06-14T22:21:58.219295"
+        },
+        "33784665780446@lid": {
+            "last_auto_reply_at": "2026-06-14T22:21:58.748827"
+        },
+        "144495769346160@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:00.098534"
+        },
+        "1129693851888@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:03.182403"
+        },
+        "185181860290747@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:03.963221"
+        },
+        "157797534715910@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:05.167116"
+        },
+        "153034566942830@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:06.118289"
+        },
+        "135700095738063@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:07.618016"
+        },
+        "17494056136869@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:09.880782"
+        },
+        "138392788594759@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:10.735150"
+        },
+        "27973205889276@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:12.266973"
+        },
+        "19490662277130@lid": {
+            "last_auto_reply_at": "2026-06-14T22:26:54.541763"
+        },
+        "103401388040344@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:18.618455"
+        },
+        "45874814181610@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:20.157669"
+        },
+        "44603453489160@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:20.924801"
+        },
+        "101035397882010@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:21.431278"
+        },
+        "105708355854379@lid": {
+            "last_auto_reply_at": "2026-06-14T22:22:22.728812"
+        },
+        "61955087806494@lid": {
+            "last_auto_reply_at": "2026-06-14T22:25:23.944820"
+        },
+        "71700922290250@lid": {
+            "last_auto_reply_at": "2026-06-14T22:23:29.930975"
+        }
+    },
+    "is_busy": true,
+    "busy_since": "2026-06-09T08:20:11.249715",
+    "busy_instruction": "",
+    "user_profile": "The user's name is Subhradeep. He is in class 12",
+    "reply_hold_seconds": 300
+}

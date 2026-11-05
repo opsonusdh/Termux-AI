@@ -12,6 +12,7 @@ Architecture:
 
 from .session_memory import (
     append_session_note,
+    archive_current_draft,
     finalize_session,
     list_sessions,
     resume_session,
@@ -23,6 +24,7 @@ from .session_memory import (
 
 __all__ = [
     "append_session_note",
+    "archive_current_draft",
     "finalize_session",
     "list_sessions",
     "resume_session",
