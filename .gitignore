@@ -31,11 +31,18 @@ data/capability_registry.json
 # user typed at the permission gate, so a pasted credential lands in it — it is
 # runtime state, not source, and it must never be committed.
 data/cli_history
+# The context boundary (core/context_manager.py): the chunk id where the
+# active conversation starts.  It is per-machine state — "/session new" moves
+# it forward — so it belongs with state.json, not in the repository.
+data/context_session.json
 # Google OAuth refresh tokens for the Gmail/Calendar/Drive plugins.  A refresh
 # token is a long-lived credential for the user's whole mailbox — it must never
 # end up in a commit.
 data/google_tokens*
 data/google_pending_auth.json
+# Oversized tool results are spilled to disk instead of being pushed into the
+# context window (core/spill.py).  They are session artefacts, not source.
+data/spill/
 docs/active_plan.md
 upgrade_roadmap.md
 reasoning_tmp*

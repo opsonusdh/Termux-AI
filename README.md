@@ -16,7 +16,12 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
   - `delete_file` - secure file/directory deletion with safety checks
   - `http_request` - HTTP client for API calls with comprehensive headers
   - `get_datetime` - current time information in multiple formats
-- **The app knows its own version** — a single `VERSION` constant in `core/__main__.py` is shown in the startup banner (`v3.3.1`), so the build you are talking to is never a guess.
+- **The app knows its own version** — a single `VERSION` constant in `core/__main__.py` is shown in the startup banner (`v3.4.0`), so the build you are talking to is never a guess.
+- **The permission gate knows what a secret looks like** — a file whose *name* (`api.keys`, `.env`, `id_rsa`, `credentials.json`, anything in `.ssh/`) or whose *content* (a PEM private-key block, a provider token format, a JWT, an `Authorization: Bearer` header) says it holds a credential is gated before it is read. The gate says *why* it is asking. In autonomous mode it **refuses** instead of asking — nobody is at the keyboard to answer. See [Permissions](#permissions).
+- **Big tool output goes to disk, not into your context window** — a tool result over the threshold (4,000 tokens by default) is written to `data/spill/<session>/` and the model gets the head, the tail and a path. `read_file` and `search_in_files` fetch the rest. A read of a spill file is never spilled again.
+- **Skills load on demand** — the prompt lists the fifteen core skills; `skill("name")` returns the manual itself, re-read from disk, so an edited `SKILL.md` is visible on the next call. `skill("")` lists the rest of the catalogue.
+- **The permission mode is stated in the prompt** — every request says whether the gate is asking for approval, so the model doesn't have to discover the limit by hitting `[PERMISSION DENIED]` and burning a turn.
+- **Small decisions get a real probability** — `make_decision` asks a free decision model (OpenRouter's Respan on the Decisions API, then NVIDIA, then Gemini) instead of guessing: yes/no comes back as a probability, a scale as a distribution.
 - **Browser reads pages as Markdown** — `browse_web` and the persistent `browser` tool read the rendered DOM and hand back structure (headings, lists, tables, links), not a wall of text. One element can be pulled out on its own, and a screenshot is taken only when the model asks for one. See [Browser & Web](#browser--web).
 - **Tool call transparency** — every tool call prints a collapsed one-line status by default; `Ctrl+O` (or `/expand`) reveals the full command/path and complete output. See [Tool Call Display](#tool-call-display).
 - **Chunk-based context memory** — Conversation history is divided into stable numbered chunks. Old chunks are progressively compressed (short → micro → one-line summary) in a background thread. Raw chunks are permanently stored and retrievable by ID via `retrieve_chunk` / `list_chunks` tool calls.
@@ -129,6 +134,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) • [Groq Consol
 │   ├── PROMPT.md
 │   ├── __main__.py
 │   ├── app_config.py
+│   ├── confidential.py
 │   ├── context_compressor.py
 │   ├── context_manager.py
 │   ├── display_state.py
@@ -151,6 +157,9 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) • [Groq Consol
 │   │   └── session_memory.py
 │   ├── shell_parse.py
 │   ├── shell_runner.py
+│   ├── skill_registry.py
+│   ├── spill.py
+│   ├── tool_pipeline.py
 │   ├── tools.py
 │   ├── ui.py
 │   └── whatsapp_manager.py
@@ -160,6 +169,7 @@ Free API keys: [Google AI Studio](https://aistudio.google.com/) • [Groq Consol
 │   ├── google_pending_auth.json
 │   ├── google_tokens
 │   ├── sessions
+│   ├── spill
 │   ├── state.json
 │   └── validator_schema.json
 ├── indexed_memory.txt
@@ -246,6 +256,8 @@ The following options are available in `config/config.json`:
 | `show_details` | boolean | `false` | Show expanded tool output by default |
 | `autonomous` | boolean | `false` | Bypass permission layer (opt-in) |
 | `notify` | boolean | `true` | Push a notification when the AI waits for you (permission / confirmation / question) and when an agent task completes |
+| `spill_trigger_tokens` | integer | `4000` | Tool results larger than this (in tokens) are written to `data/spill/` instead of being sent inline |
+| `spill_enabled` | boolean | `true` | Set to `false` to keep every tool result inline |
 
 Example `config.json`:
 ```json
@@ -255,7 +267,9 @@ Example `config.json`:
     "use_groq": false,
     "show_details": false,
     "autonomous": false,
-    "notify": true
+    "notify": true,
+    "spill_trigger_tokens": 4000,
+    "spill_enabled": true
 }
 ```
 
@@ -314,6 +328,41 @@ skipped, and the runtime carries on.
 
 ---
 
+## Permissions
+
+Every shell command is checked before it runs, and anything the checker is not sure about is put to you first:
+
+```
+[PERMISSION] The AI wants to run:
+  cd /tmp
+  Reason: working-directory change via 'cd' requires explicit permission
+  Allow all listed actions? [y/n]
+```
+
+The gate knows two kinds of thing:
+
+**Commands.** Writes into `core/` or `Termux-STT/`, changes of working directory, commands on the forbidden list, and anything else the checker flags.
+
+**Files that hold a secret.** `core/confidential.py` decides this from two independent signals — the **name** (`api.keys`, `credentials.json`, `.env`, `id_rsa`, `secrets.yaml`, anything inside `.ssh/` or a folder called `keys/`) and the **content** (a PEM private-key block, a provider token format, a JWT, an `Authorization: Bearer` header, a secret-shaped name bound to a real value, a file that is mostly high-entropy blobs). The gate tells you *which* signal fired and where, so the question is answerable:
+
+```
+[PERMISSION] Reading core/secret-notes.txt needs approval:
+  its content holds a Google API key (line 97)
+```
+
+The content signal detects the **shape** of a credential, not the words around it — a manual that mentions `--password=secret123`, a template with `your-api-key-here`, and a file that calls itself *public* are all left alone.
+
+Two rules keep it honest:
+
+- **In autonomous mode the gate refuses instead of asking.** There is nobody at the keyboard to answer, and a prompt that waits forever would hang a background worker. A refusal is the same answer without the trap.
+- **A *write* is judged by the file's name only.** Overwriting a scratch file that happens to hold an old key is not a leak.
+
+`search_in_files` and `index_files` skip confidential files and report how many they skipped, so a grep is not a way around the gate — and uploads and shares go through it too, so a credential cannot leave the device unnoticed.
+
+The mode is stated at the top of every request ("Autonomous mode is OFF — the gate is active"), so the model knows the rules before it hits them.
+
+---
+
 ## Autonomous Mode
 
 ```
@@ -330,7 +379,9 @@ While autonomous mode is on, `run_code` never asks for approval — not for writ
 
 Every tool call prints to the terminal as it runs. Collapsed (the default) gives a one-line status per call; `Ctrl+O` / `/expand` reveals the full command or path plus the complete output (see [Input Controls](#input-controls)).
 
-The code a call shows is **syntax-highlighted**, with the same Pygments highlighter the markdown renderer uses for code blocks. A file's contents are highlighted with the lexer of *that file's* extension; a shell command — and the permission prompt — are always highlighted as **bash**. Expanded, the snippet is drawn in the same gutter box a fenced code block gets.
+The code a call shows is **syntax-highlighted**, with the same Pygments highlighter the markdown renderer uses for code blocks. A file's contents are highlighted with the lexer of *that file's* extension; a shell command — and the permission prompt — are always highlighted as **bash**.
+
+The colour comes **without** the gutter box a fenced code block gets. That frame (`╭── lang ──` … `╰──`) belongs to the markdown renderer, where a code block is a self-contained object and the frame says where it begins and ends. Inside the running transcript it would repeat itself on every single call — and it would hide the very indentation the highlighter is there to show.
 
 Running a command (`shell`) — collapsed:
 
@@ -346,11 +397,9 @@ only the first three lines of the command are shown, and expanded shows the rest
 
 ```
 [EXEC] | timeout=30
-╭── bash ─────────────
-│ echo "step 1"
-│ echo "step 2"
-│ echo "step 3"
-╰────────────────────
+echo "step 1"
+echo "step 2"
+echo "step 3"
 [OUTPUT]
 step 1
 step 2
@@ -370,10 +419,8 @@ expanded — the content that is about to be written is highlighted with the lex
 ```
 [EDITING FILE] core/llm_client.py | mode: overwrite | lines: 10-25
 content:
-╭── python ─────────────────
-│ def ask_ai(prompt):
-│     return client.chat(...)
-╰───────────────────────────
+def ask_ai(prompt):
+    return client.chat(...)
 [OUTPUT]
 Successfully wrote 42 characters to core/llm_client.py.
 [TOOL DONE] (0.08s)
@@ -384,10 +431,22 @@ A read brings the file's own source back, highlighted with the lexer of **that f
 ```
 [READING FILE] core/llm_client.py | lines: all
 [OUTPUT]
-╭── python ─────────────────
-│ 10| def ask_ai(prompt):
-│ 11|     return client.chat(...)
-╰───────────────────────────
+10| def ask_ai(prompt):
+11|     return client.chat(...)
+[TOOL DONE] (0.08s)
+```
+
+Replacing text in a file (`find_replace`) is coloured the same way: the two patterns are highlighted with the lexer of the **target file**, and the lines the edit actually changed come back in colour underneath the result — so an edit ends with code on the screen, not just a sentence about code:
+
+```
+[FIND REPLACE] core/llm_client.py | case-sensitive: True
+find:
+old_name = 1
+replace:
+new_name = 1
+[OUTPUT]
+Successfully replaced 1 occurrence in core/llm_client.py (at lines 42).
+42| new_name = 1
 [TOOL DONE] (0.08s)
 ```
 
@@ -395,9 +454,7 @@ The permission prompt highlights the command it is asking about the same way:
 
 ```
 [PERMISSION] The AI wants to run:
-╭── bash ─────────────────
-│ cd /tmp
-╰────────────────────────
+  cd /tmp
   Reason: working-directory change via 'cd' requires explicit permission
   Allow all listed actions? [y/n]
 ```
@@ -407,7 +464,7 @@ Every other tool follows the same shape — `[TOOL_NAME]` collapsed, every one o
 Expanded shows **all** of a call, not a summary:
 
 - `write_file` shows the path, the mode, the affected line range **and the content being written**.
-- `find_replace` shows the path and the **complete** find and replace text.
+- `find_replace` shows the path, the **complete** find and replace text, and the changed lines.
 - `shell` shows the whole command and the timeout budget.
 - Every other tool shows all of its arguments, one per line — including the tools that have no obvious "main" argument (`delegate_subtask`, `create_calendar_event`, `share_drive_file`, …), which used to show nothing at all.
 

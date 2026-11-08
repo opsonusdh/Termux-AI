@@ -777,6 +777,31 @@ def render_code_block_lines(lines: Sequence[str], lang: str = "", term_width: in
     return _code_block_frame(list(lines), (lang or "").strip(), width)
 
 
+def render_tool_code(code: str, lang: str = "") -> List[str]:
+    """Highlight *code* for the tool viewer — the colour, but no frame.
+
+    The gutter frame (``╭── lang ──`` … ``╰──``) belongs to the *markdown*
+    renderer: there a fenced code block is a self-contained object, and the
+    frame tells the reader where it starts and ends.
+
+    In the tool viewer the code is part of the running transcript — a command
+    between ``[EXEC]`` and ``[OUTPUT]``, a file's source under
+    ``[READING FILE]`` — and a frame around every single one of them is
+    noise: it repeats on every call and it hides the indentation the
+    highlighter is trying to show.  So the tool viewer gets the colour and
+    not the box.
+
+    ``render_code_snippet`` / ``render_code_block_lines`` stay as they are:
+    they are the markdown path.
+    """
+    if code is None:
+        return []
+    text = str(code)
+    if not text.strip():
+        return []
+    return highlight_lines(text, lang)
+
+
 def render_table(raw_rows: List[List[str]], term_width: int, header_color: str = BOLD + CYAN, border_color: str = GRAY) -> str:
     """Render a markdown table cleanly in the terminal."""
     if not raw_rows:

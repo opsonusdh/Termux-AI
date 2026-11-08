@@ -3,7 +3,7 @@
 Three properties are pinned here:
 
 * there is exactly **one** place the version is written down
-  (``VERSION`` in ``core/__main__.py``), and it says 3.3.1;
+  (``VERSION`` in ``core/__main__.py``), and it says 3.4.0;
 * the startup banner shows that version, between the name and the
   status line — so the user can tell which build they are talking to;
 * the release heading in ``CHANGELOG.md`` agrees with the constant, so
@@ -37,7 +37,7 @@ def test_the_version_constant_lives_in_the_entry_point():
     """``VERSION`` is defined in core/__main__.py — the entry point."""
     from core import __main__ as entry
 
-    assert entry.VERSION == "3.3.1"
+    assert entry.VERSION == "3.4.0"
 
 
 def test_the_version_is_a_plain_dotted_string():
@@ -97,7 +97,7 @@ def test_the_banner_without_a_version_still_works():
 
 
 def test_the_banner_does_not_double_the_v():
-    """``v3.3.1`` and ``3.3.1`` both render as ``v3.3.1``."""
+    """``v3.4.0`` and ``3.4.0`` both render as ``v3.4.0``."""
     from core import __main__ as entry
     from core import ui
 
@@ -122,7 +122,7 @@ def test_importing_the_entry_point_starts_nothing():
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "3.3.1"
+    assert result.stdout.strip() == "3.4.0"
     # Nothing was printed by the import itself — no banner, no chat loop.
     assert "Terminal AI ready" not in result.stdout
 

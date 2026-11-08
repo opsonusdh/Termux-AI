@@ -46,6 +46,19 @@ Rules:
 - Use `config/api.keys.template` for examples and placeholders.
 - If a key must be verified, report only provider name, presence, JSON validity, and a short fingerprint.
 
+### What counts as confidential
+
+`core/confidential.py` decides this, and the permission gate acts on its verdict. A file is confidential when either signal fires:
+
+- **The name** — `api.keys`, `credentials.json`, `.env`, `id_rsa`, `secrets.yaml`, anything inside `.ssh/` or a directory called `keys/`. A file that calls itself *public* is not confidential.
+- **The content** — a private-key block, a provider token format, a JWT, an `Authorization: Bearer` header, a secret-shaped name bound to a real-looking value, or a file that is mostly high-entropy blobs.
+
+Templates are not confidential (`api.keys.template`, `.env.example`, `*.sample`), and neither are documentation examples (`--password=secret123` in a manual) or placeholders (`your-api-key-here`, `os.getenv(...)`, `AIza...`).
+
+The gate **asks** before reading a confidential file, and **refuses** in autonomous mode — there is nobody at the keyboard to answer, and a gate that waits for an answer that cannot come would hang a background worker. Uploads and shares go through the same gate: a credential must not leave the device unnoticed.
+
+If a read is refused, say what was refused and why. Do not try to reach the file by another route — that is the bypass the gate exists to prevent.
+
 ---
 
 ## 2. External Network Use
@@ -88,3 +101,5 @@ Protected files:
 - `.wwebjs_auth/`
 - `logs/chunks.jsonl`
 - `memories.txt`
+
+Plus every file the classifier recognises as confidential — see §1. The dedicated tools (`retrieve_memory`, `retrieve_chunk`, the Google token store) read those files without the gate, because the user asked for that capability; a raw `read_file` of the same file is gated.

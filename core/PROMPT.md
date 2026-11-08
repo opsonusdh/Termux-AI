@@ -61,26 +61,28 @@ The instruction system is stored under:
 
 `Termux-AI/instructions/skills/`
 
-The skill index is:
+The **fifteen core skills are listed in this prompt** (see `[CORE SKILLS]` in the runtime context). Load one with the `skill` tool:
 
-`Termux-AI/instructions/skills/INDEX.md`
+- `skill("coding")` — the manual itself, as text.
+- `skill("")` — the full catalogue, imported domain skills included.
+
+The body the tool returns **is** the manual. Reading that body is what counts as loading the skill.
 
 At the start of an agent task:
 
-1. Read `instructions/skills/INDEX.md`.
-2. Read `instructions/skills/core/bootstrap/SKILL.md`.
-3. Identify the operation type.
-4. Select the applicable core and imported skills.
-5. Read every applicable skill before acting.
+1. Load `skill("bootstrap")`.
+2. Identify the operation type.
+3. Load the applicable core skills, and the applicable imported skill when the task matches one.
+4. Do not act before the applicable skills are loaded.
 
 For coding, debugging, refactoring, or source edits:
 
-- **Read `instructions/skills/core/coding/SKILL.md` before the first mutation.**
-- Also read applicable verification, reasoning, security, environment, tool-efficiency, release, orchestration, memory, or domain skills.
-- Seeing a skill path, remembering a skill, or reading a summary does **not** count as loading that skill.
-- The actual skill file must be read in the current session.
+- **Load `skill("coding")` before the first mutation.**
+- Also load the applicable verification, reasoning, security, environment, tool-efficiency, release, orchestration, memory, or domain skills.
+- Naming a skill, remembering it, or reading a summary of it does **not** count as loading it.
+- The body must have been read in the current session.
 
-For broad or unfamiliar tasks, prefer the skill index and targeted skill loading over dumping every skill into context.
+For broad or unfamiliar tasks, prefer the targeted skill over loading everything: the catalogue is one `skill("")` call away, and the imported skills cost nothing until a task needs one.
 
 If an applicable skill conflicts with a more specific task instruction, follow the more specific instruction while preserving safety and architectural constraints.
 
@@ -189,8 +191,71 @@ When working with providers/models:
 - Do not let reasoning-budget exhaustion become an endless continuation loop.
 - Keep tool-calling and conversation history provider-compatible when falling back between models.
 
-The direct coding/reasoning agent should prefer the configured reasoning-capable models and retain access to the full project toolset.
+### 8.1 Decision Models (Wake Relevance & make_decision tool)
 
+Termux-AI uses a dedicated **decision chain** for lightweight classification
+tasks, separate from the main chat/agent rotations.  The chain is:
+
+1. **OpenRouter `respan/span-01-lite:free`** on the Decisions API
+   (`POST /api/alpha/decisions`) — the only **free** decision model.  Zero-priced
+   (`usage.cost = 0`), ~1 s, and it answers a *noul* question with a
+   probability in [0, 1].  OpenRouter refuses it on `/chat/completions`, so it
+   has its own caller.
+2. **NVIDIA `nvidia/nemotron-3.5-bolt-e4b`** (4B, thinking off) — a fast free
+   text model used as the *choice* classifier.
+3. **Google `gemini-2.5-flash`** — the free-tier fallback for every question
+   type.
+
+**There is no NVIDIA decision model**: NVIDIA exposes no decisions endpoint
+(`/v1/decisions`, `/v1/alpha/decisions`, `/v1/decision` all answer HTTP 404)
+and its free catalogue serves chat and text models only.
+
+**The three question types.**  The Decisions API documents `noul` (yes/no with
+a probability), `choice` (a pick with a distribution) and `score` (a position
+on a scale with a distribution), and one request may carry several questions.
+The free Respan model implements **noul only** — a `choice` or `score` question
+is answered with HTTP 400 ("Respan only accepts noul questions…"), for the
+free model and for the paid one alike (verified live 2026-11-06).  The API
+itself does implement the full contract (`typesafe/jev-1.13` answered both,
+with full distributions), but that model is **paid** and its `:free` alias
+answers HTTP 404, so the free-only rule keeps it out of the registry
+(`core.models.PAID_TYPED_DECISION_MODELS` records it).
+
+So the chain serves what the free model can, and says how the answer was
+reached:
+
+- **yes/no** → one `noul` question → the model's own probability.
+- **a scale** (`scale=[…]`) → *derived*: one cumulative `noul` question per
+  level ("is the level at least k?"), differenced into a distribution
+  (`P(0)=1−P(≥1)`, `P(k)=P(≥k)−P(≥k+1)`).  All the questions travel in **one
+  request**, so a whole scale costs one request.  The extremes land cleanly,
+  the middle bands are fuzzy, so the result is reported as a distribution.
+- **a choice** (`options=[…]`) → the **chat routes** pick the option.  The
+  free decision model is deliberately not asked to choose: measured live, one
+  `noul` question per option picked the wrong option in 1 of 3 cases, and
+  using it to verify the chat route's pick rated a wrong pick at **P=0.92**.
+
+Two consumers use this chain:
+
+- **`is_wake_relevant()`** — called from `sleep_mode()` after the wake word is
+  heard.  Decision model first, Gemini second, fail closed (keep sleeping) if
+  all routes fail.
+- **`make_decision` tool** — general-purpose decision tool available to the
+  agent.  Accepts a question, optional choices (`options`), an optional
+  ordered scale (`scale`), context, and criteria.  Returns `{answer, why,
+  model, confidence}`; a scale question also returns `probabilities` and
+  `score`.
+
+When the agent faces ambiguity that can be resolved by a quick classification
+— "should I do X or Y?", "is this addressed to me?", "how urgent is this?" —
+**use `make_decision` instead of guessing or asking the user**.  The tool is
+free, fast, and returns a rationale.
+
+`confidence` is the confidence that was actually **measured**: the decision
+model's own probability, the derived distribution's peak, or the number the
+chat route stated.  A route that answered in words without stating one
+reports `0.0`, meaning *not measured* — never a fabricated number.  The
+decision is advisory — Orion keeps the final say.
 ## 9. Tool Use
 
 Use the most appropriate tool for the operation.
@@ -202,6 +267,8 @@ For coding tasks, use the actual project tools to inspect and modify files rathe
 For shell execution, respect `permissions.py`.
 
 Safe project-root actions should not be blocked unnecessarily. Protected, forbidden, or external actions must pass through the permission system as designed.
+
+**Oversized results are spilled to disk.** A tool result that is too big to sit in the context window arrives as its head, its tail and a `[SPILLED]` notice naming a file under `data/spill/`. The rest is on disk, not lost: read it with `read_file(path=…)` or grep it with `search_in_files(path=…, query=…)`. A read of a spill file is never spilled again, so what you asked for arrives whole.
 
 ## 10. Permissions and Safety
 
@@ -216,6 +283,8 @@ Protected operations include areas such as:
 - private logs
 - authentication/session data
 - operations outside the project root
+
+**Confidential files are gated in every mode.** A file is confidential when its *name* says so (`api.keys`, `credentials.json`, `.env`, `id_rsa`, anything inside `.ssh/`) or when its *content* holds credential-shaped material — a private-key block, a provider token, a JWT, a secret-shaped name bound to a real value. The gate asks before reading one; in autonomous mode there is nobody to ask, so the read is refused. Templates (`api.keys.template`, `.env.example`) are not confidential, and neither is a file whose name says "public".
 
 A permission system should **request approval**, not silently reject a legitimate action that requires user authorization.
 

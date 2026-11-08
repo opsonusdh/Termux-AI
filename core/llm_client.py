@@ -17,10 +17,11 @@ from agent import state_manager
 from openai import OpenAI
 import httpx
 from core.renderer import (RED, YELLOW, RESET, GRAY, GREEN, BLUE, CYAN, MAG, DIM,
-                           highlight_code, highlight_lines, language_for_path,
-                           render_code_block_lines, render_code_snippet)
+                           highlight_code, language_for_path, render_tool_code)
 from core import tools as _tool_runtime
 from core import runtime_log
+from core import spill as _spill
+from core import tool_pipeline as _tool_pipeline
 from core.tools import *
 from core.plugin_manager import plugin_manager
 import context_manager as _cm
@@ -1070,6 +1071,10 @@ def _tool_header_lines(name: str, args: dict, expanded: bool) -> dict:
 
 # ── syntax-highlighted code snippets ─────────────────────────────────────────
 
+#: The header lines that introduce a block of code.  Everything that follows
+#: one of them is code, not prose, and is handed to the highlighter.
+_CODE_BLOCK_MARKERS = ("content:", "find:", "replace:")
+
 #: ``read_file`` returns its lines with a ``12| `` prefix.  The prefix is
 #: stripped before the code reaches the lexer — otherwise every line would
 #: start at column 0 and the indentation structure of the file would be lost —
@@ -1095,24 +1100,74 @@ def _highlight_numbered_code(text: str, lang: str) -> list[str]:
     return [prefix + line for prefix, line in zip(prefixes, highlighted)]
 
 
-def _tool_snippet(name: str, args: dict, header: dict) -> tuple[list[str], str, str]:
-    """Split a tool header into its meta lines and the code snippet it shows.
+def _tool_code_language(name: str, args: dict) -> str:
+    """The lexer a tool's code is highlighted with.
 
-    Returns ``(meta_lines, language, code)``.
+    * ``shell`` — always **bash**;
+    * ``write_file`` and ``find_replace`` — the lexer of the *target file's*
+      extension, because that is the language the code belongs to;
+    * every other tool — no code of its own.
+    """
+    if name == "shell":
+        return "bash"
+    if name in ("write_file", "find_replace"):
+        return language_for_path(str(args.get("path", "") or ""))
+    return ""
 
-    * ``shell`` shows the command it is about to run — always bash.
-    * ``write_file`` shows the content it is about to write — highlighted with
-      the lexer of the *target file's* extension.
-    * every other tool shows no code of its own.
+
+def _tool_code_blocks(name: str, args: dict, header: dict) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """Split a tool header into its prose and the code blocks it carries.
+
+    Returns ``(meta_lines, blocks)``.  A block is ``(label, lines)``: the
+    label is the ``content:`` / ``find:`` / ``replace:`` line that introduces
+    it (empty when the code follows the tag directly, as it does for a shell
+    command), and the lines are the code itself.
+
+    The header stays the single source of truth for *what* is shown — this
+    only decides which of its lines are code, and therefore which ones the
+    highlighter gets to colour.
     """
     lines = list(header.get("lines") or [])
-    if name == "shell" and len(lines) > 1:
-        return lines[:1], "bash", "\n".join(lines[1:])
-    if name == "write_file" and "content:" in lines:
-        idx = lines.index("content:")
-        path = str(args.get("path", "") or "")
-        return lines[:idx + 1], language_for_path(path), "\n".join(lines[idx + 1:])
-    return lines, "", ""
+
+    if name == "shell":
+        # The command follows the tag directly — there is no marker line.
+        return lines[:1], [("", lines[1:])]
+
+    if name in ("write_file", "find_replace"):
+        meta: list[str] = []
+        blocks: list[tuple[str, list[str]]] = []
+        current: list[str] | None = None
+        label = ""
+        for index, line in enumerate(lines):
+            if index == 0:
+                meta.append(line)
+                continue
+            if line.strip() in _CODE_BLOCK_MARKERS:
+                label = line
+                current = []
+                blocks.append((label, current))
+                continue
+            if current is None:
+                meta.append(line)
+            else:
+                current.append(line)
+        return meta, blocks
+
+    # Every other tool shows prose only.
+    return lines, []
+
+
+def _tool_snippet(name: str, args: dict, header: dict) -> tuple[list[str], str, str]:
+    """The meta lines of a tool header, the language of its code and the code.
+
+    Returns ``(meta_lines, language, code)`` — the *first* code block, if the
+    tool has one.  The tool viewer itself works on blocks (a find/replace
+    call carries two), but most tools carry exactly one.
+    """
+    meta, blocks = _tool_code_blocks(name, args, header)
+    lang = _tool_code_language(name, args)
+    _label, lines = blocks[0] if blocks else ("", [])
+    return meta, lang, "\n".join(lines)
 
 
 def _tool_display_parts(name: str, args: dict, header: dict, expanded: bool) -> list[tuple[str, str]]:
@@ -1122,17 +1177,25 @@ def _tool_display_parts(name: str, args: dict, header: dict, expanded: bool) -> 
     ``"raw"`` for code that carries its own colours.  A highlighted snippet is
     never wrapped in the dim tool colour — the dim attribute would dull the
     very colours the highlighter produced.
+
+    The code is coloured but *not* framed: the gutter box (``╭── lang ──``)
+    belongs to the markdown renderer, and inside the running transcript it
+    would repeat itself on every single call.  See
+    ``renderer.render_tool_code``.
     """
-    meta, lang, code = _tool_snippet(name, args, header)
+    meta, blocks = _tool_code_blocks(name, args, header)
+    lang = _tool_code_language(name, args)
+
     parts: list[tuple[str, str]] = []
-    for i, line in enumerate(meta):
-        parts.append((line, "tag" if i == 0 else "body"))
-    if code.strip():
-        if expanded:
-            snippet = render_code_snippet(code, lang)
-        else:
-            snippet = highlight_lines(code, lang)
-        parts.extend((line, "raw") for line in snippet)
+    for index, line in enumerate(meta):
+        parts.append((line, "tag" if index == 0 else "body"))
+    for label, code_lines in blocks:
+        if label:
+            parts.append((label, "body"))
+        code = "\n".join(code_lines)
+        if not code.strip():
+            continue
+        parts.extend((line, "raw") for line in render_tool_code(code, lang))
     return parts
 
 
@@ -1147,20 +1210,91 @@ def _print_tool_display(name: str, args: dict, header: dict, expanded: bool, col
             print(text)
 
 
+#: The lines a replacement touched, as the tool reports them:
+#: ``Successfully replaced 2 occurrences in core/demo.py (at lines 12, 15).``
+_CHANGED_LINES_RE = re.compile(r"\(at lines? ([^)]*)\)")
+
+
+def _find_replace_changed_lines(args: dict, output: str) -> list[str]:
+    """The lines a ``find_replace`` call changed, in the file's own colours.
+
+    The tool reports the lines it touched; they are read back from the file
+    and highlighted with the lexer of *that file*, so the result of an edit
+    is code the user can actually read — not a sentence about code.
+
+    Anything that goes wrong here (the file moved, the report carries no
+    line numbers, the file cannot be read) simply means no preview: the
+    status line printed above it is still the truth.
+    """
+    match = _CHANGED_LINES_RE.search(output or "")
+    if not match:
+        return []
+
+    ranges: list[tuple[int, int]] = []
+    for token in match.group(1).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        start_text, _, end_text = token.partition("-")
+        try:
+            start = int(start_text)
+            end = int(end_text) if end_text else start
+        except ValueError:
+            continue
+        if start < 1 or end < start:
+            continue
+        ranges.append((start, end))
+    if not ranges:
+        return []
+
+    path = str(args.get("path", "") or "")
+    if not path:
+        return []
+    resolved = os.path.expanduser(path)
+    if not os.path.isabs(resolved):
+        resolved = os.path.join(paths.ROOT, resolved)
+    try:
+        with open(resolved, "r", encoding="utf-8", errors="replace") as handle:
+            file_lines = handle.readlines()
+    except OSError:
+        return []
+
+    numbered: list[str] = []
+    for start, end in ranges:
+        for number in range(start, min(end, len(file_lines)) + 1):
+            text = file_lines[number - 1].rstrip("\r\n")
+            numbered.append(f"{number}| {text}")
+    if not numbered:
+        return []
+
+    lang = language_for_path(path)
+    return _highlight_numbered_code("\n".join(numbered), lang)
+
+
 def _print_tool_output(tool_name: str, args: dict, output: str, body_color: str) -> None:
     """Print what a tool returned.
 
     ``read_file`` hands back the *source* of a file, so it is highlighted with
-    the lexer of that file's extension and drawn in the same gutter box the
-    markdown renderer uses for code blocks.  Everything else stays plain text
-    — a command's stdout is not necessarily code, and colouring it as bash
-    would be a guess.
+    the lexer of that file's extension.  ``find_replace`` hands back a status
+    line, and the lines it changed are shown in colour underneath it.
+    Everything else stays plain text — a command's stdout is not necessarily
+    code, and colouring it as bash would be a guess.
+
+    The colour comes without the gutter frame: the frame belongs to the
+    markdown renderer, not to the running transcript.
     """
     if tool_name == "read_file" and output and not output.startswith("[ERROR]"):
         lang = language_for_path(str(args.get("path", "") or ""))
-        for line in render_code_block_lines(_highlight_numbered_code(output, lang), lang):
+        for line in _highlight_numbered_code(output, lang):
             print(line)
         return
+
+    if tool_name == "find_replace" and output and not output.startswith("[ERROR]"):
+        print(f"{body_color}{output}{RESET}")
+        for line in _find_replace_changed_lines(args, output):
+            print(line)
+        return
+
     print(f"{body_color}{output}{RESET}")
 
 
@@ -1282,6 +1416,9 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 query = g("query", ""),
                                 top_k = int(g("top_k", 5)),
                            ),
+        "skill":            lambda: skill(
+                                name = g("name", ""),
+                           ),
         "read_file":       lambda: read_file(
                                 path          = g("path", ""),
                                 segment_start = g("segment_start"),
@@ -1329,6 +1466,13 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
                                 search     = g("search", ""),
                            ),
         "sleep_mode":      lambda: sleep_mode(),
+        "make_decision":   lambda: make_decision(
+                                question    = g("question", ""),
+                                options     = g("options", None),
+                                scale       = g("scale", None),
+                                context     = g("context", ""),
+                                criteria    = g("criteria", ""),
+                            ),
         "intermediate_print": lambda: intermediate_print(
                                 text  = g("text", ""),
                                 voice = voice,
@@ -2168,6 +2312,10 @@ def _ask_with_slots(
                     for tc in msg_dict["tool_calls"]:
                         tool_name = tc["function"].get("name", "unknown")
                         raw_args = tc["function"].get("arguments", "{}")
+                        try:
+                            call_args = json.loads(raw_args or "{}")
+                        except Exception:
+                            call_args = {}
                         tool_result = _dispatch_tool(tc, voice=voice)
 
                         # Drain any images the tool produced (a browser
@@ -2180,16 +2328,17 @@ def _ask_with_slots(
                         turn_attachments.extend(_tool_runtime.pop_image_attachments())
 
                         # Stable signature: identical tool + arguments + error.
-                        failure_markers = (
-                            "[ERROR]", "[TOOL ERROR]", "[PERMISSION DENIED]",
-                            "[TIMEOUT]"
-                        )
-                        is_failure = (
-                            isinstance(tool_result, str)
-                            and tool_result.startswith(failure_markers)
-                        )
+                        # The error check lives in core/tool_pipeline.py — one
+                        # tested helper instead of inline string sniffing —
+                        # and the signature is the canonical JSON of the
+                        # arguments, so {"a":1,"b":2} and {"b":2,"a":1} are
+                        # recognised as the same call.
+                        error_kind = _tool_pipeline.looks_like_error(tool_result)
+                        is_failure = error_kind is not None
                         signature = (
-                            f"{tool_name}:{raw_args}"
+                            _tool_pipeline.normalize_call_signature(
+                                tool_name, call_args
+                            )
                             if is_failure else ""
                         )
 
@@ -2209,6 +2358,16 @@ def _ask_with_slots(
                                     "failure detected. The current turn will stop "
                                     "after this result to prevent an infinite loop."
                                 )
+
+                        # An oversized result is written to disk instead of
+                        # being pushed into the context window: the model
+                        # receives the head, the tail and a path it can read
+                        # on demand.  A read of a spill file is exempt, so
+                        # the content the model asked for is never replaced
+                        # by another pointer.
+                        tool_result = _spill.spill_result(
+                            tool_name, tool_result, call_args
+                        )
 
                         messages.append({
                             "role": "tool",
@@ -2613,6 +2772,10 @@ def ask_ai(
         (memory_block + "\n\n" + SYSTEM_PROMPT)
         if memory_block else SYSTEM_PROMPT
     )
+    # The runtime context (permission state + the core skill catalogue) is
+    # rebuilt for every request, so a mode toggle takes effect on the next
+    # turn instead of the next restart.
+    system_content = system_content + "\n\n" + runtime_context_block()
     return _ask_with_slots(
         prompt, history, voice, system_content, MODEL_SLOTS
     )
@@ -2628,6 +2791,7 @@ def ask_agent(
     system_content = SYSTEM_PROMPT+"\n---\n"+_AGENT_SYSTEM_PROMPT
     if memory_block:
         system_content = memory_block + "\n\n" + system_content
+    system_content = system_content + "\n\n" + runtime_context_block()
     return _ask_with_slots(
         prompt, history, voice, system_content, AGENT_MODEL_SLOTS
     )

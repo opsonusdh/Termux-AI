@@ -27,8 +27,9 @@ from typing import Iterable, List, Tuple
 import paths
 from core import shell_parse
 from core import app_config
+from core import confidential
 from core import notifier
-from core.renderer import render_code_snippet
+from core.renderer import render_tool_code
 
 # Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -103,6 +104,31 @@ def set_autonomous(enabled: bool) -> bool:
         return True
     except Exception:
         return False
+
+
+def permission_snapshot() -> str:
+    """One line describing the gate, for the model's prompt.
+
+    The model used to learn what it was allowed to do by hitting the gate:
+    every protected path, every command outside the workspace and every
+    credential read cost a turn and produced a refusal.  One line in the
+    prompt says the same thing for free — and because it is rebuilt for
+    every request, a mode toggle takes effect on the next turn.
+    """
+    if is_autonomous():
+        return (
+            "[PERMISSIONS] Autonomous mode is ON — the permission gate is "
+            "bypassed: shell commands and file writes run without asking. "
+            "Confidential files (credentials, keys, tokens, personal memory) "
+            "stay gated in every mode: they are refused, not read."
+        )
+    return (
+        "[PERMISSIONS] Autonomous mode is OFF — the permission gate is "
+        "active: shell commands outside the workspace, writes to core/ or "
+        "Termux-STT/, confidential files (credentials, keys, tokens, personal "
+        "memory) and other side effects ask the user first. manage_plugin is "
+        "always available."
+    )
 
 
 def is_voice_available():
@@ -338,6 +364,58 @@ def _is_google_secret_file(path: str) -> bool:
     )
 
 
+#: A token that looks like a file path rather than a word or a flag.
+_PATH_LIKE_RE = re.compile(r"^[^\s]*[\\/][^\s]*$|^\S*\.[A-Za-z0-9]{1,8}$")
+
+
+def _confidential_finding(path: str, content: bool = True) -> confidential.Finding:
+    """The classifier's verdict on *path*.
+
+    Relative paths are resolved against the project root, because that is
+    the working directory every shell command runs in.
+    """
+    return confidential.classify(path, content=content, base=AI_ROOT)
+
+
+def _looks_like_path(token: str) -> bool:
+    """True when *token* names a file rather than a word or an option."""
+    text = str(token or "").strip().strip("'\"")
+    if not text or text.startswith("-"):
+        return False
+    return bool(_PATH_LIKE_RE.match(text))
+
+
+def _confidential_references(command: str) -> List[Tuple[str, str]]:
+    """Every path in *command* that points at a confidential file.
+
+    Returns ``(token, reason)`` pairs.  The reason never carries the
+    matched value — only a label saying what kind of secret it is.
+
+    A path the command *writes* to is judged by its name alone: what was
+    in the file before is not leaked by overwriting it, and a content check
+    there would make every scratch-file write ask a question.
+    """
+    found: List[Tuple[str, str]] = []
+    seen = set()
+    for segment in _split_shell_chain(command):
+        tokens = _safe_split(segment)
+        if not tokens:
+            continue
+        written = set(
+            _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
+        )
+        for token in tokens:
+            if not _looks_like_path(token):
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            finding = _confidential_finding(token, content=token not in written)
+            if finding.confidential:
+                found.append((token, finding.reason))
+    return found
+
+
 def _segment_references_google_secret(segment: str) -> bool:
     """True if a command mentions a Google credential file by name."""
     if _GOOGLE_SECRETS_REF.search(segment or ""):
@@ -366,7 +444,15 @@ def _is_owned_path(path: str) -> bool:
     return False
 
 
-def _path_verdict(path: str) -> Tuple[bool, str]:
+def _path_verdict(path: str, content: bool = True) -> Tuple[bool, str]:
+    """Whether *path* needs permission, and why.
+
+    *content* decides whether the file's **contents** are inspected as well
+    as its name.  A write target is judged by its name only: overwriting a
+    scratch file that happens to hold an old key is not a secret leak, and
+    a content check there would make ordinary scratch writes ask questions
+    for no reason.  A read is judged by both.
+    """
     if _is_special_sink(path):
         return False, "OK"
 
@@ -383,6 +469,17 @@ def _path_verdict(path: str) -> Tuple[bool, str]:
         rel = os.path.relpath(_expand_path(path), AI_ROOT)
         return True, (
             f"path '{rel}' holds Google OAuth credentials; "
+            f"explicit permission required in all modes"
+        )
+
+    # Any other confidential file — a credential the gate has never heard
+    # of, judged by its name or by what is inside it.  Writing over one of
+    # these is as destructive as reading one.
+    finding = _confidential_finding(path, content=content)
+    if finding.confidential:
+        rel = os.path.relpath(_expand_path(path), AI_ROOT)
+        return True, (
+            f"path '{rel}' is confidential — {finding.reason}; "
             f"explicit permission required in all modes"
         )
 
@@ -625,7 +722,9 @@ def _target_directory_arg(tokens: List[str]) -> str | None:
 
 def _check_write_targets(cmd: str, targets: List[str]) -> Tuple[bool, str]:
     for t in targets:
-        needs, reason = _path_verdict(t)
+        # A write target is judged by its name, not by what is inside it:
+        # overwriting a file is not a way to leak its contents.
+        needs, reason = _path_verdict(t, content=False)
         if needs:
             return True, f"'{cmd}': {reason}"
     return False, "OK"
@@ -795,7 +894,25 @@ def _tokens_needs_permission(tokens: List[str], raw: str) -> Tuple[bool, str]:
     if cmd in READ_ONLY_COMMANDS:
         write_targets = _extract_write_targets(tokens) + _extract_output_flag_targets(tokens)
         if write_targets:
-            return _check_write_targets(cmd, write_targets)
+            needs, reason = _check_write_targets(cmd, write_targets)
+            if needs:
+                return True, reason
+        # A read-only command is still a read.  ``cat ~/.ssh/id_rsa`` and
+        # ``head notes.txt`` must not walk past the gate just because the
+        # command itself never changes anything.
+        for token in tokens[1:]:
+            if not _looks_like_path(token):
+                continue
+            if token in write_targets:
+                # The path is written to, not read from: what was in it
+                # before is not leaked by overwriting it.
+                continue
+            finding = _confidential_finding(token)
+            if finding.confidential:
+                return True, (
+                    f"'{cmd}' reads '{token}', which is confidential — "
+                    f"{finding.reason}"
+                )
         return False, "OK"
 
     if cmd in PACKAGE_MANAGERS:
@@ -828,15 +945,21 @@ def _tokens_needs_permission(tokens: List[str], raw: str) -> Tuple[bool, str]:
 def command_needs_permission(cmd: str) -> bool:
     """Return True if any segment of *cmd* requires explicit permission.
 
-    In autonomous mode everything is auto-approved **except** references to the
-    api.keys secrets file, which always requires explicit permission regardless
-    of mode.
+    In autonomous mode everything is auto-approved **except** references to
+    confidential files — the api.keys secrets file, the Google credential
+    files, and any other file the classifier recognises as holding a
+    credential.  Those always require explicit permission regardless of
+    mode.
     """
     # The api.keys reference is looked for in the *whole* command, not in the
     # individual segments: it can sit somewhere that is not a command of its
     # own — a ``for`` word list, a loop header, an assignment — while the
     # command that finally reads the file only mentions a variable.
     if _segment_references_api_keys(cmd) or _segment_references_google_secret(cmd):
+        return True
+
+    # A confidential file named in the command — by path or by name.
+    if _confidential_references(cmd):
         return True
 
     if is_autonomous():
@@ -851,65 +974,23 @@ def command_needs_permission(cmd: str) -> bool:
     )
 
 
-def validate_command(cmd: str) -> Tuple[bool, str]:
-    """Validate a complete shell command and obtain explicit approval when needed.
+def _ask_permission(requests: List[Tuple[str, str]]) -> Tuple[bool, str]:
+    """Show what the AI wants to do and wait for the user's answer.
 
-    In autonomous mode everything is auto-approved **except** references to the
-    api.keys secrets file, which always requires explicit permission regardless
-    of mode.
+    *requests* is a list of ``(what, why)`` pairs.  The answer applies to all
+    of them, exactly like the shell gate it was extracted from.
     """
-    segments = _split_shell_chain(cmd)
-
-    # The api.keys secrets file is gated in every mode.  The reference is
-    # looked for in the *whole* command, because it can sit somewhere that is
-    # not a command of its own — a ``for`` word list, a loop header, an
-    # assignment — while the command that finally reads the file only
-    # mentions a variable.
-    references_api_keys = _segment_references_api_keys(cmd)
-    references_google_secrets = _segment_references_google_secret(cmd)
-    references_secrets = references_api_keys or references_google_secrets
-
-    # In autonomous mode, auto-approve all segments EXCEPT those that
-    # reference a credential file.  Those are gated in every mode.
-    if is_autonomous() and not references_secrets:
-        return True, "Autonomous mode active (permission gate bypassed)"
-
-    requests: List[Tuple[str, str]] = []
-
-    if references_api_keys:
-        requests.append((cmd, (
-            "command references the api.keys secrets file; "
-            "explicit permission required in all modes"
-        )))
-    if references_google_secrets and not references_api_keys:
-        requests.append((cmd, (
-            "command references a Google OAuth credential file; "
-            "explicit permission required in all modes"
-        )))
-
-    for segment in segments:
-        if references_secrets and (
-            _segment_references_api_keys(segment)
-            or _segment_references_google_secret(segment)
-        ):
-            # Already reported above, as the whole command.
-            continue
-        needs, reason = _segment_needs_permission(segment)
-        if needs:
-            requests.append((segment, reason))
-
-    if not requests:
-        return True, "OK"
-
     print("\n[PERMISSION] The AI wants to run:")
     for segment, reason in requests:
-        # The command is highlighted as bash and drawn in the same gutter box
-        # the markdown renderer uses for code blocks, so what is about to run
-        # reads like the code it is — not like a wall of plain text.
-        snippet = render_code_snippet(segment, "bash")
+        # The command is highlighted as bash, so what is about to run reads
+        # like the code it is — not like a wall of plain text.  It is *not*
+        # drawn in the markdown renderer's gutter box: that frame belongs to
+        # a fenced code block, and here it would only put a box around every
+        # single line the gate asks about.
+        snippet = render_tool_code(segment, "bash")
         if snippet:
             for line in snippet:
-                print(line)
+                print(f"  {line}")
         else:
             print(f"  {segment}")
         print(f"  Reason: {reason}")
@@ -953,17 +1034,116 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
 
         print("  Please answer 'y' or 'n'.")
 
+
+def validate_command(cmd: str) -> Tuple[bool, str]:
+    """Validate a complete shell command and obtain explicit approval when needed.
+
+    In autonomous mode everything is auto-approved **except** references to
+    confidential files, which are refused outright: there is nobody at the
+    keyboard to answer a question about a secret, and a gate that waits for
+    an answer that cannot come would hang a background worker.
+    """
+    segments = _split_shell_chain(cmd)
+
+    # The api.keys secrets file is gated in every mode.  The reference is
+    # looked for in the *whole* command, because it can sit somewhere that is
+    # not a command of its own — a ``for`` word list, a loop header, an
+    # assignment — while the command that finally reads the file only
+    # mentions a variable.
+    references_api_keys = _segment_references_api_keys(cmd)
+    references_google_secrets = _segment_references_google_secret(cmd)
+    references_secrets = references_api_keys or references_google_secrets
+
+    # Every path in the command that points at a confidential file.
+    confidential = _confidential_references(cmd)
+
+    if is_autonomous():
+        if not references_secrets and not confidential:
+            return True, "Autonomous mode active (permission gate bypassed)"
+
+        # Refuse rather than ask.  Asking in autonomous mode would either
+        # block a background worker on stdin or silently consume the user's
+        # keystrokes; refusing is the same answer without the trap.
+        detail = "; ".join(
+            f"{token} ({reason})" for token, reason in confidential
+        )
+        if not detail:
+            detail = "the command references a credential file"
+        return False, (
+            f"blocked in autonomous mode — {detail}. Confidential files stay "
+            f"gated in every mode; switch the permission gate back on to "
+            f"approve this by hand."
+        )
+
+    requests: List[Tuple[str, str]] = []
+
+    if references_api_keys:
+        requests.append((cmd, (
+            "command references the api.keys secrets file; "
+            "explicit permission required in all modes"
+        )))
+    if references_google_secrets and not references_api_keys:
+        requests.append((cmd, (
+            "command references a Google OAuth credential file; "
+            "explicit permission required in all modes"
+        )))
+
+    for segment in segments:
+        if references_secrets and (
+            _segment_references_api_keys(segment)
+            or _segment_references_google_secret(segment)
+        ):
+            # Already reported above, as the whole command.
+            continue
+        needs, reason = _segment_needs_permission(segment)
+        if needs:
+            requests.append((segment, reason))
+
+    for token, reason in confidential:
+        requests.append((token, f"'{token}' is confidential — {reason}"))
+
+    if not requests:
+        return True, "OK"
+
+    return _ask_permission(requests)
+
+
 def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
     """Request permission for a direct file-system operation (read/write/find_replace).
 
     Used by ``tools.py`` for file operations that bypass the shell.  Returns
     ``(approved, reason)`` — when *approved* is ``True`` the caller may proceed.
 
-    The api.keys secrets file is always gated regardless of autonomous mode.
+    A confidential file — a credential, a token, personal memory — is asked
+    about directly, whatever the mode: the user is told what the file is and
+    why it is sensitive, and decides.  In autonomous mode there is nobody to
+    answer, so the read is refused.
+
     All other paths defer to the existing ``validate_command`` logic so that
     nothing is *automatically* rejected — the user is always asked first.
     """
     p = _expand_path(path)
+    rel = os.path.relpath(p, AI_ROOT)
+
+    # A confidential file is a question about a secret.  It is asked here,
+    # directly, because the shell-shaped command below cannot say *why* the
+    # file is sensitive.  The *contents* only matter for a read: writing
+    # over a file does not leak what was in it.
+    finding = _confidential_finding(path, content=(operation == "read"))
+    if finding.confidential:
+        if is_autonomous():
+            return False, (
+                f"[PERMISSION DENIED] '{rel}' is confidential — "
+                f"{finding.reason}. Confidential files stay gated in every "
+                f"mode; switch the permission gate back on to read it."
+            )
+        approved, reason = _ask_permission([(
+            f"{operation} {rel}",
+            f"'{rel}' is confidential — {finding.reason}",
+        )])
+        if not approved:
+            return False, f"[PERMISSION DENIED] '{rel}': {reason}"
+        return True, "OK"
 
     # Build a representative shell command so the existing permission logic
     # (which knows about api.keys, protected dirs, outside-root, etc.) is
@@ -979,7 +1159,6 @@ def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
 
     approved, reason = validate_command(cmd)
     if not approved:
-        rel = os.path.relpath(p, AI_ROOT)
         return False, f"[PERMISSION DENIED] '{rel}': {reason}"
     return True, "OK"
 

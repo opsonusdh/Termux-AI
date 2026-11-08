@@ -276,7 +276,7 @@ def banner(name: str, subtitle: str = "", tagline: str = "",
     subtitle, so the header reads:
 
         ▌ Termux-AI
-          v3.3.1
+          v3.4.0
           Terminal AI ready.
     """
     lines = [f"{CYAN}{BOLD}▌{RESET} {BOLD}{name}{RESET}"]

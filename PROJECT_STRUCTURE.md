@@ -36,8 +36,12 @@ Termux-AI/
 │   ├── input_handler.py        ← Terminal input reading and slash-command parsing
 │   ├── renderer.py             ← Markdown → terminal, TTS render helpers, ANSI colors
 │   ├── permissions.py          ← Command safety validation (validate_command)
+│   ├── confidential.py         ← Name+content classifier for secret-holding files
 │   ├── shell_parse.py          ← Structural shell parser (AST-level command splitting)
 │   ├── shell_runner.py         ← Shell execution with per-stage and total timeouts
+│   ├── skill_registry.py       ← Skill catalogue + the skill(name) tool
+│   ├── spill.py                ← Oversized tool results → data/spill/, head+tail inline
+│   ├── tool_pipeline.py        ← Shared tool-call vocabulary (error kinds, call signature)
 │   ├── session_memory/         ← Session save/resume artifacts
 │   │   ├── README.md
 │   │   ├── integration.py
@@ -108,6 +112,7 @@ Termux-AI/
 │   ├── google_pending_auth.json← In-flight PKCE verifier              (gitignored)
 │   ├── google_tokens/          ← Per-service OAuth access+refresh tokens (gitignored)
 │   ├── sessions/               ← Saved session artifacts
+│   ├── spill/                  ← Oversized tool results written to disk (gitignored)
 │   ├── validator_schema.json   ← JSON schema for execution result validation
 │   └── cli_history             ← Terminal prompt command history       (gitignored)
 │

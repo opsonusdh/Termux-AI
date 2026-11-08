@@ -39,6 +39,12 @@ GOOGLE_TOKENS_DIR     = os.path.join(DATA_DIR,   "google_tokens")
 # code can be pasted in later, from another device, if the browser handoff
 # did not happen on this machine.
 GOOGLE_PENDING_FILE   = os.path.join(DATA_DIR,   "google_pending_auth.json")
+# Oversized tool results are written here instead of being pushed into the
+# model's context.  A tool that returns 50 KB of web page does not have to
+# spend 50 KB of context window: the head, the tail and a path are enough,
+# and the rest stays on disk where read_file / search_in_files can reach it.
+# Directory mode 0700, files 0600 — the same posture as google_tokens/.
+SPILL_DIR             = os.path.join(DATA_DIR,   "spill")
 CAPABILITY_REGISTRY   = os.path.join(CONFIG_DIR, "capability_registry.json")
 MEMORY_FILE           = os.path.join(ROOT,       "memories.txt")
 INDEXED_MEMORY_FILE   = os.path.join(ROOT,       "indexed_memory.txt")

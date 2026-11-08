@@ -50,7 +50,9 @@ if [ ! -f "$ROOT_DIR/config/config.json" ]; then
   "use_groq": false,
   "show_details": false,
   "autonomous": false,
-  "notify": true
+  "notify": true,
+  "spill_trigger_tokens": 4000,
+  "spill_enabled": true
 }
 CFG
 fi

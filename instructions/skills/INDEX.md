@@ -30,44 +30,37 @@ A skill is active only after its current `SKILL.md` has been read with the file 
 
 ## Hard execution gate
 
-For a source-changing task, do not call the first mutating tool until the required core `SKILL.md` files have been read in the current session. After any change, read `core/verification` and perform the required checks.
+For a source-changing task, do not call the first mutating tool until the required core skills have been loaded in the current session — `skill("coding")` returns the manual itself, and reading the `SKILL.md` file counts too. After any change, load `core/verification` and perform the required checks.
 
 ## Imported domain skills
 
-The 32 supplied skills below are preserved as imported domain modules. Their useful procedures are retained, but repository compatibility is bound by `core/capabilities`, safety by `core/security_and_privacy`, and execution/verification by the core skills.
+The imported skills are domain modules, loaded on demand through the `skill`
+tool. The prompt lists only the **fifteen core skills**, because forty-seven
+descriptions in every request is a price nobody should pay for a catalogue that
+is mostly irrelevant.
+
+**Nine of the original thirty-two stay in the registry** — the document formats,
+the design guidance, the writing workflows and the skill-authoring manual. The
+other twenty-three described procedures this runtime cannot carry out: p5.js
+art, claude.ai artifacts, Anthropic brand work, expense reimbursements for
+employers this assistant has never heard of, files that arrive at `/mnt/uploads`.
+They are no longer advertised and cannot be called by accident.
+
+**Their files stay on disk** — nothing was deleted. A skill that becomes
+relevant again only has to be added back to `REGISTERED_IMPORTED_SKILLS` in
+`core/skill_registry.py`. Repository compatibility is bound by
+`core/capabilities`, safety by `core/security_and_privacy`, and
+execution/verification by the core skills.
 
 
-- `algorithmic-art` → `skills/imported/algorithmic-art/SKILL.md` — domain; use when trigger matches.
-- `benepass-reimbursement` → `skills/imported/benepass-reimbursement/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `brand-guidelines` → `skills/imported/brand-guidelines/SKILL.md` — domain; use when trigger matches.
-- `call-to-book` → `skills/imported/call-to-book/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `cancel-unsubscribe` → `skills/imported/cancel-unsubscribe/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `canvas-design` → `skills/imported/canvas-design/SKILL.md` — domain; use when trigger matches.
 - `doc-coauthoring` → `skills/imported/doc-coauthoring/SKILL.md` — document/artifact; use when trigger matches.
 - `docx` → `skills/imported/docx/SKILL.md` — document/artifact; use when trigger matches.
-- `event-planning` → `skills/imported/event-planning/SKILL.md` — domain; use when trigger matches.
-- `file-expenses` → `skills/imported/file-expenses/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `file-form` → `skills/imported/file-form/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `file-reading` → `skills/imported/file-reading/SKILL.md` — document/artifact; use when trigger matches.
-- `financial-calculator` → `skills/imported/financial-calculator/SKILL.md` — domain; use when trigger matches.
 - `frontend-design` → `skills/imported/frontend-design/SKILL.md` — domain; use when trigger matches.
-- `grocery-shopping` → `skills/imported/grocery-shopping/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `hire-help` → `skills/imported/hire-help/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
 - `internal-comms` → `skills/imported/internal-comms/SKILL.md` — domain; use when trigger matches.
-- `learn` → `skills/imported/learn/SKILL.md` — domain; use when trigger matches.
-- `mcp-builder` → `skills/imported/mcp-builder/SKILL.md` — domain; use when trigger matches.
-- `meal-delivery` → `skills/imported/meal-delivery/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
 - `pdf` → `skills/imported/pdf/SKILL.md` — document/artifact; use when trigger matches.
 - `pdf-reading` → `skills/imported/pdf-reading/SKILL.md` — document/artifact; use when trigger matches.
 - `pptx` → `skills/imported/pptx/SKILL.md` — document/artifact; use when trigger matches.
-- `prescription-refill` → `skills/imported/prescription-refill/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `product-self-knowledge` → `skills/imported/product-self-knowledge/SKILL.md` — domain; use when trigger matches.
-- `return-refund` → `skills/imported/return-refund/SKILL.md` — external workflow; workflow-only unless matching runtime capability exists.
-- `setup-writing-style` → `skills/imported/setup-writing-style/SKILL.md` — domain; use when trigger matches.
 - `skill-creator` → `skills/imported/skill-creator/SKILL.md` — domain; use when trigger matches.
-- `slack-gif-creator` → `skills/imported/slack-gif-creator/SKILL.md` — domain; use when trigger matches.
-- `theme-factory` → `skills/imported/theme-factory/SKILL.md` — domain; use when trigger matches.
-- `web-artifacts-builder` → `skills/imported/web-artifacts-builder/SKILL.md` — document/artifact; use when trigger matches.
 - `xlsx` → `skills/imported/xlsx/SKILL.md` — document/artifact; use when trigger matches.
 
 ## Selection rules

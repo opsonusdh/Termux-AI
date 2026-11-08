@@ -45,6 +45,7 @@ Examples include:
 - command validation bypasses
 - unauthorized file writes
 - leaks involving `api.keys`, the OAuth client secret or a refresh token
+- a confidential file being read, uploaded or shared without the gate
 - a WhatsApp pairing QR or session token reaching the terminal or a log
 - unwanted access to `core/`
 - broken permission boundaries
@@ -60,6 +61,7 @@ These paths deserve extra care:
 - `data/google_tokens/` — long-lived refresh tokens for Gmail, Calendar and Drive
 - `data/google_pending_auth.json` — a live PKCE verifier
 - `data/cli_history` — the prompt history; a pasted credential ends up here
+- `data/spill/` — oversized tool results, which may quote a file verbatim
 - `core/`
 - `Termux-STT/`
 - `memories.txt`
@@ -70,6 +72,13 @@ These paths deserve extra care:
 The credential files are git-ignored, and they are protected in **every** permission
 mode — including autonomous mode. A WhatsApp pairing code is a live secret too: it is
 captured and drawn only when the user asks for it, never printed on its own.
+
+Beyond these known paths, the permission gate recognises a confidential file by
+**its name or its content** — a `.env`, an `id_rsa`, a `credentials.json`, a file
+that happens to hold a provider token under an innocent name. The gate asks before
+reading one, and refuses outright in autonomous mode (nobody is there to answer).
+Uploads and shares go through the same gate, and `search_in_files` / `index_files`
+skip confidential files rather than grepping them.
 
 Do not commit secrets, tokens, or personal data into the repository. Git history remembers everything like a vindictive archivist.
 

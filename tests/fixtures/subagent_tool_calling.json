@@ -205,7 +205,8 @@
       "key": "...h1bS",
       "latency_s": 2.3,
       "status": "ok",
-      "tools_accepted": true
+      "tools_accepted": true,
+      "retired": "retired 2026-11-06: the model left the catalogue (HTTP 404, no provider serves it anymore) and was removed from TOOL_CALLING_MODELS"
     },
     "nvidia/stepfun-ai/step-5-preview": {
       "emitted_tool_call": true,
@@ -367,7 +368,8 @@
       "key": "...23c4",
       "latency_s": 1.4,
       "status": "ok",
-      "tools_accepted": true
+      "tools_accepted": true,
+      "retired": "retired 2026-11-06: the model left the catalogue (HTTP 404, no provider serves it anymore) and was removed from TOOL_CALLING_MODELS"
     },
     "openrouter/poolside/laguna-xs-2.1:free": {
       "emitted_tool_call": true,
@@ -375,7 +377,8 @@
       "key": "...1077",
       "latency_s": 5.8,
       "status": "ok",
-      "tools_accepted": true
+      "tools_accepted": true,
+      "retired": "retired 2026-11-06: the model left the catalogue (HTTP 404, no provider serves it anymore) and was removed from TOOL_CALLING_MODELS"
     },
     "openrouter/recursive/flint-v1.0:free": {
       "emitted_tool_call": true,

@@ -89,12 +89,8 @@ MODEL_SLOTS: list[dict] = [
     {"provider_id": "nvidia", "name": "minimaxai/minimax-m3.1-flash",               "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-super-vl-120b-a12b",     "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
-    # Poolside's own build.nvidia.com page shows a plain non-streaming call with
-    # no extra_body — no enable_thinking flag for this one.
-    {"provider_id": "nvidia", "name": "poolside/laguna-xs-2.1",               "max_tokens": 8192},
     # OpenRouter — only the zero-priced ":free" variants are used here.
     {"provider_id": "openrouter", "name": "nvidia/nemotron-3-ultra-550b-a55b:free", "max_tokens": None},
-    {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",             "max_tokens": None},
     {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",            "max_tokens": None},
 ]
 
@@ -108,13 +104,30 @@ MODEL_SLOTS: list[dict] = [
 # and kimi-k2.6, and deepseek-v4.1-flash needs more than 300 s for its first
 # token on the free endpoint).
 AGENT_MODEL_SLOTS: list[dict] = [
+    # Kimi K3.1 Pro is NOT registered here, because it cannot be served by
+    # this account.  Verified live on 2026-11-06 against
+    # integrate.api.nvidia.com/v1:
+    #   * the live catalogue (84 ids) contains no Kimi K3.1 at all — only
+    #     moonshotai/kimi-k2.6;
+    #   * moonshotai/kimi-k3.1-pro and moonshotai/kimi-k3.1 both answer
+    #     HTTP 404 "404 page not found";
+    #   * moonshotai/kimi-k2.6 answers HTTP 404 "Function ... Not found for
+    #     account", i.e. the account has no Moonshot function enabled;
+    #   * on OpenRouter the Kimi K3 / K3.1 Pro slugs are paid and were
+    #     removed from this repo in 2026-10 after they refused with HTTP 402
+    #     ("this model is not included in your free usage") — see the
+    #     denylist in tests/test_subagent_tiers.py.
+    # A free-only registry cannot carry it.  Re-checked before every release.
     {"provider_id": "nvidia", "name": "minimaxai/minimax-m3.1-flash",               "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-super-vl-120b-a12b",     "max_tokens": 16384, "enable_thinking": True},
+    # Mistral Large 4 — 1T total / 52B active MoE.  Verified live 2026-11-06:
+    # the route answers and emits a real tool call on NVIDIA.  It reasons
+    # unconditionally (reasoning_content arrives before content), so the
+    # enable_thinking flag below is accepted but has no effect on it.
+    {"provider_id": "nvidia", "name": "mistralai/mistral-large-4-1t-a52b",        "max_tokens": 16384, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "z-ai/glm-5.3-flash",           "max_tokens": 16384, "enable_thinking": True},
-    {"provider_id": "openrouter", "name": "poolside/laguna-s-2.1:free",             "max_tokens": None},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
-    {"provider_id": "nvidia", "name": "poolside/laguna-xs-2.1",               "max_tokens": 8192},
     # Google — Gemini free tier.
     {"provider_id": "google", "name": "gemini-3.8-flash",               "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.7-flash",               "max_tokens": None},
@@ -135,7 +148,122 @@ AGENT_MODEL_SLOTS: list[dict] = [
     {"provider_id": "openrouter", "name": "nvidia/nemotron-3.5-super-vl:free",       "max_tokens": None},
     {"provider_id": "openrouter", "name": "cohere/north-mini-code:free",            "max_tokens": None},
     {"provider_id": "openrouter", "name": "dots-studio/dots-3-note-preview:free",   "max_tokens": None},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
 ]
+
+
+# ── FREE-ONLY DECISION MODEL SLOTS (wake relevance, make_decision tool) ─────────
+# A *decision model* is not a chat model.  It answers one structured question
+# instead of generating prose:
+#
+#   * "noul" (not-one-unknown-logic) — a yes/no question answered with a
+#     calibrated probability in [0, 1];
+#   * "choice" — a pick from a set of named options;
+#   * "score" — a position on an ordered scale.
+#
+# OpenRouter serves decision models from a separate endpoint,
+# POST /api/alpha/decisions, and *refuses* them on /chat/completions
+# ("respan/span-01-lite:free is a decisions model and cannot be used with the
+# chat/completions endpoint").  The two shapes therefore need two callers.
+#
+# Everything below was verified live on 2026-11-06:
+#
+#   * NVIDIA has no decisions endpoint at all.  /v1/decisions,
+#     /v1/alpha/decisions and /v1/decision all answer HTTP 404, and the
+#     free catalogue (84 ids) serves chat and text models only.  There is no
+#     NVIDIA route in the *decision* part of the chain.
+#   * OpenRouter's respan/span-01-lite:free is the only free decision model.
+#     The API answers usage.cost = 0, so it is genuinely zero-priced, and a
+#     noul question comes back in ~0.8 s with a probability.
+#   * Respan accepts *noul* questions only: "Respan only accepts noul questions
+#     whose instructions and criteria are present, plain strings".  Verified
+#     live on 2026-11-06 against respan/span-01-lite:free, respan/span-01-lite
+#     *and the paid respan/span-01* — a "choice" or a "score" question is
+#     answered with HTTP 400 by every one of them.  The limit belongs to the
+#     model family, not to the free tier.
+#   * The Decisions API itself does implement the full typed contract
+#     (noul + choice + score): typesafe/jev-1.13 answered a choice question
+#     and a score question live on 2026-11-06, each with a full probability
+#     distribution.  It is *paid* (usage.cost = 1.29e-05) and
+#     typesafe/jev-1.13:free answers HTTP 404 "This model is unavailable for
+#     free", so the free-only rule keeps it out of the registry — see
+#     PAID_TYPED_DECISION_MODELS below.
+#   * One request may carry *several* questions, and they count as a single
+#     request: three noul questions in one call came back with three
+#     probabilities, usage.cost = 0, in ~1 s.  That is what makes an emulated
+#     score (one cumulative noul question per level) affordable.
+#   * The noul contract, read off the live API: `instructions` is a plain
+#     string, `criteria` is an object of plain strings keyed "true"/"false",
+#     and `state` is the content to evaluate.  Respan accepts a string or an
+#     object of the shape {input: [messages], output: message}; an arbitrary
+#     object ({"customer_tier": ...}) is rejected with HTTP 400, so the chain
+#     sends a string.
+#   * The free allowance is 50 requests/day *per key*.  An exhausted key
+#     answers 429 with limit_source=openrouter_free_tier_daily, a dead key
+#     answers 401 "User not found", and the chain rotates keys around both.
+#
+# Every route is free-only and is covered by free_route_violations().
+#
+# Slots:
+#   provider_id  — provider key from PROVIDERS
+#   name         — model id as the provider serves it
+#   api          — "decisions" (the Decisions API) or "chat" (chat/completions)
+#   question     — the question types this route can answer
+#   max_tokens   — output ceiling for the chat routes (the decisions route
+#                  returns a number, not tokens)
+#   enable_thinking — NVIDIA chat-template switch.  It is sent *only* when it
+#                  is present: Gemini's OpenAI-compatible endpoint rejects the
+#                  unknown field with HTTP 400 ("Unknown name
+#                  chat_template_kwargs").
+DECISION_API_URL = "https://openrouter.ai/api/alpha/decisions"
+
+DECISION_MODEL_SLOTS: list[dict] = [
+    {
+        "provider_id": "openrouter",
+        "name": "respan/span-01-lite:free",
+        "api": "decisions",
+        "question": ("noul",),
+        "max_tokens": 0,
+        "timeout": 12.0,
+        "note": "the only free decision model — noul questions only, zero-priced",
+    },
+    {
+        "provider_id": "nvidia",
+        "name": "nvidia/nemotron-3.5-bolt-e4b",
+        "api": "chat",
+        "question": ("choice", "text"),
+        "max_tokens": 128,
+        "timeout": 12.0,
+        "enable_thinking": False,
+        "note": "a text model used as the choice classifier — ~0.5 s, free",
+    },
+    {
+        "provider_id": "google",
+        "name": "gemini-2.5-flash",
+        "api": "chat",
+        "question": ("noul", "choice", "text"),
+        "max_tokens": 256,
+        "timeout": 15.0,
+        "note": "the free-tier fallback for every question type",
+    },
+]
+
+
+#: Decision models that answer OpenRouter's *full* typed contract — noul,
+#: choice and score, each with a probability distribution.
+#:
+#: None of them is registered, because every one of them is paid:
+#: ``typesafe/jev-1.13`` answered a choice question and a score question live
+#: on 2026-11-06 (usage.cost = 1.29e-05), while ``typesafe/jev-1.13:free``
+#: answers HTTP 404 "This model is unavailable for free.  The paid version is
+#: available now - use this slug instead: typesafe/jev-1.13".
+#:
+#: The list is recorded here so the fact does not have to be rediscovered, and
+#: so nobody adds one of them to DECISION_MODEL_SLOTS by accident:
+#: free_route_violations() rejects a paid route, and the project is free-only.
+#: The typed question path in core/tools.py is written against this contract
+#: and works the moment a free typed model appears.
+PAID_TYPED_DECISION_MODELS: tuple[str, ...] = ("typesafe/jev-1.13",)
 
 
 # ── SUB-AGENT INTELLIGENCE TIERS ────────────────────────────────────────────
@@ -319,13 +447,14 @@ def is_free_route(provider_id: str, model_name: str | None) -> bool:
 def free_route_violations(registries: dict | None = None) -> list[tuple[str, str]]:
     """Every (provider_id, model) in the given registries that is not free.
 
-    With no argument the three routable registries are checked: the chat
-    rotation, the agent rotation and the sub-agent tiers.
+    With no argument the four routable registries are checked: the chat
+    rotation, the agent rotation, the decision chain and the sub-agent tiers.
     """
     if registries is None:
         registries = {
             "MODEL_SLOTS": MODEL_SLOTS,
             "AGENT_MODEL_SLOTS": AGENT_MODEL_SLOTS,
+            "DECISION_MODEL_SLOTS": DECISION_MODEL_SLOTS,
             "SUBAGENT_TIERS": {
                 level: [entry for entry in entries]
                 for level, entries in SUBAGENT_TIERS.items()
@@ -366,14 +495,14 @@ SUBAGENT_FALLBACK_LADDER: dict[str, tuple[str, ...]] = {
 # tests/fixtures/subagent_tool_calling.json).  The four routes that had
 # drifted away from the evidence were re-probed live on 2026-11-03
 # (workspace/subagent_tiers/research/reprobe_gap.py).
+# Poolside Laguna models removed 2026-11-05: no longer available on OpenRouter
+# or NVIDIA's free endpoint (HTTP 404 "no provider serves this model anymore").
 TOOL_CALLING_MODELS: dict[str, set[str]] = {
     "openrouter": {
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3.5-super-vl:free",
         "nvidia/nemotron-3.5-lightning:free",
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-        "poolside/laguna-s-2.1:free",
-        "poolside/laguna-xs-2.1:free",
         "cohere/north-mini-code:free",
         "dots-studio/dots-3-note-preview:free",
         "google/gemma-4-31b-it:free",
@@ -392,7 +521,6 @@ TOOL_CALLING_MODELS: dict[str, set[str]] = {
         "z-ai/glm-5.3-flash",
         "stepfun-ai/step-5-preview",
         "mistralai/mistral-large-4-1t-a52b",
-        "poolside/laguna-xs-2.1",
         "google/gemma-4-31b-it",
         "openai/gpt-oss-20b",
     },
@@ -523,15 +651,8 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "max_tokens": None,
             "reasoning": True,
             "free": True,
-            "note": "Mistral Large 4 — 1T total / 52B active MoE",
-        },
-        {
-            "provider_id": "openrouter",
-            "name": "poolside/laguna-s-2.1:free",
-            "max_tokens": 32768,
-            "reasoning": True,
-            "free": True,
-            "note": "Poolside's coding agent on the zero-priced route",
+            "note": "Mistral Large 4 — 1T total / 52B active MoE, reasoning-first; "
+                   "verified live 2026-11-06 to answer and to emit a real tool call on NVIDIA",
         },
         {
             "provider_id": "google",
@@ -622,22 +743,6 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "reasoning": True,
             "free": True,
             "note": "the same weights on the zero-priced OpenRouter route",
-        },
-        {
-            "provider_id": "nvidia",
-            "name": "poolside/laguna-xs-2.1",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "Poolside Laguna XS on the free NVIDIA endpoint",
-        },
-        {
-            "provider_id": "openrouter",
-            "name": "poolside/laguna-xs-2.1:free",
-            "max_tokens": 32768,
-            "reasoning": True,
-            "free": True,
-            "note": "the same model on the zero-priced OpenRouter route",
         },
         {
             "provider_id": "openrouter",

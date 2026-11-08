@@ -17,7 +17,7 @@ sys.dont_write_bytecode = True
 # effects — everything that starts something sits behind the ``__main__``
 # guard at the bottom — so another module can import it for the constant
 # without waking the chat loop.
-VERSION = "3.3.1"
+VERSION = "3.4.0"
 
 _CORE = Path(__file__).resolve().parent
 _ROOT = _CORE.parent

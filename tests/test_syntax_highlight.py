@@ -6,17 +6,25 @@ The same highlighter now colours the code the runtime shows while it works:
 * the command a ``shell`` call runs — always **bash**;
 * the content a ``write_file`` puts on disk — with the lexer of the *target
   file's* extension;
+* the find and replace patterns of a ``find_replace`` call — with the lexer of
+  the *target file's* extension;
 * the source a ``read_file`` brings back — with the lexer of *that file's*
+  extension;
+* the lines a ``find_replace`` call changed — with the lexer of *that file's*
   extension;
 * the command the permission gate asks about — always **bash**.
 
-Two details matter and are pinned here:
+Three details matter and are pinned here:
 
 * the line numbers ``read_file`` prefixes its output with stay **out** of the
   lexer — fed to it, every line would start at column 0 and the indentation
   structure of the file would be lost;
 * a highlighted snippet is never wrapped in the dim tool colour, because the
-  dim attribute would dull the very colours the highlighter produced.
+  dim attribute would dull the very colours the highlighter produced;
+* the gutter frame (``╭── lang ──`` … ``╰──``) belongs to the **markdown**
+  renderer alone.  The tool viewer shows the colour *without* the frame: the
+  frame repeats itself on every single call, and it hides the very
+  indentation the highlighter is trying to show.
 """
 import io
 import json
@@ -32,9 +40,9 @@ if REPO_ROOT not in sys.path:
 if os.path.join(REPO_ROOT, "core") not in sys.path:
     sys.path.insert(0, os.path.join(REPO_ROOT, "core"))
 
-from core import display_state  # noqa: E402
 from core import llm_client  # noqa: E402
 from core import renderer  # noqa: E402
+from core import tools as tool_runtime  # noqa: E402
 
 
 def _pygments_available() -> bool:
@@ -51,12 +59,14 @@ def _plain(text: str) -> str:
 
 
 @pytest.fixture
-def expanded_mode():
-    """Turn the expanded display on without touching config.json."""
-    previous = display_state.is_expanded()
-    display_state.set_expanded(True, persist=False)
-    yield
-    display_state.set_expanded(previous, persist=False)
+def expanded_mode(display_expanded):
+    """Turn the expanded display on without touching config.json.
+
+    The preference lives in the user's ``config.json`` and is re-read on
+    every call, so it is pinned by the shared ``display_expanded`` fixture
+    rather than set in memory — an in-memory flag is overwritten by the
+    file the moment it is read.
+    """
 
 
 # ── the language is decided by the file ───────────────────────────────────────
@@ -82,6 +92,8 @@ def test_an_unknown_file_has_no_language():
 # ── the snippet renderer ──────────────────────────────────────────────────────
 
 def test_a_snippet_is_drawn_as_a_labelled_box():
+    """The markdown path keeps its gutter frame — the frame is what tells a
+    reader where a fenced code block starts and ends."""
     lines = renderer.render_code_snippet("def hi():\n    pass", "python")
     assert lines[0].startswith(renderer.GRAY + "╭──")
     assert "python" in _plain(lines[0])
@@ -100,6 +112,23 @@ def test_an_empty_snippet_draws_nothing():
     assert renderer.render_code_snippet("   \n  ", "python") == []
 
 
+def test_the_tool_viewer_code_carries_no_frame():
+    """The tool viewer gets the colour, not the markdown renderer's box.
+
+    A frame around every command and every file listing repeats itself on
+    every call — and it hides the indentation the highlighter is there to
+    show.
+    """
+    lines = renderer.render_tool_code("def hi():\n    pass", "python")
+    assert "def hi():" in _plain("\n".join(lines))
+    assert not any("╭" in line or "│" in line or "╰" in line for line in lines)
+
+
+def test_the_tool_viewer_code_draws_nothing_for_empty_input():
+    assert renderer.render_tool_code("", "python") == []
+    assert renderer.render_tool_code("   \n  ", "python") == []
+
+
 # ── shell calls ───────────────────────────────────────────────────────────────
 
 def test_a_shell_command_is_highlighted_as_bash():
@@ -111,14 +140,16 @@ def test_a_shell_command_is_highlighted_as_bash():
     assert code == "ls -la && echo hello"
 
 
-def test_the_shell_command_is_shown_as_a_code_box():
+def test_the_shell_command_is_colourised_but_not_framed():
     header = llm_client._tool_header_lines(
         "shell", {"bash": "ls -la && echo hello"}, expanded=True
     )
     parts = llm_client._tool_display_parts("shell", {}, header, expanded=True)
     rendered = "\n".join(text for text, _kind in parts)
     assert "ls -la" in _plain(rendered)
-    assert "bash" in _plain(rendered)
+    assert "\x1b[" in rendered
+    assert "╭──" not in rendered
+    assert "╰" not in rendered
 
 
 def test_the_collapsed_preview_stays_short():
@@ -158,9 +189,82 @@ def test_a_written_json_file_is_highlighted_as_json():
     assert lang == "json"
 
 
+# ── find and replace ──────────────────────────────────────────────────────────
+
+def test_the_find_and_replace_patterns_use_the_extension_of_the_target_file():
+    """The patterns are code of the file they belong to — so they are
+    coloured with that file's lexer."""
+    header = llm_client._tool_header_lines(
+        "find_replace",
+        {"path": "core/demo.py", "find": "old = 1", "replace": "new = 2"},
+        expanded=True,
+    )
+    parts = llm_client._tool_display_parts(
+        "find_replace", {"path": "core/demo.py"}, header, expanded=True
+    )
+    rendered = "\n".join(text for text, _kind in parts)
+    assert "old = 1" in _plain(rendered)
+    assert "new = 2" in _plain(rendered)
+    assert "\x1b[" in rendered
+    assert "╭──" not in rendered
+
+
+def test_the_find_replace_patterns_keep_their_labels():
+    header = llm_client._tool_header_lines(
+        "find_replace",
+        {"path": "core/demo.py", "find": "old = 1", "replace": "new = 2"},
+        expanded=True,
+    )
+    parts = llm_client._tool_display_parts(
+        "find_replace", {"path": "core/demo.py"}, header, expanded=True
+    )
+    rendered = "\n".join(text for text, _kind in parts)
+    assert "find:" in _plain(rendered)
+    assert "replace:" in _plain(rendered)
+
+
+def test_a_find_replace_reports_the_lines_it_changed(tmp_path):
+    """The tool says which lines it touched — that is what lets the runtime
+    show them in colour instead of only saying that something happened."""
+    from unittest.mock import patch
+
+    target = tmp_path / "demo.py"
+    target.write_text("a = 1\nb = 2\na = 3\n", encoding="utf-8")
+
+    with patch("core.tools.request_file_permission", return_value=(True, "OK")):
+        result = tool_runtime.find_replace(str(target), "a = ", "c = ")
+
+    assert "at lines 1, 3" in result
+    assert target.read_text(encoding="utf-8") == "c = 1\nb = 2\nc = 3\n"
+
+
+def test_a_find_replace_result_shows_the_changed_lines_in_colour(tmp_path):
+    target = tmp_path / "demo.py"
+    target.write_text("def hi():\n    return old\n", encoding="utf-8")
+
+    output = "Successfully replaced 1 occurrence in demo.py (at lines 2)."
+    lines = llm_client._find_replace_changed_lines({"path": str(target)}, output)
+
+    rendered = "\n".join(lines)
+    assert "2| " in rendered
+    assert "return old" in _plain(rendered)
+    assert "\x1b[" in rendered
+
+
+def test_a_find_replace_without_line_numbers_shows_no_preview(tmp_path):
+    """A report that carries no line numbers means no preview — the status
+    line above it is still the truth."""
+    target = tmp_path / "demo.py"
+    target.write_text("a = 1\n", encoding="utf-8")
+    assert llm_client._find_replace_changed_lines(
+        {"path": str(target)},
+        "No occurrences of the search text found in demo.py.",
+    ) == []
+
+
 # ── reads ─────────────────────────────────────────────────────────────────────
 
-def test_the_read_output_uses_the_extension_of_the_file():
+def test_the_read_output_is_highlighted_with_the_extension_of_the_file():
     buffer = io.StringIO()
     with redirect_stdout(buffer):
         llm_client._print_tool_output(
@@ -170,8 +274,12 @@ def test_the_read_output_uses_the_extension_of_the_file():
             llm_client.DIM,
         )
     printed = buffer.getvalue()
-    assert "python" in _plain(printed)
     assert "def hi():" in _plain(printed)
+    # The colour comes from the file's own lexer …
+    assert "\x1b[" in printed
+    # … the gutter frame does not — it belongs to the markdown renderer.
+    assert "╭──" not in printed
+    assert "╰" not in printed
 
 
 def test_the_line_numbers_stay_out_of_the_highlighted_code():
@@ -215,8 +323,9 @@ def test_the_permission_command_is_highlighted_as_bash(monkeypatch, capsys):
     assert approved is False
     printed = capsys.readouterr().out
     assert "cd /tmp" in _plain(printed)
-    assert "bash" in _plain(printed)
     assert "\x1b[" in printed
+    # The gutter frame is the markdown renderer's, not the gate's.
+    assert "╭──" not in printed
 
 
 def test_the_permission_command_is_still_readable_without_colour(monkeypatch, capsys):
@@ -266,5 +375,5 @@ def test_a_real_read_call_is_highlighted(expanded_mode):
     assert "[READING FILE]" in printed
     assert "[OUTPUT]" in printed
     assert "def hi():" in _plain(printed)
-    assert "python" in _plain(printed)
     assert "\x1b[" in printed
+    assert "╭──" not in printed

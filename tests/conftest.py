@@ -9,6 +9,40 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 
+# ── the expanded / collapsed display ─────────────────────────────────────────
+#
+# ``display_state.is_expanded()`` re-reads ``config/config.json`` on every
+# call, so an in-memory flag is overwritten by whatever the file happens to
+# say — and the file is the *user's*, not the test's.  Setting the flag
+# alone therefore does nothing: on a fresh clone (``setup.sh`` writes
+# ``show_details: false``) the flag is clobbered the moment it is read, and
+# the tests that need the expanded view silently run against the collapsed
+# one.
+#
+# The tests have to pin the *reader*, not the flag.  That is what these two
+# fixtures do.
+
+@pytest.fixture
+def display_expanded(monkeypatch):
+    """Pin the tool-call display to the expanded view.
+
+    The preference is global state backed by the user's config file, so it
+    is pinned here — otherwise a test depends on what the config happens to
+    contain, and on the order the suite runs.
+    """
+    from core import display_state
+
+    monkeypatch.setattr(display_state, "is_expanded", lambda: True)
+
+
+@pytest.fixture
+def display_collapsed(monkeypatch):
+    """Pin the tool-call display to the collapsed view (see above)."""
+    from core import display_state
+
+    monkeypatch.setattr(display_state, "is_expanded", lambda: False)
+
+
 @pytest.fixture(autouse=True)
 def _stub_plugin_runtime(monkeypatch):
     """Unit tests must never start a plugin runtime.

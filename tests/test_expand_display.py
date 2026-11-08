@@ -141,13 +141,14 @@ def test_the_collapsed_view_stays_compact():
 # ── refused calls are still visible ───────────────────────────────────────────
 
 @pytest.fixture
-def expanded_mode():
-    """Turn the expanded display on without touching config.json."""
-    from core import display_state
-    previous = display_state.is_expanded()
-    display_state.set_expanded(True, persist=False)
-    yield
-    display_state.set_expanded(previous, persist=False)
+def expanded_mode(display_expanded):
+    """Turn the expanded display on without touching config.json.
+
+    The preference lives in the user's ``config.json`` and is re-read on
+    every call, so it is pinned by the shared ``display_expanded`` fixture
+    rather than set in memory — an in-memory flag is overwritten by the
+    file the moment it is read.
+    """
 
 
 def test_a_refused_plugin_tool_call_is_shown(monkeypatch, expanded_mode):
@@ -184,11 +185,10 @@ def test_a_refused_plugin_tool_call_is_shown(monkeypatch, expanded_mode):
     assert result.startswith("[ERROR]")
 
 
-def test_a_refused_plugin_tool_call_is_shown_when_collapsed(monkeypatch):
+def test_a_refused_plugin_tool_call_is_shown_when_collapsed(monkeypatch,
+                                                            display_collapsed):
     """Even in the collapsed view the attempt has to be visible — the tag
     alone says what was tried."""
-    from core import display_state
-
     monkeypatch.setattr(
         llm_client.plugin_manager, "is_tool_allowed", lambda name: False
     )
@@ -200,19 +200,14 @@ def test_a_refused_plugin_tool_call_is_shown_when_collapsed(monkeypatch):
         lambda name: {"enabled": False, "authorized": False},
     )
 
-    previous = display_state.is_expanded()
-    display_state.set_expanded(False, persist=False)
-    try:
-        buffer = io.StringIO()
-        with redirect_stdout(buffer):
-            llm_client._dispatch_tool({
-                "function": {
-                    "name": "send_gmail_message",
-                    "arguments": json.dumps({"to": "someone@example.com"}),
-                }
-            })
-    finally:
-        display_state.set_expanded(previous, persist=False)
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        llm_client._dispatch_tool({
+            "function": {
+                "name": "send_gmail_message",
+                "arguments": json.dumps({"to": "someone@example.com"}),
+            }
+        })
 
     printed = buffer.getvalue()
     assert "SEND_GMAIL_MESSAGE" in printed

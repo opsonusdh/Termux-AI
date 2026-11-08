@@ -42,6 +42,11 @@ DEFAULT_CONFIG: dict = {
     "show_details": False,
     "autonomous":  False,
     "notify":      True,
+    # Oversized tool results go to disk instead of into the context window.
+    # The threshold is in tokens (roughly 4 characters each); 4000 tokens is
+    # about 16 KB, so an ordinary command still arrives whole.
+    "spill_trigger_tokens": 4000,
+    "spill_enabled":        True,
 }
 
 

@@ -17,6 +17,8 @@ import base64
 from pathlib import Path
 from openai import OpenAI
 from urllib.parse import urljoin, urlparse
+import urllib.error
+import urllib.request
 from datetime import datetime
 from collections import defaultdict
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
@@ -36,6 +38,7 @@ if _ROOT_DIR not in sys.path:
 # file, so the two copies had separate module state and separate monkeypatches
 # for the very same permission rules.
 from core.permissions import validate_command, request_file_permission
+from core import confidential
 from renderer import RED, GRAY, YELLOW, RESET, render_for_voice, render_markdown_terminal
 from core.models import (
     PROVIDERS,
@@ -96,6 +99,22 @@ def _load_optional_wrapper(module_name: str):
         return None
 
 
+def _guarded_share_file(share_func):
+    """Put the share sheet behind the permission gate.
+
+    Sharing a file hands it to another app.  A credential must not make
+    that trip unnoticed, so the file goes through the same gate a plain
+    read goes through: the user is asked, and in autonomous mode — where
+    nobody can answer — the share is refused.
+    """
+    def _share(file_path: str, mime_type=None, subject=None, text=None) -> str:
+        approved, reason = request_file_permission("read", file_path)
+        if not approved:
+            return f"[PERMISSION DENIED] Share blocked. {reason}"
+        return share_func(file_path, mime_type, subject, text)
+    return _share
+
+
 get_contacts = _unavailable_wrapper("get_contacts")
 get_contact_by_id = _unavailable_wrapper("get_contact_by_id")
 list_sensors = _unavailable_wrapper("list_sensors")
@@ -135,7 +154,7 @@ if _audio_wrapper is not None:
 _filepicker_wrapper = _load_optional_wrapper("termux_filepicker")
 if _filepicker_wrapper is not None:
     pick_file = _filepicker_wrapper.pick_file
-    share_file = _filepicker_wrapper.share_file
+    share_file = _guarded_share_file(_filepicker_wrapper.share_file)
     share_text = _filepicker_wrapper.share_text
 
 _wallpaper_wrapper = _load_optional_wrapper("termux_wallpaper")
@@ -906,11 +925,65 @@ TOOLS_DESCRIPTION = [
                 f"Continuously listens for the wake word '{WAKE_WORDS}'. "
                 "When the wake word is detected, a lightweight AI relevance "
                 "check determines whether the speaker is actually addressing "
-                "the assistant."
+                "the assistant.  The check uses the free decision chain: "
+                "OpenRouter's respan/span-01-lite:free on the Decisions API, "
+                "with gemini-2.5-flash as the fallback."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "make_decision",
+            "description": (
+                "Make a structured decision using the free decision chain. "
+                "Use this when you need to answer a yes/no question, choose "
+                "between options, rate something on a scale, or evaluate a "
+                "situation against criteria, instead of guessing or asking "
+                "the user.  A yes/no question is answered by OpenRouter's "
+                "respan/span-01-lite:free on the Decisions API and comes back "
+                "with a real probability.  A scale question is derived from "
+                "cumulative yes/no questions on that same model and comes "
+                "back with the distribution over the scale.  A choice "
+                "question is answered by the chat routes (NVIDIA's "
+                "nemotron-3.5-bolt-e4b, then gemini-2.5-flash), because the "
+                "free decision model answers yes/no questions only.  Returns "
+                "the answer, a one-line rationale, the model that served it, "
+                "and the confidence that was actually measured."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The decision question in plain language."
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of choice labels. When provided, the answer is one of these labels. Use this instead of 'scale' when the options are unordered."
+                    },
+                    "scale": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional ordered scale labels, lowest first (e.g. ['low', 'medium', 'high']). When provided, the answer is one of these labels and the result carries the probability distribution over the scale. Use this instead of 'options' when the labels have a natural order."
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional background context or state for the decision.",
+                        "default": ""
+                    },
+                    "criteria": {
+                        "type": "string",
+                        "description": "Optional evaluation criteria (e.g., 'prefer safety', 'minimize cost').",
+                        "default": ""
+                    }
+                },
+                "required": ["question"]
             },
         },
     },
@@ -1787,8 +1860,8 @@ TOOLS_DESCRIPTION = [
                             "If omitted, the sub-AI gets the core delegation toolkit "
                             "(shell, read_file, write_file, find_replace, list_directory, "
                             "search_files, search_in_files, index_files, browse_web, "
-                            "http_request, get_datetime). Pass an explicit list to widen "
-                            "or narrow it. A name that no delegated worker can run is "
+                            "http_request, get_datetime, skill). Pass an explicit list to "
+                            "widen or narrow it. A name that no delegated worker can run is "
                             "reported back in the report instead of being dropped "
                             "silently."
                         ),
@@ -2480,6 +2553,35 @@ TOOLS_DESCRIPTION = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill",
+            "description": (
+                "Load the manual for one skill — the operational rules that apply "
+                "to the task at hand. Call skill(name) before you act on a task "
+                "the skill covers; the body you get back IS the manual, so read "
+                "it before you start editing, debugging or verifying. "
+                "The fifteen core skills are listed in the prompt; call "
+                "skill(\"\") for the full catalogue including the imported "
+                "domain skills."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Skill name, e.g. 'coding', 'verification', 'bootstrap'. "
+                            "An empty string returns the full catalogue."
+                        ),
+                        "default": "",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 def log_write(msg: str) -> None:
@@ -2548,6 +2650,54 @@ def build_memory_block(prompt: str) -> str:
     if not memories or "No relevant memory" in memories:
         return ""
     return f"## Long-Term Memory & Project Context\n{memories}"
+
+
+def skill(name: str = "") -> str:
+    """Load one skill's manual — the catalogue lives in ``core/skill_registry``.
+
+    An empty name returns the catalogue of every registered skill.  The body
+    is read from disk on every call, so a skill that was edited a minute ago
+    is visible now, not after the next restart.
+    """
+    from core import skill_registry
+    return skill_registry.skill_text(name)
+
+
+def runtime_context_block() -> str:
+    """The prompt block that describes what the runtime currently allows.
+
+    Two facts the model used to have to discover by hitting a wall:
+
+    * whether the permission gate is asking for approval — one line saves a
+      turn per refusal;
+    * which skills it may load — the fifteen core ones are listed here, and
+      the imported domain skills are one ``skill("")`` call away.
+
+    It is rebuilt for every request, so a mode toggle takes effect on the
+    next turn instead of the next restart.
+    """
+    from core import permissions
+    from core import skill_registry
+
+    lines = [
+        "[RUNTIME CONTEXT]",
+        permissions.permission_snapshot(),
+    ]
+
+    catalog = skill_registry.prompt_block()
+    if catalog:
+        lines.append("")
+        lines.append(
+            "[CORE SKILLS] Load one with skill(name) before you act on a task "
+            "it covers; the body it returns is the manual."
+        )
+        lines.append(catalog)
+        lines.append(
+            "The imported domain skills are not listed here — call skill(\"\") "
+            "for the full catalogue."
+        )
+
+    return "\n".join(lines)
 
 
 def save_memory(text: str, type_: str = "fact", tags: str = "", priority: int = 7) -> str:
@@ -2763,6 +2913,114 @@ def write_file(
 
 
 
+def _replace_with_spans(
+    text: str,
+    find: str,
+    replace: str,
+    case_sensitive: bool,
+) -> tuple[str, list[tuple[int, int]]]:
+    """Replace *find* with *replace* in *text* and report where it happened.
+
+    Returns ``(new_text, spans)``.  Every span is a ``(start, end)`` character
+    range of the inserted text inside ``new_text`` — the spans are what lets
+    the runtime show the lines an edit actually touched, in the file's own
+    colours.
+
+    The substitution is exactly the one the tool performed before: a literal
+    one on the case-sensitive path, and — on the case-insensitive path — the
+    same template expansion ``re.sub`` performs, so a replacement string
+    containing ``\\1`` keeps behaving the way it always did.
+    """
+    if case_sensitive:
+        if not find:
+            # ``str.replace`` with an empty pattern inserts between every
+            # character; the tool rejects an empty pattern long before this,
+            # but the helper stays faithful to ``str.replace`` either way.
+            return text.replace(find, replace), []
+        parts = text.split(find)
+        if len(parts) == 1:
+            return text, []
+        spans: list[tuple[int, int]] = []
+        offset = 0
+        for part in parts[:-1]:
+            offset += len(part)
+            spans.append((offset, offset + len(replace)))
+            offset += len(replace)
+        return replace.join(parts), spans
+
+    pattern = re.compile(re.escape(find), re.IGNORECASE)
+    pieces: list[str] = []
+    spans = []
+    cursor = 0
+    offset = 0
+    for match in pattern.finditer(text):
+        pieces.append(text[cursor:match.start()])
+        offset += len(pieces[-1])
+        expanded = match.expand(replace)
+        pieces.append(expanded)
+        spans.append((offset, offset + len(expanded)))
+        offset += len(expanded)
+        cursor = match.end()
+    if not spans:
+        return text, []
+    pieces.append(text[cursor:])
+    return "".join(pieces), spans
+
+
+def _line_ranges(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The 1-based line ranges the given character ranges occupy in *text*."""
+    ranges: list[tuple[int, int]] = []
+    for start, end in spans:
+        first = text.count("\n", 0, start) + 1
+        if end <= start:
+            # Nothing was inserted — a deletion.  The change belongs to the
+            # line the text was removed from.
+            ranges.append((first, first))
+            continue
+        last = text.count("\n", 0, end - 1) + 1
+        ranges.append((first, last))
+    return ranges
+
+
+def _merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping and adjacent line ranges into one list.
+
+    Three replacements on the same line are *one* line, and two changes on
+    neighbouring lines are one block: the note says where the edit landed,
+    not how many times the pattern matched.
+    """
+    if not ranges:
+        return []
+    ordered = sorted(ranges)
+    merged = [list(ordered[0])]
+    for start, end in ordered[1:]:
+        last = merged[-1]
+        if start <= last[1] + 1:
+            last[1] = max(last[1], end)
+            continue
+        merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def _changed_lines_note(ranges: list[tuple[int, int]]) -> str:
+    """A short note about the lines a replacement touched.
+
+    ``(at lines 12, 15-17)`` — empty when nothing changed.  The runtime
+    reads the note back to show those lines in the file's own colours, so
+    the format is part of the tool's contract rather than decoration.
+    """
+    merged = _merge_line_ranges(ranges)
+    if not merged:
+        return ""
+    shown = [
+        f"{start}" if start == end else f"{start}-{end}"
+        for start, end in merged[:8]
+    ]
+    if len(merged) > 8:
+        shown.append("…")
+    return " (at lines " + ", ".join(shown) + ")"
+
+
 def find_replace(
     path: str,
     find: str,
@@ -2810,24 +3068,21 @@ def find_replace(
         # If no segment specified, operate on entire file
         if segment_start is None and segment_end is None:
             content = "".join(lines)
-            if case_sensitive:
-                count = content.count(find)
-                if count == 0:
-                    return f"No occurrences of the search text found in {path}."
-                new_content = content.replace(find, replace)
-            else:
-                import re
-                pattern = re.compile(re.escape(find), re.IGNORECASE)
-                matches = pattern.findall(content)
-                count = len(matches)
-                if count == 0:
-                    return f"No occurrences of the search text found in {path}."
-                new_content = pattern.sub(replace, content)
+            new_content, spans = _replace_with_spans(
+                content, find, replace, case_sensitive
+            )
+            count = len(spans)
+            if count == 0:
+                return f"No occurrences of the search text found in {path}."
 
             with open(p, "w", encoding="utf-8") as f:
                 f.write(new_content)
 
-            return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {path}."
+            # The lines the edit touched are reported back: the runtime shows
+            # them in the file's own colours, so the result of a replacement
+            # is code the user can read instead of a sentence about code.
+            note = _changed_lines_note(_line_ranges(new_content, spans))
+            return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {path}{note}."
 
         # Segment specified: operate only on the specified line range
         total_lines = len(lines)
@@ -2846,19 +3101,12 @@ def find_replace(
         segment_content = "".join(segment_lines)
 
         # Perform find/replace on segment only
-        if case_sensitive:
-            count = segment_content.count(find)
-            if count == 0:
-                return f"No occurrences of the search text found in lines {segment_start or 1}..{segment_end or total_lines} of {path}."
-            new_segment_content = segment_content.replace(find, replace)
-        else:
-            import re
-            pattern = re.compile(re.escape(find), re.IGNORECASE)
-            matches = pattern.findall(segment_content)
-            count = len(matches)
-            if count == 0:
-                return f"No occurrences of the search text found in lines {segment_start or 1}..{segment_end or total_lines} of {path}."
-            new_segment_content = pattern.sub(replace, segment_content)
+        new_segment_content, spans = _replace_with_spans(
+            segment_content, find, replace, case_sensitive
+        )
+        count = len(spans)
+        if count == 0:
+            return f"No occurrences of the search text found in lines {segment_start or 1}..{segment_end or total_lines} of {path}."
 
         # Reconstruct the file with the modified segment
         new_segment_lines = new_segment_content.splitlines(keepends=True)
@@ -2875,7 +3123,14 @@ def find_replace(
             f.writelines(lines)
 
         seg_desc = f"lines {segment_start or 1}..{segment_end or total_lines}"
-        return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {seg_desc} of {path}."
+        # The segment's first line is the file's line ``start_idx + 1``, so
+        # every line of the segment is shifted by ``start_idx``.
+        ranges = [
+            (start + start_idx, end + start_idx)
+            for start, end in _line_ranges(new_segment_content, spans)
+        ]
+        note = _changed_lines_note(ranges)
+        return f"Successfully replaced {count} occurrence{'s' if count != 1 else ''} in {seg_desc} of {path}{note}."
 
     except Exception as e:
         return f"[ERROR] Failed to find and replace: {e}"
@@ -2893,6 +3148,7 @@ def index_files(path: str, extension_filter: str = "") -> str:
     exts = [e.strip().lower() for e in extension_filter.split(",") if e.strip()] if extension_filter else []
 
     indexed_count = 0
+    skipped = 0
     idx_file = paths.INDEXED_MEMORY_FILE
 
     files_to_index = []
@@ -2910,9 +3166,10 @@ def index_files(path: str, extension_filter: str = "") -> str:
     with open(idx_file, "a", encoding="utf-8") as out:
         for filepath in files_to_index[:100]: # Cap at 100 files
             try:
-                # Never index the api.keys secrets file - it is gated in every mode.
-                # api.keys.template is allowed.
-                if os.path.basename(filepath) == "api.keys" and not filepath.endswith("api.keys.template"):
+                # Never index a confidential file - it is gated in every
+                # mode.  api.keys.template is allowed: it is a template.
+                if confidential.is_confidential(filepath):
+                    skipped += 1
                     continue
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
@@ -2922,7 +3179,10 @@ def index_files(path: str, extension_filter: str = "") -> str:
             except Exception:
                 pass
 
-    return f"Successfully indexed {indexed_count} file(s) into indexed_memory.txt."
+    result = f"Successfully indexed {indexed_count} file(s) into indexed_memory.txt."
+    if skipped:
+        result += f" Skipped {skipped} confidential file(s)."
+    return result
 
 
 # ── CHROME PATH & PORT HELPERS ────────────────────────────────────────────────────
@@ -5397,7 +5657,7 @@ _SUBAGENT_MAX_TOOL_RESULT = 10000     # characters of a tool result kept in cont
 _SUBAGENT_DEFAULT_TOOLS: list[str] = [
     "shell", "read_file", "write_file", "find_replace",
     "list_directory", "search_files", "search_in_files", "index_files",
-    "browse_web", "http_request", "get_datetime",
+    "browse_web", "http_request", "get_datetime", "skill",
 ]
 
 
@@ -5714,7 +5974,19 @@ def delegate_subtask(
     # the same refusal.
     provider_budget_ceiling: dict[str, int] = {}
 
+    # The worker gets the same runtime context as the parent: the permission
+    # state it runs under, and the skill catalogue — the ``skill`` tool is in
+    # the worker's registry, so a delegated worker can load the coding
+    # standard instead of being told about it.  A custom system prompt is
+    # *extended*, not replaced: the caller asked for a different persona, not
+    # for a worker that cannot see what it is allowed to do.
     sys_p = system_prompt if system_prompt is not None else _DELEGATE_SYS_PROMPT
+    try:
+        sys_p = sys_p + "\n\n" + runtime_context_block()
+    except Exception as exc:  # noqa: BLE001 — the worker must still start
+        runtime_log.log_note(
+            f"runtime context block unavailable: {exc}", "delegate:context"
+        )
 
     # Persistent message list across fallback attempts so reasoning can carry
     # forward when switching between OpenRouter models.
@@ -7082,6 +7354,7 @@ def search_in_files(
     }
     matches = []
     scanned = 0
+    skipped = 0
 
     try:
         for root, dirs, files in os.walk(p, topdown=True, followlinks=False):
@@ -7098,6 +7371,14 @@ def search_in_files(
                 if os.path.islink(full):
                     continue
                 if not fnmatch.fnmatchcase(filename.casefold(), file_pattern.casefold()):
+                    continue
+
+                # A search must not become the way around the gate: a
+                # credential file inside the searched tree is skipped, not
+                # grepped.  The count is reported at the end so nothing is
+                # silently missing.
+                if confidential.is_confidential(full):
+                    skipped += 1
                     continue
 
                 try:
@@ -7121,20 +7402,30 @@ def search_in_files(
                                         f"{chr(10).join(matches)}\n"
                                         f"... (truncated at {max_results} results)"
                                     )
+                                    if skipped:
+                                        result += (
+                                            f"\nConfidential files skipped: "
+                                            f"{skipped}"
+                                        )
                                     return result
                     scanned += 1
                 except (OSError, UnicodeError):
                     continue
 
         if not matches:
-            return f"No matches found for {query!r} in {p}."
+            note = (f" ({skipped} confidential file(s) skipped)"
+                    if skipped else "")
+            return f"No matches found for {query!r} in {p}{note}."
 
-        return (
+        result = (
             f"Content search for {query!r} in {p}\n"
             f"{'=' * 60}\n"
             f"{chr(10).join(matches)}\n"
             f"Files scanned: {scanned}"
         )
+        if skipped:
+            result += f"\nConfidential files skipped: {skipped}"
+        return result
     except OSError as exc:
         return f"[ERROR] Failed to search file contents: {exc}"
 
@@ -7291,7 +7582,18 @@ def sleep_mode() -> str:
             continue
 
         print(f"{GRAY}[WAKE WORD DETECTED]{RESET}")
-        return heard
+        # Lightweight AI relevance check: is the speaker addressing Orion?
+        try:
+            relevant = is_wake_relevant(heard)
+            if relevant:
+                print(f"{GRAY}[WAKING UP]{RESET}")
+                return heard
+            else:
+                print(f"{GRAY}[IGNORED]{RESET}")
+        except Exception as e:
+            print(f"{RED}[WAKE CHECK FAILED] {e}{RESET}")
+            # Fail closed: keep sleeping on any error
+            continue
 
 
 def intermediate_print(text: str, voice: bool = False) -> None:
@@ -8334,6 +8636,15 @@ def upload_drive_file(file_path: str, name: str = "",
                       parent_folder_id: str = "") -> str:
     """Upload a local file to Google Drive."""
     log_write(f"[upload_drive_file] path:{file_path}")
+
+    # An upload is a read that leaves the device.  A credential must never
+    # make that trip unnoticed, so the file is put through the same gate a
+    # plain read goes through: the user is asked, and in autonomous mode
+    # there is nobody to ask, so it is refused.
+    approved, reason = request_file_permission("read", file_path)
+    if not approved:
+        return f"[PERMISSION DENIED] Upload blocked. {reason}"
+
     try:
         data = google_api.drive_upload_file(file_path=file_path, name=name,
                                             parent_folder_id=parent_folder_id)
@@ -8465,6 +8776,873 @@ def ask_ai_simple(prompt: str, model_name: str = "openai/gpt-oss-120b", system_p
         return ""
     except Exception:
         return ""
+
+
+# ── DECISION MODEL HELPERS ────────────────────────────────────────────────────
+# The decision chain is deliberately separate from ask_ai_simple():
+#   * ask_ai_simple() infers the provider from the model *name* ("/" in the
+#     name means OpenRouter), which is wrong for every NVIDIA id and fatal for
+#     decision models — OpenRouter refuses them on /chat/completions.
+#   * ask_ai_simple() has no per-provider thinking switch, no per-call timeout
+#     and swallows every error, so a dead route looks exactly like a working
+#     classifier.
+#
+# The helpers below carry their own key rotation, their own timeouts and the
+# two request shapes the chain needs: OpenRouter's Decisions API and an
+# ordinary chat/completions call.
+#
+# The registry (core.models.DECISION_MODEL_SLOTS) documents every contract
+# below; the evidence behind it is in workspace/research/audit_2026/.
+
+# Per-model key state for the decision chain.  The decision path has different
+# limits from the chat rotation:
+#   * OpenRouter's free tier answers 429 once the key's *daily* allowance of
+#     50 requests is gone (limit_source=openrouter_free_tier_daily).  That
+#     allowance resets once a day, so the key is parked until the reset
+#     instant instead of being retried on every call.
+#   * A 401 means the key itself is dead ("User not found") and is never used
+#     again in this process.
+_DECISION_KEY_UNLOCK: dict[tuple[str, str], dict[str, float]] = {}
+_DECISION_DEAD_KEYS: set[tuple[str, str, str]] = set()
+
+
+def _decision_log(provider_id: str, model: str, message: str) -> None:
+    """Report a decision-route failure.
+
+    The decision path runs in the background (sleep mode), where a silent
+    failure is indistinguishable from a classifier that answered.  Every
+    failure therefore lands in the runtime log.
+    """
+    try:
+        runtime_log.log_tool_result(
+            "decision_model", f"{provider_id}/{model}: {message}", error=True)
+    except Exception:  # noqa: BLE001 — logging must never break the caller
+        pass
+
+
+def _decision_park_key(provider_id: str, model: str, key: str,
+                       status: int, now: float, reset_at: float | None = None) -> None:
+    """Remember that a key must not be used for this model for a while."""
+    if status == 401:
+        _DECISION_DEAD_KEYS.add((provider_id, model, key))
+        return
+    if status == 429:
+        # OpenRouter reports the daily reset instant; when it is missing a
+        # full day is the safe park.
+        until = reset_at if reset_at and reset_at > now else now + 24 * 3600
+        _DECISION_KEY_UNLOCK.setdefault((provider_id, model), {})[key] = until
+
+
+def _decision_excluded_keys(provider_id: str, model: str, now: float) -> set[str]:
+    """Keys that are parked or dead for this provider+model right now."""
+    excluded: set[str] = set()
+    for (pid, mdl, key) in _DECISION_DEAD_KEYS:
+        if pid == provider_id and mdl == model:
+            excluded.add(key)
+    for key, until in _DECISION_KEY_UNLOCK.get((provider_id, model), {}).items():
+        if now < until:
+            excluded.add(key)
+        else:
+            # The park expired — let the key try again.
+            _DECISION_KEY_UNLOCK[(provider_id, model)].pop(key, None)
+    return excluded
+
+
+def _decision_call_chat(slot: dict, messages: list[dict], max_tokens: int,
+                        timeout: float) -> tuple[str | None, str]:
+    """Call one chat/completions decision route.
+
+    Returns ``(content, model_name)``; ``content`` is None when the route
+    could not answer.
+    """
+    from core.models import PROVIDERS
+    from llm_client import API_KEYS, _next_key
+    from openai import OpenAI
+
+    provider_id = slot["provider_id"]
+    model = slot["name"]
+    if not API_KEYS.get(provider_id):
+        return None, model
+
+    base_url = PROVIDERS[provider_id]["base_url"]
+
+    # `enable_thinking` is a *NVIDIA* chat-template switch.  It is sent only
+    # when the slot asks for it: Gemini's OpenAI-compatible endpoint rejects
+    # the unknown field with HTTP 400 ("Unknown name chat_template_kwargs").
+    extra: dict = {}
+    thinking = slot.get("enable_thinking")
+    if thinking is not None:
+        extra["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": thinking}}
+
+    # The token budget has a floor.  Gemini 2.5 Flash spends part of the
+    # budget on internal thinking: a ceiling below 64 tokens comes back with
+    # no content at all (finish_reason "length"), so a caller asking for
+    # fewer tokens than that gets a *failed* decision, not a short answer.
+    # The floor lives here so no caller can break the route by accident.
+    slot_max = slot.get("max_tokens") or max_tokens
+    budget = max(64, min(max_tokens, slot_max))
+
+    now = time.time()
+    tried = 0
+    while tried < len(API_KEYS[provider_id]):
+        tried += 1
+        key = _next_key(provider_id, model,
+                        _decision_excluded_keys(provider_id, model, now))
+        if key is None:
+            break
+        try:
+            client = OpenAI(api_key=key, base_url=base_url, timeout=timeout)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=budget,
+                temperature=0.0,
+                **extra,
+            )
+            choice = resp.choices[0]
+            content = choice.message.content
+            if content and content.strip():
+                return content.strip(), model
+            # A reasoning model can spend the whole budget on reasoning and
+            # return no content at all (finish_reason="length").  That is a
+            # failed decision, never a "no".
+            _decision_log(provider_id, model,
+                          f"empty content (finish_reason={choice.finish_reason})")
+        except Exception as exc:  # noqa: BLE001 — every failure is a route failure
+            status = getattr(exc, "status_code", None)
+            _decision_log(provider_id, model, f"{type(exc).__name__}: {exc}"[:220])
+            if status:
+                _decision_park_key(provider_id, model, key, status, now)
+    return None, model
+
+
+def _decision_call_questions(slot: dict, state: str, questions: dict,
+                             timeout: float) -> tuple[dict | None, str]:
+    """Ask a decision model one or more questions in a single request.
+
+    ``questions`` is the Decisions API question map, in the shape the
+    documented contract describes::
+
+        {"decision": {"type": "noul",
+                      "instructions": "...",
+                      "criteria": {"true": "...", "false": "..."}}}
+
+    A request may carry several questions at once and they are answered in
+    one call: three noul questions in a single request came back with three
+    probabilities, ``usage.cost = 0``, in about a second (verified live on
+    2026-11-06).  That is what makes the emulated score — one cumulative
+    noul question per scale level — cost a single request.
+
+    Returns ``(answers, served_model)``; ``answers`` is None when the route
+    could not answer.  ``served_model`` is the exact revision the provider
+    answered under, which is not always the id that was asked for: the free
+    alias ``respan/span-01-lite:free`` is served by
+    ``respan/span-01-lite-20260925``.
+    """
+    from core.models import DECISION_API_URL
+    from llm_client import API_KEYS, _next_key
+
+    provider_id = slot["provider_id"]
+    model = slot["name"]
+    if not API_KEYS.get(provider_id):
+        return None, model
+
+    payload = {
+        "model": model,
+        "state": state,
+        "questions": questions,
+    }
+
+    now = time.time()
+    tried = 0
+    while tried < len(API_KEYS[provider_id]):
+        tried += 1
+        key = _next_key(provider_id, model,
+                        _decision_excluded_keys(provider_id, model, now))
+        if key is None:
+            break
+        request = urllib.request.Request(
+            DECISION_API_URL,
+            data=json.dumps(payload).encode(),
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode())
+            answers = data.get("answers") or {}
+            if answers:
+                # The API reports the exact weights it served under.
+                return answers, (data.get("model") or model)
+            _decision_log(provider_id, model, "the response carried no answers")
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode()[:300]
+            except Exception:  # noqa: BLE001
+                pass
+            _decision_log(provider_id, model, f"HTTP {exc.code}: {body}")
+            if exc.code == 400:
+                # A bad request is a property of the *request*, not of the key:
+                # the same payload to the next key fails the same way.  This
+                # is what a typed question sent to a noul-only model looks
+                # like ("Respan only accepts noul questions ..."), and every
+                # key tried would burn a request on the identical refusal.
+                break
+            reset_at = _decision_reset_at(body)
+            _decision_park_key(provider_id, model, key, exc.code, now, reset_at)
+        except Exception as exc:  # noqa: BLE001 — every failure is a route failure
+            _decision_log(provider_id, model, f"{type(exc).__name__}: {exc}"[:220])
+    return None, model
+
+
+def _decision_call_decisions(slot: dict, state: str, instructions: str,
+                             criteria: dict, timeout: float) -> tuple[float | None, str]:
+    """Ask a decision model a *noul* question.
+
+    OpenRouter's Decisions API (POST /api/alpha/decisions) answers a noul
+    question with a calibrated probability::
+
+        {"answers": {"<question-id>": {"type": "noul", "noul": 0.97}},
+         "model": "respan/span-01-lite-20260925", "usage": {"cost": 0}}
+
+    The contract was read off the live API, not from the docs:
+      * the question type must be ``noul`` — Respan answers HTTP 400 for
+        "choice" and "score" ("Respan only accepts noul questions whose
+        instructions and criteria are present, plain strings");
+      * ``instructions`` is a plain string;
+      * ``criteria`` is an object whose values are plain strings, keyed
+        ``true`` / ``false`` for a noul question;
+      * ``state`` is the content to evaluate — a string, or an object of the
+        shape {input: [messages], output: message}.  An arbitrary object
+        ({"customer_tier": ...}) is rejected with HTTP 400, so the chain
+        always sends a string.
+
+    Returns ``(probability, model_name)``; probability is None on failure.
+    """
+    answers, served = _decision_call_questions(
+        slot, state,
+        {"decision": {"type": "noul",
+                      "instructions": instructions,
+                      "criteria": criteria}},
+        timeout)
+    if not answers:
+        return None, served
+    probability = (answers.get("decision") or {}).get("noul")
+    if isinstance(probability, (int, float)):
+        return float(probability), served
+    _decision_log(slot["provider_id"], slot["name"],
+                  f"unexpected answer shape: "
+                  f"{json.dumps(answers.get('decision'))[:160]}")
+    return None, served
+
+
+def _decision_call_native_choice(slot: dict, state: str, question: str,
+                                 options: list[str], criteria: str,
+                                 timeout: float) -> dict | None:
+    """Ask a decision model a native *choice* question.
+
+    This is the documented contract: the criteria are an object keyed by the
+    option label, and the answer carries the chosen label together with the
+    full probability distribution::
+
+        {"answers": {"choice": {"type": "choice", "choice": "billing",
+                                 "probabilities": {"billing": 0.96,
+                                                   "technical": 0.04},
+                                 "confidence": 0.92}}}
+
+    The only model that implements it is paid (``typesafe/jev-1.13``), so no
+    registered free route reaches this path today.  It is written anyway so
+    the chain speaks the documented protocol and starts using the typed path
+    the moment a free typed model appears.
+
+    Returns None when the route cannot answer.
+    """
+    option_criteria = {
+        label: (f"'{label}' is the right answer to the question."
+                + (f" {criteria}" if criteria else ""))
+        for label in options
+    }
+    answers, served = _decision_call_questions(
+        slot, state,
+        {"choice": {
+            "type": "choice",
+            "instructions": (
+                f"Choose exactly one of: {', '.join(options)}. {question}"),
+            "criteria": option_criteria,
+        }},
+        timeout)
+    if not answers:
+        return None
+    answer = answers.get("choice") or {}
+    chosen = answer.get("choice")
+    if not chosen:
+        _decision_log(slot["provider_id"], slot["name"],
+                      f"unexpected answer shape: {json.dumps(answer)[:160]}")
+        return None
+    probabilities = {
+        str(name): float(value)
+        for name, value in (answer.get("probabilities") or {}).items()
+        if isinstance(value, (int, float))
+    }
+    reported = answer.get("confidence")
+    return {
+        "answer": str(chosen),
+        "probabilities": probabilities,
+        "confidence": float(reported) if isinstance(reported, (int, float)) else None,
+        "method": "native",
+        "model": served,
+    }
+
+
+def _decision_call_native_score(slot: dict, state: str, question: str,
+                                scale: list[str], criteria: str,
+                                timeout: float) -> dict | None:
+    """Ask a decision model a native *score* question.
+
+    The documented contract for a score is an ordered list of labels; the
+    answer carries the position, the legend and the distribution::
+
+        {"answers": {"score": {"type": "score", "score": 1.99,
+                               "legend": {"0": "Calm", "1": "Frustrated",
+                                          "2": "Very angry"},
+                               "probabilities": {"0": 0, "1": 0.01, "2": 0.99},
+                               "confidence": 0.99}}}
+
+    Like the native choice, this is served by the paid ``typesafe/jev-1.13``
+    only; the free route answers noul questions and nothing else.
+
+    Returns None when the route cannot answer.
+    """
+    answers, served = _decision_call_questions(
+        slot, state,
+        {"score": {
+            "type": "score",
+            "instructions": (
+                f"Place the state on the scale ({', '.join(scale)}). {question}"),
+            "criteria": list(scale),
+        }},
+        timeout)
+    if not answers:
+        return None
+    answer = answers.get("score") or {}
+    reported_score = answer.get("score")
+    if not isinstance(reported_score, (int, float)):
+        _decision_log(slot["provider_id"], slot["name"],
+                      f"unexpected answer shape: {json.dumps(answer)[:160]}")
+        return None
+    legend = {str(k): str(v) for k, v in (answer.get("legend") or {}).items()}
+    probabilities = {
+        str(name): float(value)
+        for name, value in (answer.get("probabilities") or {}).items()
+        if isinstance(value, (int, float))
+    }
+    confidence = answer.get("confidence")
+    position = int(round(float(reported_score)))
+    position = max(0, min(len(scale) - 1, position))
+    return {
+        "answer": scale[position],
+        "score": position,
+        "expected_score": float(reported_score),
+        "probabilities": probabilities,
+        "legend": legend,
+        "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+        "method": "native",
+        "model": served,
+    }
+
+
+def _decision_score_via_noul(slot: dict, state: str, question: str,
+                             scale: list[str], criteria: str,
+                             timeout: float) -> dict | None:
+    """Derive a score distribution from cumulative *noul* questions.
+
+    The free decision model answers noul questions only, so an ordered scale
+    is served by asking "is the level at least k?" for every level above the
+    bottom and differencing the answers::
+
+        P(level = 0) = 1 - P(>=1)
+        P(level = k) = P(>=k) - P(>=k+1)
+
+    All of those questions travel in ONE request, so a whole scale costs a
+    single request against the daily allowance.
+
+    Measured live on 2026-11-06
+    (workspace/research/audit_2026/probe_score_scale.py): the extremes land
+    cleanly, the middle bands are fuzzy — 4/6 on a hand-labelled set, and
+    both misses were mid-level cases.  The result is therefore reported as a
+    *distribution*, not as one confident number.
+
+    Returns None when the route cannot answer.
+    """
+    questions: dict[str, dict] = {}
+    for index in range(1, len(scale)):
+        level = scale[index]
+        questions[f"atleast_{index}"] = {
+            "type": "noul",
+            "instructions": (
+                f"Is the level '{level}' or worse on the scale "
+                f"({', '.join(scale)})?"
+                + (f" {criteria}" if criteria else "")),
+            "criteria": {
+                "true": f"The level is '{level}' or worse.",
+                "false": f"The level is below '{level}'.",
+            },
+        }
+    if not questions:
+        return None
+
+    answers, served = _decision_call_questions(slot, state, questions, timeout)
+    if not answers:
+        return None
+
+    cumulative: list[float] = []
+    for index in range(1, len(scale)):
+        value = (answers.get(f"atleast_{index}") or {}).get("noul")
+        if not isinstance(value, (int, float)):
+            _decision_log(slot["provider_id"], slot["name"],
+                          f"unexpected answer shape: "
+                          f"{json.dumps(answers.get(f'atleast_{index}'))[:160]}")
+            return None
+        cumulative.append(float(value))
+
+    distribution = [1.0 - cumulative[0]]
+    for index in range(len(cumulative) - 1):
+        distribution.append(cumulative[index] - cumulative[index + 1])
+    distribution.append(cumulative[-1])
+    # A band can come out negative when the model contradicts itself.  Clamp
+    # it away and renormalise rather than report a negative probability.
+    distribution = [max(0.0, value) for value in distribution]
+    total = sum(distribution)
+    if total <= 0:
+        return None
+    distribution = [value / total for value in distribution]
+
+    best = max(range(len(distribution)), key=lambda i: distribution[i])
+    expected = sum(i * value for i, value in enumerate(distribution))
+    return {
+        "answer": scale[best],
+        "score": best,
+        "expected_score": round(expected, 3),
+        "probabilities": {
+            scale[i]: round(distribution[i], 4) for i in range(len(scale))
+        },
+        "confidence": round(distribution[best], 4),
+        "method": "emulated",
+        "model": served,
+    }
+
+
+def _decision_reset_at(error_body: str) -> float | None:
+    """The daily-reset instant OpenRouter reports with a free-tier 429."""
+    try:
+        data = json.loads(error_body)
+        headers = (data.get("error", {}).get("metadata", {}) or {}).get("headers", {})
+        raw = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+        if raw:
+            value = float(raw)
+            return value / 1000.0 if value > 1e11 else value
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _parse_yes_no(text: str | None) -> bool | None:
+    """Read a YES/NO verdict out of a model answer, or None when absent."""
+    if not text:
+        return None
+    match = re.search(r"\b(YES|NO)\b", text.strip().upper())
+    if not match:
+        return None
+    return match.group(1) == "YES"
+
+
+def _parse_labelled_answer(text: str | None) -> tuple[str, str, float | None]:
+    """Read ``ANSWER:`` / ``WHY:`` / ``CONFIDENCE:`` out of a model answer.
+
+    Returns ``(answer, why, confidence)``; answer and why are empty strings
+    when the model did not follow the contract, confidence is None when the
+    model did not state one.
+    """
+    answer = ""
+    why = ""
+    confidence: float | None = None
+    if not text:
+        return answer, why, confidence
+    for raw_line in text.splitlines():
+        line = raw_line.strip().lstrip("*# ").strip()
+        if not line or ":" not in line:
+            continue
+        label, _, value = line.partition(":")
+        label = label.strip().upper()
+        value = value.strip()
+        if label == "ANSWER" and not answer:
+            answer = value
+        elif label == "WHY" and not why:
+            why = value
+        elif label == "CONFIDENCE" and confidence is None:
+            try:
+                confidence = float(value.rstrip("%")) / (100.0 if "%" in value else 1.0)
+            except ValueError:
+                confidence = None
+    return answer, why, confidence
+
+
+# The wake question, asked one way everywhere.  The framing is measurable:
+# "should Orion wake up" scored 12/14 on the live 14-case wake set, while
+# "is the speaker addressing Orion" scored 11/14 — both misses in the better
+# framing were utterances that genuinely did not name Orion
+# (workspace/research/audit_2026/probe_wake_accuracy.py).
+_WAKE_INSTRUCTIONS = "Decide whether Orion should wake up and respond to this utterance."
+_WAKE_CRITERIA = {
+    "true": (
+        "Orion should respond: the speaker is speaking to the assistant, "
+        "asking for help, information, or action."
+    ),
+    "false": (
+        "Orion should stay asleep: the speaker is talking to another person, "
+        "mentioning Orion by name without addressing the assistant, or making "
+        "an unrelated remark."
+    ),
+}
+
+
+def _wake_state(text: str) -> str:
+    """The content the decision model evaluates."""
+    return (
+        "Orion is an AI assistant in sleep mode. It wakes up only when the "
+        "user addresses it directly.\n"
+        f"The user said: {text}"
+    )
+
+
+def _wake_relevance(text: str) -> tuple[bool, float | None, str]:
+    """Decide whether an utterance after the wake word addresses Orion.
+
+    Returns ``(relevant, probability, model)``.  ``probability`` is None when
+    no route answered.  The chain is the decision model first and the Gemini
+    fallback second.
+    """
+    from core.models import DECISION_MODEL_SLOTS
+
+    state = _wake_state(text)
+
+    for slot in DECISION_MODEL_SLOTS:
+        timeout = slot.get("timeout", 12.0)
+        if slot.get("api") == "decisions":
+            probability, served = _decision_call_decisions(
+                slot, state, _WAKE_INSTRUCTIONS, _WAKE_CRITERIA, timeout)
+            if probability is not None:
+                return probability >= 0.5, probability, served
+            continue
+
+        if "noul" not in slot.get("question", ()):
+            continue
+        messages = [
+            {"role": "system", "content": (
+                "You are a wake-word relevance classifier for an AI assistant "
+                "named Orion. Answer with exactly YES or NO.")},
+            {"role": "user", "content": (
+                f"{state}\n\n{_WAKE_INSTRUCTIONS}\n"
+                "Answer YES if the speaker is addressing Orion (the assistant) "
+                "and expects a response or action.  Answer NO if the speaker "
+                "is talking to a human, talking about Orion without addressing "
+                "the assistant, or making an unrelated remark.\n"
+                "Answer:")},
+        ]
+        # Gemini spends part of the budget on internal thinking: a ceiling
+        # below 64 tokens comes back with no content at all (finish_reason
+        # "length"), so the floor is 64 and the slot ceiling applies above it.
+        budget = max(64, min(slot.get("max_tokens", 256), 256))
+        content, served = _decision_call_chat(slot, messages, budget, timeout)
+        verdict = _parse_yes_no(content)
+        if verdict is not None:
+            return verdict, 1.0 if verdict else 0.0, served
+
+    _decision_log("-", "-", "every decision route failed; failing closed")
+    return False, None, "none"
+
+
+def is_wake_relevant(text: str) -> bool:
+    """True when the utterance after the wake word addresses Orion.
+
+    The check uses the free decision model chain: OpenRouter's
+    ``respan/span-01-lite:free`` on the Decisions API first, then the Gemini
+    2.5 Flash fallback.  When every route fails the function fails closed —
+    Orion keeps sleeping, which is the safe reading of "I said the name but
+    did not mean you".
+    """
+    relevant, _probability, _model = _wake_relevance(text)
+    return relevant
+
+
+def _decision_choice_via_chat(state: str, question: str,
+                               labels: list[str], criteria: str) -> dict | None:
+    """Pick one of ``labels`` with the chat routes.
+
+    The chat routes answer in words: NVIDIA's nemotron-3.5-bolt-e4b first,
+    gemini-2.5-flash as the fallback.  The confidence is reported only when
+    the route itself stated one — a route that answered in words has not
+    measured a probability.
+
+    Returns None when no chat route could answer.
+    """
+    from core.models import DECISION_MODEL_SLOTS
+
+    allowed = ", ".join(labels)
+    instructions = (
+        f"Choose exactly one of these options: {allowed}.\n"
+        "Reply with exactly three lines and nothing else:\n"
+        "ANSWER: <one of the options, copied verbatim>\n"
+        "WHY: <one line of reasoning>\n"
+        "CONFIDENCE: <0.0-1.0>"
+    )
+    prompt = f"{state}\n\n{instructions}"
+    for slot in DECISION_MODEL_SLOTS:
+        if slot.get("api") == "decisions":
+            continue
+        if "choice" not in slot.get("question", ()):
+            continue
+        messages = [
+            {"role": "system", "content": (
+                "You are a decision assistant. Follow the requested output "
+                "format exactly.")},
+            {"role": "user", "content": prompt},
+        ]
+        budget = max(64, slot.get("max_tokens", 256))
+        content, served = _decision_call_chat(
+            slot, messages, budget, slot.get("timeout", 12.0))
+        answer, why, confidence = _parse_labelled_answer(content)
+        if answer:
+            # Accept only one of the offered labels; a free-form answer
+            # is not a choice.
+            for label in labels:
+                if answer.strip().strip(".").lower() == label.strip().lower():
+                    return {
+                        "answer": label,
+                        "why": why or f"chosen from: {allowed}",
+                        "model": served,
+                        "confidence": confidence if confidence is not None else 0.0,
+                    }
+            return {
+                "answer": answer,
+                "why": why or f"the model answered outside the offered options: {allowed}",
+                "model": served,
+                "confidence": confidence if confidence is not None else 0.0,
+            }
+    return None
+
+
+def make_decision(question: str, options: list[str] | None = None,
+                  context: str = "", criteria: str = "",
+                  scale: list[str] | None = None) -> dict:
+    """Ask the free decision chain for a verdict.
+
+    Three kinds of question, three different routes:
+
+    * **yes/no** — the decision model answers a *noul* question, and the
+      result carries its own calibrated probability.
+    * **a scale** (``scale=[...]``) — the free decision model answers noul
+      questions only, so the scale is *derived*: one cumulative noul question
+      per level ("is the level at least k?"), differenced into a
+      distribution.  The distribution travels with the answer, so a fuzzy
+      middle band is visible instead of hidden behind one label.
+    * **a choice** (``options=[...]``) — the chat routes pick the option
+      (NVIDIA's nemotron-3.5-bolt-e4b, then gemini-2.5-flash).  The free
+      decision model is deliberately *not* asked to choose: measured live on
+      2026-11-06, asking it one noul question per option picked the wrong
+      option in 1 of 3 cases, and using it to verify the chat route's pick
+      rated a wrong pick at P=0.92.  Its opinion on a choice question is not
+      trustworthy, so it is not used.
+
+    A decision model that implements OpenRouter's documented *choice* and
+    *score* types answers those natively when one is registered.  The only
+    such model is paid (``typesafe/jev-1.13``), so the free chain emulates
+    what it can and says which way the answer was derived.
+
+    Args:
+        question: The decision question in plain language.
+        options: Optional list of choice labels.  When given, the answer is
+            one of them.
+        context: Optional background context or state for the decision.
+        criteria: Optional instructions for how to evaluate (e.g. "prefer
+            safety").
+        scale: Optional ordered scale labels, lowest first.  When given, the
+            answer is one of them and the result carries the distribution
+            over the scale.
+
+    Returns:
+        A dict with ``answer`` (str), ``why`` (str), ``model`` (str — the
+        route that actually answered) and ``confidence`` (float — the
+        confidence that was actually measured; 0.0 means "not measured",
+        never a fabricated number).  A scale question also carries
+        ``probabilities`` and ``score``.
+    """
+    from core.models import DECISION_MODEL_SLOTS
+
+    if not question or not question.strip():
+        return {"answer": "", "why": "no question was given",
+                "model": "none", "confidence": 0.0}
+
+    state_parts: list[str] = []
+    if context:
+        state_parts.append(f"Context: {context}")
+    state_parts.append(f"Question: {question}")
+    if criteria:
+        state_parts.append(f"Criteria: {criteria}")
+    state = "\n".join(state_parts)
+
+    choice_labels = [str(o).strip() for o in options if str(o).strip()] if options else []
+    scale_labels = [str(s).strip() for s in scale if str(s).strip()] if scale else []
+
+    # ── A scale question ─────────────────────────────────────────────────────
+    # The free decision model answers noul questions only, so an ordered scale
+    # is derived from cumulative noul questions — one request, one
+    # distribution.  A decision model that implements the documented "score"
+    # type answers it natively instead.
+    if scale_labels:
+        for slot in DECISION_MODEL_SLOTS:
+            if slot.get("api") != "decisions":
+                continue
+            timeout = slot.get("timeout", 12.0)
+            if "score" in slot.get("question", ()):
+                native = _decision_call_native_score(
+                    slot, state, question, scale_labels, criteria, timeout)
+                if native:
+                    return {
+                        "answer": native["answer"],
+                        "why": (f"level {native['score']} on "
+                                f"{', '.join(scale_labels)} "
+                                f"(native score question)"),
+                        "model": native["model"],
+                        "confidence": (native["confidence"]
+                                       if native["confidence"] is not None else 0.0),
+                        "score": native["score"],
+                        "probabilities": native.get("probabilities", {}),
+                    }
+            if "noul" in slot.get("question", ()):
+                emulated = _decision_score_via_noul(
+                    slot, state, question, scale_labels, criteria, timeout)
+                if emulated:
+                    spread = ", ".join(
+                        f"{label} {value:.2f}"
+                        for label, value in emulated["probabilities"].items())
+                    return {
+                        "answer": emulated["answer"],
+                        "why": (f"level {emulated['score']} on "
+                                f"{', '.join(scale_labels)} — {spread} "
+                                f"(derived from cumulative yes/no questions)"),
+                        "model": emulated["model"],
+                        "confidence": emulated["confidence"],
+                        "score": emulated["score"],
+                        "probabilities": emulated["probabilities"],
+                    }
+        # No decision route could serve the scale: the chat routes pick a
+        # level in words instead.
+        chat = _decision_choice_via_chat(state, question, scale_labels, criteria)
+        if chat:
+            return chat
+        return {"answer": "", "why": "every decision route failed",
+                "model": "none", "confidence": 0.0}
+
+    # ── A choice question ────────────────────────────────────────────────────
+    # A decision model that implements the documented "choice" type answers
+    # natively, with the full distribution.  Otherwise the chat routes pick
+    # the option: the free decision model is noul-only, and its opinion on a
+    # choice question was measured to be untrustworthy (see the docstring).
+    if choice_labels:
+        for slot in DECISION_MODEL_SLOTS:
+            if slot.get("api") != "decisions":
+                continue
+            if "choice" not in slot.get("question", ()):
+                continue
+            native = _decision_call_native_choice(
+                slot, state, question, choice_labels, criteria,
+                slot.get("timeout", 12.0))
+            if native:
+                return {
+                    "answer": native["answer"],
+                    "why": (f"chosen from: {', '.join(choice_labels)} "
+                            f"(native choice question)"),
+                    "model": native["model"],
+                    "confidence": (native["confidence"]
+                                   if native["confidence"] is not None else 0.0),
+                    "probabilities": native.get("probabilities", {}),
+                }
+        chat = _decision_choice_via_chat(state, question, choice_labels, criteria)
+        if chat:
+            return chat
+        return {"answer": "", "why": "every decision route failed",
+                "model": "none", "confidence": 0.0}
+
+    # ── A yes/no question ─────────────────────────────────────────────────────
+    # The decision model answers a noul question with a calibrated
+    # probability, which is the honest confidence for this kind of question.
+    instructions = (
+        "Decide whether the answer to the question is YES.\n"
+        f"Use exactly this criterion:\n{criteria}" if criteria else
+        "Decide whether the answer to the question is YES."
+    )
+    for slot in DECISION_MODEL_SLOTS:
+        if slot.get("api") == "decisions":
+            probability, served = _decision_call_decisions(
+                slot, state, instructions,
+                {"true": f"The answer to the question is YES. {criteria}".strip(),
+                 "false": f"The answer to the question is NO. {criteria}".strip()},
+                slot.get("timeout", 12.0))
+            if probability is not None:
+                verdict = probability >= 0.5
+                return {
+                    "answer": "YES" if verdict else "NO",
+                    "why": (f"P(true)={probability:.2f} — criterion: "
+                            f"{'YES' if verdict else 'NO'}. {criteria}".strip()),
+                    "model": served,
+                    "confidence": probability,
+                }
+            continue
+
+        if "noul" not in slot.get("question", ()):
+            continue
+        prompt = (
+            f"{state}\n\n"
+            "Reply with exactly two lines and nothing else:\n"
+            "ANSWER: YES|NO\n"
+            "WHY: <one line of reasoning>"
+        )
+        messages = [
+            {"role": "system", "content": (
+                "You are a decision assistant. Follow the requested output "
+                "format exactly.")},
+            {"role": "user", "content": prompt},
+        ]
+        budget = max(64, slot.get("max_tokens", 256))
+        content, served = _decision_call_chat(
+            slot, messages, budget, slot.get("timeout", 12.0))
+        answer, why, _confidence = _parse_labelled_answer(content)
+        if answer.upper() in ("YES", "NO"):
+            # The chat route answered in words; it did not measure a
+            # probability, so none is reported.  0.0 means "not measured",
+            # not "no confidence".
+            return {
+                "answer": answer.upper(),
+                "why": why or "the decision route gave no rationale",
+                "model": served,
+                "confidence": 0.0,
+            }
+        verdict = _parse_yes_no(content)
+        if verdict is not None:
+            return {
+                "answer": "YES" if verdict else "NO",
+                "why": "the decision route gave no rationale",
+                "model": served,
+                "confidence": 0.0,
+            }
+
+    return {"answer": "", "why": "every decision route failed",
+            "model": "none", "confidence": 0.0}
+
 
 # ── USER INTERACTION TOOLS ────────────────────────────────────────────────────
 
@@ -9029,6 +10207,8 @@ _SUB_TOOL_FUNCS: dict = {
     "delete_file":                delete_file,
     "http_request":               http_request,
     "get_datetime":               get_datetime,
+    # Operational manuals — a worker can load the same standards the parent does
+    "skill":                      skill,
     # Memory / delegation helpers
     "save_memory":                save_memory,
     "retrieve_memory":            retrieve_memory,
@@ -9098,6 +10278,7 @@ _SUB_TOOL_FUNCS: dict = {
     "toggle_torch":               toggle_torch,
     "get_hostname":               get_hostname,
     "get_uptime":                 get_uptime,
+    "make_decision":              make_decision,
 }
 
 
