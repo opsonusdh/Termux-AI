@@ -436,6 +436,72 @@ def _segment_references_api_keys(segment: str) -> bool:
     return bool(_API_KEYS_REF.search(segment))
 
 
+def _segment_references_credential_constants(segment: str) -> bool:
+    """True if a segment mentions paths.py credential constants.
+
+    Catches ``paths.API_KEYS_FILE``, ``paths.GOOGLE_OAUTH_FILE``,
+    ``paths.GOOGLE_TOKENS_DIR`` and bare ``API_KEYS_FILE`` etc. in inline code.
+    """
+    if not segment:
+        return False
+    return any(
+        const in segment
+        for const in (
+            "API_KEYS_FILE",
+            "GOOGLE_OAUTH_FILE",
+            "GOOGLE_TOKENS_DIR",
+        )
+    )
+
+
+# Known secret file patterns to detect in script bodies.
+_SECRET_PATH_PATTERNS = (
+    "api.keys",
+    "google_oauth.json",
+    "google_pending_auth.json",
+    "google_tokens",
+    "API_KEYS_FILE",
+    "GOOGLE_OAUTH_FILE",
+    "GOOGLE_TOKENS_DIR",
+)
+
+
+def _script_references_credential(script_path: str) -> bool:
+    """True if *script_path* contains references to known credential files/constants.
+
+    Reads up to 256 KB of the script file and checks for references to secret
+    paths or path constants. This catches exfiltration scripts that don't
+    contain credential *values* but *reference* the credential files.
+    """
+    # Resolve relative paths against the project root (same as _confidential_finding).
+    expanded = os.path.expanduser(os.path.expandvars(str(script_path or "")))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(AI_ROOT, expanded)
+    try:
+        absolute = os.path.abspath(expanded)
+    except (OSError, ValueError):
+        return False
+
+    try:
+        size = os.path.getsize(absolute)
+    except OSError:
+        return False
+    if size == 0 or size > 8 * 1024 * 1024:  # same limit as content scan
+        return False
+
+    try:
+        with open(absolute, "rb") as handle:
+            raw = handle.read(256 * 1024)
+    except OSError:
+        return False
+
+    if b"\x00" in raw[:4096]:  # binary
+        return False
+
+    text = raw.decode("utf-8", errors="replace")
+    return any(pattern in text for pattern in _SECRET_PATH_PATTERNS)
+
+
 def _is_owned_path(path: str) -> bool:
     target = _expand_path(path)
     for owned in _load_owned_paths():
@@ -781,7 +847,40 @@ def _check_mutating(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
     return _check_write_targets(cmd, targets)
 
 
+def _extract_script_path(tokens: List[str], interpreter: str) -> str | None:
+    """Return the script file path being executed, or None.
+
+    Handles:
+    - ``python script.py`` → ``script.py``
+    - ``python -c "code"`` → None (inline, handled separately)
+    - ``python -m module`` → None (module, no file)
+    - ``bash script.sh`` → ``script.sh``
+    - ``node script.js`` → ``script.js``
+    - ``perl script.pl`` → ``script.pl``
+    """
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+
+        if tok == "-m":
+            return None  # module, no file
+
+        if tok in {"-c", "-Command", "/C"}:
+            return None  # inline code, handled separately
+
+        # Skip flag arguments.
+        if tok.startswith("-") or (sys.platform == "win32" and tok.startswith("/")):
+            i += 1
+            continue
+
+        # This is the script file.
+        return tok
+
+    return None
+
+
 def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
+    # Check inline code first (existing logic).
     i = 1
     while i < len(tokens):
         tok = tokens[i]
@@ -799,6 +898,10 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
             # So are the Google OAuth credentials and refresh tokens.
             if _segment_references_google_secret(inline):
                 return True, "inline code references a Google OAuth credential file"
+
+            # Also gate references to the paths.py constants for secret files.
+            if _segment_references_credential_constants(inline):
+                return True, "inline code references a credential path constant"
 
             for pdir in PROTECTED_DIRS:
                 name = os.path.basename(pdir)
@@ -826,9 +929,20 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
             i += 1
             continue
 
-        needs, reason = _path_verdict(tok)
+        # Positional argument — could be a script file.
+        script_path = tok
+        needs, reason = _path_verdict(script_path)
         if needs:
             return True, f"'{cmd}': {reason}"
+
+        # Also scan the script file for references to credential files/constants.
+        # A script that opens config/api.keys or uses paths.API_KEYS_FILE is
+        # an exfiltration attempt.
+        if _script_references_credential(script_path):
+            return True, (
+                f"script '{script_path}' references a credential file or path constant"
+            )
+
         return False, "OK"
 
     return False, "OK"
@@ -955,7 +1069,9 @@ def command_needs_permission(cmd: str) -> bool:
     # individual segments: it can sit somewhere that is not a command of its
     # own — a ``for`` word list, a loop header, an assignment — while the
     # command that finally reads the file only mentions a variable.
-    if _segment_references_api_keys(cmd) or _segment_references_google_secret(cmd):
+    if (_segment_references_api_keys(cmd)
+            or _segment_references_google_secret(cmd)
+            or _segment_references_credential_constants(cmd)):
         return True
 
     # A confidential file named in the command — by path or by name.
@@ -1052,7 +1168,8 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
     # mentions a variable.
     references_api_keys = _segment_references_api_keys(cmd)
     references_google_secrets = _segment_references_google_secret(cmd)
-    references_secrets = references_api_keys or references_google_secrets
+    references_secret_constants = _segment_references_credential_constants(cmd)
+    references_secrets = references_api_keys or references_google_secrets or references_secret_constants
 
     # Every path in the command that points at a confidential file.
     confidential = _confidential_references(cmd)
@@ -1087,11 +1204,17 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
             "command references a Google OAuth credential file; "
             "explicit permission required in all modes"
         )))
+    if references_secret_constants and not references_api_keys:
+        requests.append((cmd, (
+            "inline code references a credential path constant; "
+            "explicit permission required in all modes"
+        )))
 
     for segment in segments:
         if references_secrets and (
             _segment_references_api_keys(segment)
             or _segment_references_google_secret(segment)
+            or _segment_references_credential_constants(segment)
         ):
             # Already reported above, as the whole command.
             continue

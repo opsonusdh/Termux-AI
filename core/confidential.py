@@ -480,6 +480,84 @@ def _blob_share(text: str) -> tuple[float, int]:
     return blob_chars / total, blobs
 
 
+# ── redaction ──────────────────────────────────────────────────────────────────
+
+#: A short, stable label for each credential shape, used in redaction tags.
+_REDACT_LABELS = {
+    "a PEM private-key block": "PEM private key",
+    "an OpenAI/Anthropic-style API key": "OpenAI/Anthropic key",
+    "an OpenRouter API key": "OpenRouter key",
+    "a Google API key": "Google API key",
+    "a Google OAuth client secret": "Google OAuth secret",
+    "a Groq API key": "Groq key",
+    "an NVIDIA API key": "NVIDIA key",
+    "a Hugging Face token": "Hugging Face token",
+    "a GitHub token": "GitHub token",
+    "an AWS access key id": "AWS access key",
+    "a Slack token": "Slack token",
+    "a Stripe key": "Stripe key",
+    "a SendGrid key": "SendGrid key",
+    "a Telegram bot token": "Telegram bot token",
+    "a Discord bot token": "Discord bot token",
+    "a Twilio account SID": "Twilio SID",
+    "a JSON Web Token": "JWT",
+    "a bearer token": "bearer token",
+    "credentials embedded in a URL": "URL credentials",
+}
+
+
+def redact_credentials(text: str) -> str:
+    """Return *text* with every credential-shaped value redacted.
+
+    The same :data:`_CONTENT_PATTERNS` that the classifier uses to recognise a
+    secret are used here to find it, so a value is redacted exactly when it
+    would make a file confidential.  Assignment statements (``api_key = "…"``)
+    have their *value* replaced, and unlabelled key-material blobs are
+    replaced too.  Overlapping matches keep the earliest one, so nothing is
+    redacted twice and nothing that is not a secret is touched.
+
+    The redaction tag says *what kind* of secret was there — never the value.
+    """
+    if not text:
+        return text
+
+    matches: list[tuple[int, int, str]] = []
+
+    for label, pattern in _CONTENT_PATTERNS:
+        short = _REDACT_LABELS.get(label, label)
+        for match in pattern.finditer(text):
+            matches.append((match.start(), match.end(), f"[REDACTED:{short}]"))
+
+    # secret-shaped name bound to a value — redact the value, keep the name.
+    # A placeholder value ("your-api-key-here", "changeme" …) is not a secret.
+    for match in _ASSIGNMENT_RE.finditer(text):
+        if _is_placeholder(match.group(1)):
+            continue
+        matches.append((match.start(1), match.end(1), "[REDACTED]"))
+
+    # key material with no label at all.
+    for match in _GIBBERISH_RE.finditer(text):
+        token = match.group(0)
+        if _HASH_LABEL_RE.match(token):
+            continue
+        if not _looks_like_key_material(token):
+            continue
+        matches.append((match.start(), match.end(), "[REDACTED:key material]"))
+
+    matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+
+    out: list[str] = []
+    last = 0
+    for start, end, tag in matches:
+        if start < last:
+            continue  # overlap with an earlier (earlier-starting) replacement
+        out.append(text[last:start])
+        out.append(tag)
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
 # ── the verdict ────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ from core import tools as _tool_runtime
 from core import runtime_log
 from core import spill as _spill
 from core import tool_pipeline as _tool_pipeline
+from core import confidential
 from core.tools import *
 from core.plugin_manager import plugin_manager
 import context_manager as _cm
@@ -1810,6 +1811,10 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
             normalized = json.dumps(res, ensure_ascii=False)
         else:
             normalized = str(res)
+
+        # Redact any credential material before it reaches the log, the
+        # screen or the model — every tool result passes through here.
+        normalized = confidential.redact_credentials(normalized)
 
         # The result is logged the moment the tool returns — not when the
         # turn ends.

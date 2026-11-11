@@ -5763,7 +5763,9 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
             res = local_funcs[name](**args)
             if not isinstance(res, str):
                 res = json.dumps(res, indent=2)
-            return res
+            # Redact any credential material before it is handed back to the
+            # sub-AI's conversation.
+            return confidential.redact_credentials(res)
         except Exception as e:
             return f"[TOOL ERROR] Execution failed: {str(e)}"
 
