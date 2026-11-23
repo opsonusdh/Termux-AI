@@ -57,6 +57,7 @@ from core import notifier
 # Module-level import (not a `from ... import name`) so this file shares the
 # single global PluginManager instance rather than building a second one.
 from core import plugin_manager as plugin_manager_module
+from core import mcp_client as mcp_client_module
 import paths
 
 
@@ -1679,6 +1680,81 @@ TOOLS_DESCRIPTION = [
     {
         "type": "function",
         "function": {
+            "name": "manage_mcp",
+            "description": (
+                "Inspect and control MCP (Model Context Protocol) servers. "
+                "Each configured server contributes its tools to my tool "
+                "list automatically, named mcp__<server>__<tool>, so this "
+                "tool manages the servers themselves. Actions: 'list' shows "
+                "every server with its connection state, 'status' covers one "
+                "server in detail (including the last error and the server's "
+                "own stderr when it will not start), 'tools' lists the "
+                "currently advertised MCP tools, 'add' registers a server "
+                "(stdio: command + args; http: url), 'remove' forgets one, "
+                "'enable'/'disable' switch one on or off, 'connect' starts "
+                "a server now and reports its tool list, 'disconnect' stops "
+                "it, 'refresh' drops the caches so the tools are re-listed. "
+                "A server that fails is cached as failed for a minute — the "
+                "rest of the tool catalogue keeps working."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "status", "tools", "add", "remove",
+                                 "enable", "disable", "connect", "disconnect",
+                                 "refresh"],
+                        "description": "What to do. Default 'list'.",
+                        "default": "list",
+                    },
+                    "server": {
+                        "type": "string",
+                        "description": (
+                            "Server name. Required for every action except "
+                            "'list' and 'tools'."
+                        ),
+                    },
+                    "transport": {
+                        "type": "string",
+                        "enum": ["stdio", "http"],
+                        "description": "Transport for action 'add'. Default 'stdio'.",
+                        "default": "stdio",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            "Executable to launch (stdio transport), e.g. "
+                            "'node' or 'python3'. Its path may contain ~."
+                        ),
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Arguments for the command (stdio transport), "
+                            "e.g. ['-y', '@modelcontextprotocol/server-everything']."
+                        ),
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": (
+                            "MCP endpoint URL for the http transport, e.g. "
+                            "'http://127.0.0.1:9100/mcp'."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional human-readable description for 'add'.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "initialize_project",
             "description": "Initialize a new project and set the global goal.",
             "parameters": {
@@ -1822,8 +1898,8 @@ TOOLS_DESCRIPTION = [
                 "Pick the sub-AI by INTELLIGENCE LEVEL, not by model id: 'high' routes to "
                 "the largest reasoning-capable FREE models (Gemini 3.8 Flash, MiniMax "
                 "M3.1 Flash, Qwen3.8-27B, Nemotron 3.5 Super VL, Nemotron 3 Ultra, "
-                "Mistral Large 4), 'medium' to a step down "
-                "(GPT-OSS 120B, Poolside Laguna XS, Nemotron 3 Super, Gemma 4 31B), and "
+                "ERNIE 5.5 Flash, Kimi K3.1 Pro, Mistral Large 4), 'medium' to a step down "
+                "(GPT-OSS 120B, Nemotron 3 Super, Gemma 4 31B), and "
                 "'low' to the cheap and fast end (Gemini 2.5 Flash, Gemini Flash-Lite, Gemma 4, "
                 "Cohere North Mini Code). Every route is free — no paid model is ever "
                 "used — and only tool-calling capable models are in the pool. "
@@ -2823,6 +2899,16 @@ def write_file(
     if not approved:
         return reason
 
+    # The content itself.  Writing a program that points at a credential
+    # store is the first half of the exfiltration chain the user described —
+    # write a file that prints the keys, run it — and while the content is
+    # still being written the intent is still visible.  The run itself is
+    # gated too (see core/permissions.py); this is the earlier of the two
+    # questions.
+    approved, reason = permissions.request_content_permission("write", p, content)
+    if not approved:
+        return reason
+
     # Validate segment mode parameters
     if mode == "segment":
         if segment_start is None or segment_end is None:
@@ -3075,6 +3161,14 @@ def find_replace(
             if count == 0:
                 return f"No occurrences of the search text found in {path}."
 
+            # The file as it will be after the edit: a replacement that
+            # inserts a credential reference is the same thing as writing
+            # one, so it is asked about the same way.
+            approved, reason = permissions.request_content_permission(
+                "find_replace", p, new_content)
+            if not approved:
+                return reason
+
             with open(p, "w", encoding="utf-8") as f:
                 f.write(new_content)
 
@@ -3118,6 +3212,11 @@ def find_replace(
             new_segment_lines[-1] = new_segment_lines[-1].rstrip("\n")
 
         lines[start_idx:end_idx] = new_segment_lines
+
+        approved, reason = permissions.request_content_permission(
+            "find_replace", p, "".join(lines))
+        if not approved:
+            return reason
 
         with open(p, "w", encoding="utf-8") as f:
             f.writelines(lines)
@@ -5769,6 +5868,15 @@ def _dispatch_sub_tool(name: str, args_raw: str) -> str:
         except Exception as e:
             return f"[TOOL ERROR] Execution failed: {str(e)}"
 
+    if name.startswith("mcp__"):
+        # An MCP tool granted to this worker via its schema list: resolved
+        # against the shared manager, same as the main loop's dispatch.
+        try:
+            res = mcp_client_module.mcp_manager.call_qualified(name, args)
+            return confidential.redact_credentials(res)
+        except Exception as e:
+            return f"[TOOL ERROR] Execution failed: {str(e)}"
+
     return f"[TOOL ERROR] Tool '{name}' is not supported in the sub-AI delegation environment."
 
 
@@ -5824,7 +5932,14 @@ def _select_sub_tools(available_tools: list | None, tool_call_iterations: int):
     else:
         requested = {str(name) for name in available_tools}
 
-    granted = requested & set(_SUB_TOOL_FUNCS)
+    # MCP tools are granted like any other: their names resolve against
+    # the live manager, and their schemas ride along with the static ones.
+    try:
+        mcp_names = set(mcp_client_module.mcp_manager.mcp_tool_names())
+    except Exception:
+        mcp_names = set()
+
+    granted = requested & (set(_SUB_TOOL_FUNCS) | mcp_names)
     dropped = sorted(requested - granted)
 
     schemas = None
@@ -5833,6 +5948,14 @@ def _select_sub_tools(available_tools: list | None, tool_call_iterations: int):
             t for t in TOOLS_DESCRIPTION
             if t.get("function", {}).get("name") in granted
         ]
+        if mcp_names:
+            try:
+                schemas = schemas + [
+                    t for t in mcp_client_module.mcp_manager.tool_schemas()
+                    if t.get("function", {}).get("name") in granted
+                ]
+            except Exception:
+                pass
     return schemas, sorted(granted), dropped
 
 
@@ -10156,6 +10279,150 @@ def manage_plugin(action: str = "list", plugin: str = "", code: str = "") -> str
             f"disable, setup, finish, disconnect.")
 
 
+def manage_mcp(action: str = "list", server: str = "", transport: str = "stdio",
+               command: str = "", args=None, url: str = "",
+               description: str = "") -> str:
+    """Inspect and control MCP servers: list, status, tools, add, remove,
+    enable, disable, connect, disconnect, refresh.
+
+    The tools a server exposes appear in the tool list automatically, as
+    ``mcp__<server>__<tool>`` — this function manages the *servers*, not
+    the individual tools.
+    """
+    log_write(f"[manage_mcp] action:{action} server:{server}")
+    mm = mcp_client_module.mcp_manager
+
+    action = (action or "list").strip().lower()
+    server = (server or "").strip()
+
+    if action in ("list", ""):
+        configs = mm.configs()
+        if not configs:
+            return ("No MCP servers configured. Add one with "
+                    "manage_mcp(action='add', server='<name>', "
+                    "transport='stdio', command='<executable>', "
+                    "args=[...]) — or /mcp add on the user's side.")
+        lines = ["MCP servers:"]
+        for name, cfg in configs.items():
+            state = mm.status(name)
+            info = state if state.get("ok") else {}
+            if info:
+                body = dict(info)
+                body.pop("ok", None)
+            else:
+                body = {"state": state.get("message", "unknown")}
+            tools = body.get("tools") or []
+            tool_note = f", {len(tools)} tools" if tools else ""
+            lines.append(f"  - {name} [{cfg.transport}] "
+                         f"{'enabled' if cfg.enabled else 'disabled'} — "
+                         f"{body.get('state', 'unknown')}{tool_note}")
+            if body.get("error"):
+                lines.append(f"      error: {body['error']}")
+        return "\n".join(lines)
+
+    if action == "status":
+        if not server:
+            return ("[ERROR] A server name is required for this action. "
+                    "Available: " + (", ".join(mm.configs()) or "(none)"))
+        st = mm.status(server)
+        if not st.get("ok"):
+            return f"[ERROR] {st.get('message', 'unknown error')}"
+        body = {k: v for k, v in st.items() if k != "ok"}
+        import json as _json
+        return _json.dumps(body, ensure_ascii=False, indent=2)
+
+    if action == "tools":
+        try:
+            schemas = mm.tool_schemas()
+        except Exception as exc:
+            return f"[ERROR] Could not list the tools: {exc}"
+        if server:
+            schemas = [s for s in schemas
+                       if s["function"]["name"].startswith(
+                           f"mcp__{server}__")
+                       or f"'{server}'" in s["function"]["description"]]
+        if not schemas:
+            return ("No MCP tools are advertised right now. Check "
+                    "manage_mcp(action='status') for the servers' state.")
+        lines = [f"MCP tools ({len(schemas)}):"]
+        for s in schemas:
+            fn = s["function"]
+            first = (fn.get("description") or "").splitlines()[0]
+            lines.append(f"  - {fn['name']} — {first}")
+        return "\n".join(lines)
+
+    if action == "add":
+        cfg = mcp_client_module.MCPServerConfig(
+            name=server,
+            transport=transport,
+            command=command,
+            args=[str(a) for a in args] if args else [],
+            url=url,
+            description=description,
+        )
+        result = mm.add_server(cfg)
+        if not result.get("ok"):
+            return f"[ERROR] {result.get('message', 'could not add the server')}"
+        extra = ""
+        if cfg.transport == "stdio":
+            extra = (" It is connected lazily: the first tool request "
+                     "starts it.")
+        return (result["message"] + extra +
+                " Its tools appear in my tool list from the next request on "
+                "— call manage_mcp(action='tools') to see them.")
+
+    if action == "remove":
+        result = mm.remove_server(server)
+        return (result["message"] if result.get("ok")
+                else f"[ERROR] {result['message']}")
+
+    if action == "enable":
+        result = mm.set_enabled(server, True)
+        return (result["message"] if result.get("ok")
+                else f"[ERROR] {result['message']}")
+
+    if action == "disable":
+        result = mm.set_enabled(server, False)
+        return (result["message"] if result.get("ok")
+                else f"[ERROR] {result['message']}")
+
+    if action in ("connect", "start"):
+        try:
+            conn = mm.get_connection(server, force=True)
+        except Exception as exc:
+            return (f"[ERROR] Could not connect to '{server}': {exc}")
+        info = conn.server_info or {}
+        tools = []
+        try:
+            tools = [t.get("name", "?") for t in conn.list_tools(refresh=True)]
+        except Exception as exc:
+            return (f"Connected to '{server}' but the tool listing failed: "
+                    f"{exc}")
+        return (f"Connected to '{server}' "
+                f"({info.get('name', '?')} {info.get('version', '?')}, "
+                f"protocol {conn.negotiated_version}). "
+                f"{len(tools)} tools: {', '.join(tools) or '(none)'}")
+
+    if action in ("disconnect", "stop"):
+        result = mm.disconnect(server)
+        return result["message"]
+
+    if action == "refresh":
+        result = mm.refresh(server if server else "")
+        if not result.get("ok"):
+            return f"[ERROR] {result['message']}"
+        note = result["message"]
+        try:
+            schemas = mm.tool_schemas()
+            note += f". {len(schemas)} MCP tool(s) now advertised."
+        except Exception:
+            pass
+        return note
+
+    return (f"[ERROR] Unknown action '{action}'. Valid: list, status, tools, "
+            f"add, remove, enable, disable, connect, disconnect, refresh.")
+
+
 # ── Sub-AI tool registry ──────────────────────────────────────────────────────
 # Single source of truth for the tools a delegated sub-AI is allowed to run.
 # It is built here (after every tool function is defined) so the entries can
@@ -10295,6 +10562,7 @@ _SUB_AI_EXCLUDED_TOOLS: dict[str, str] = {
     "add_subtask": "mutates the parent agent's project state",
     "update_subtask": "mutates the parent agent's project state",
     "manage_plugin": "enabling a plugin changes shared configuration",
+    "manage_mcp": "connecting an MCP server changes shared configuration",
     "retrieve_chunk": "context browsing stays with the main agent",
     "list_chunks": "context browsing stays with the main agent",
 }

@@ -11,9 +11,13 @@ config/config.json
 config/*.tmp
 config/test_*.json
 log.txt
-logs/ 
+logs/
 execution_history.jsonl
 data/state.json
+# Predownloaded model weights and engines (mirage.cact, cactus wasm, the
+# generated node bridge) are runtime state, not source — fetched and
+# SHA256-verified on first use; see data/models/mirage/README.md.
+data/models/
 memories.txt
 indexed_memory.txt
 Termux-STT*

@@ -83,6 +83,8 @@ Update docs when:
 
 Do not document features that are not implemented. If a feature is planned but not present, mark it explicitly as planned or omit it.
 
+If already similar files exist, you should edit that wisely rather than creating redundant or conflicting copies — consolidate, cross-link from the index, and keep `instructions/` manuals and `instructions/skills/` mirrors in step.
+
 ---
 
 ## 5. Config and Migration Rules

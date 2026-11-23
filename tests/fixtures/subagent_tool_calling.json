@@ -395,6 +395,24 @@
       "latency_s": 5.4,
       "status": "ok",
       "tools_accepted": true
+    },
+    "openrouter/baidu/ernie-5.5-flash-preview:free": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...23c4",
+      "latency_s": 5.1,
+      "status": "ok",
+      "tools_accepted": true,
+      "verified_on": "2026-11-23"
+    },
+    "nvidia/moonshotai/kimi-k3.1-pro": {
+      "emitted_tool_call": true,
+      "finish_reason": "tool_calls",
+      "key": "...h1bS",
+      "latency_s": 141.9,
+      "status": "ok",
+      "tools_accepted": true,
+      "verified_on": "2026-11-23"
     }
   },
   "verified_on": "2026-11-03"

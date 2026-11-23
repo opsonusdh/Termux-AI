@@ -61,10 +61,9 @@ PROVIDERS: dict[str, dict] = {
 #     prices them at 0/0; every paid slug answered 402 with a $0.00 balance.
 #
 MODEL_SLOTS: list[dict] = [
-    {"provider_id": "ollama", "name": "beam:cloud",     "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "nemotron-3-ultra:cloud",     "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "gpt-oss:120b-cloud",         "max_tokens": None, "reasoning_effort": "high"},
+    # Ollama Cloud routes are disabled — the Free plan set is empty.
     # Google — Gemini free tier (5 requests/minute/model/project).
+    {"provider_id": "google", "name": "gemini-4-hydrogen",               "max_tokens": None},
     {"provider_id": "google", "name": "gemini-flash-latest",               "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.8-flash",               "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.7-flash",               "max_tokens": None},
@@ -73,7 +72,6 @@ MODEL_SLOTS: list[dict] = [
     {"provider_id": "google", "name": "gemini-3.1-flash-lite",          "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.1-flash-lite-preview",  "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3-flash-preview",         "max_tokens": None},
-    {"provider_id": "google", "name": "gemini-flash-latest",            "max_tokens": None},
     {"provider_id": "google", "name": "gemini-flash-lite-latest",       "max_tokens": None},
     {"provider_id": "google", "name": "gemini-2.5-flash",               "max_tokens": None},
     {"provider_id": "google", "name": "gemini-2.5-flash-lite",          "max_tokens": None},
@@ -98,35 +96,19 @@ MODEL_SLOTS: list[dict] = [
 # ── FREE-ONLY AGENT SLOTS (autonomous agent rotation) ──────────────────────────
 # Same policy as MODEL_SLOTS: a free plan, a free tier or a zero-priced
 # endpoint — never a paid slug.  The removed routes were verified live to
-# refuse with HTTP 402 (OpenRouter: "$0.00 balance"; Ollama: "not included in
-# your free usage") or to be unavailable (NVIDIA answers HTTP 404 "Function
-# ... Not found for account" for nemotron-3-super-120b-a12b, nemotron-4-340b-instruct
-# and kimi-k2.6, and deepseek-v4.1-flash needs more than 300 s for its first
-# token on the free endpoint).
+# refuse with HTTP 402 (OpenRouter: "$0.00 balance") or to be unavailable
+# (NVIDIA answers HTTP 404 "Function ... Not found for account" for
+# nemotron-3-super-120b-a12b and nemotron-4-340b-instruct; kimi-k3.1-pro
+# answered 404 until 2026-11-06 and now serves — re-verified live 2026-11-23;
+# deepseek-v4.1-flash reached end of life on NVIDIA on 2026-11-16, HTTP 410).
 AGENT_MODEL_SLOTS: list[dict] = [
-    # Kimi K3.1 Pro is NOT registered here, because it cannot be served by
-    # this account.  Verified live on 2026-11-06 against
-    # integrate.api.nvidia.com/v1:
-    #   * the live catalogue (84 ids) contains no Kimi K3.1 at all — only
-    #     moonshotai/kimi-k2.6;
-    #   * moonshotai/kimi-k3.1-pro and moonshotai/kimi-k3.1 both answer
-    #     HTTP 404 "404 page not found";
-    #   * moonshotai/kimi-k2.6 answers HTTP 404 "Function ... Not found for
-    #     account", i.e. the account has no Moonshot function enabled;
-    #   * on OpenRouter the Kimi K3 / K3.1 Pro slugs are paid and were
-    #     removed from this repo in 2026-10 after they refused with HTTP 402
-    #     ("this model is not included in your free usage") — see the
-    #     denylist in tests/test_subagent_tiers.py.
-    # A free-only registry cannot carry it.  Re-checked before every release.
-    {"provider_id": "nvidia", "name": "minimaxai/minimax-m3.1-flash",               "max_tokens": 16384, "enable_thinking": True},
-    {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 16384, "enable_thinking": True},
-    {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-super-vl-120b-a12b",     "max_tokens": 16384, "enable_thinking": True},
-    # Mistral Large 4 — 1T total / 52B active MoE.  Verified live 2026-11-06:
-    # the route answers and emits a real tool call on NVIDIA.  It reasons
-    # unconditionally (reasoning_content arrives before content), so the
-    # enable_thinking flag below is accepted but has no effect on it.
-    {"provider_id": "nvidia", "name": "mistralai/mistral-large-4-1t-a52b",        "max_tokens": 16384, "enable_thinking": True},
-    {"provider_id": "nvidia", "name": "z-ai/glm-5.3-flash",           "max_tokens": 16384, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "moonshotai/kimi-k3.1-pro",               "max_tokens": 65536, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "minimaxai/minimax-m3.1-flash",               "max_tokens": 65536, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "z-ai/glm-5.3-flash",           "max_tokens": 131072, "enable_thinking": True},
+    {"provider_id": "openrouter", "name": "baidu/ernie-5.5-flash-preview:free",   "max_tokens": 32768},
+    {"provider_id": "nvidia", "name": "mistralai/mistral-large-4-1t-a52b",        "max_tokens": 262144, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3-ultra-550b-a55b",     "max_tokens": 32768, "enable_thinking": True},
+    {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-super-vl-120b-a12b",     "max_tokens": 131072, "enable_thinking": True},
     {"provider_id": "nvidia", "name": "nvidia/nemotron-3.5-lightning-30b-a3b", "max_tokens": 16384, "enable_thinking": True},
     # Google — Gemini free tier.
     {"provider_id": "google", "name": "gemini-3.8-flash",               "max_tokens": None},
@@ -135,11 +117,7 @@ AGENT_MODEL_SLOTS: list[dict] = [
     {"provider_id": "google", "name": "gemini-3.5-flash",               "max_tokens": None},
     {"provider_id": "google", "name": "gemini-3.1-flash-lite",          "max_tokens": None},
     {"provider_id": "google", "name": "gemma-4-31b-it",                 "max_tokens": None},
-    # Ollama — free plan.
-    {"provider_id": "ollama", "name": "nemotron-3-ultra:cloud",         "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "gpt-oss:120b-cloud",             "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "nemotron-3-super",               "max_tokens": None, "reasoning_effort": "high"},
-    {"provider_id": "ollama", "name": "gemma4:31b",                     "max_tokens": None, "reasoning_effort": "high"},
+    # Ollama Cloud routes are disabled — the Free plan set is empty.
     # Groq — free plan.
     {"provider_id": "groq",       "name": "qwen/qwen3.8-27b",             "max_tokens": 4096},
     {"provider_id": "groq",       "name": "openai/gpt-oss-120b",          "max_tokens": 4096},
@@ -388,16 +366,11 @@ PAID_TYPED_DECISION_MODELS: tuple[str, ...] = ("typesafe/jev-1.13",)
 # paid route cannot be reintroduced by accident.
 
 # The Ollama Cloud models that are included in the account's Free plan.
-# Verified live: each of them answered a completion without the 402 refusal.
-# A model that is not in this set is paid and must never be routed.
-# nemotron-3-nano:30b was re-verified on 2026-11-03 (it had been added to the
-# low tier before the free set learned about it, so the free check rejected it).
-OLLAMA_FREE_PLAN_MODELS: frozenset[str] = frozenset({
-    "nemotron-3-ultra:cloud", "nemotron-3-super",
-    "gpt-oss:120b-cloud", "gpt-oss:120b", "gpt-oss:20b",
-    "gemma4:31b", "gemma4:31b-cloud", "beam:cloud",
-    "nemotron-3-nano:30b",
-})
+# Verified live against HTTP 402: a model outside the account's Free plan
+# answers "this model is not included in your free usage", so only the models
+# listed here may ever be routed.  The set is currently empty — the Ollama
+# Cloud routes are disabled until the plan membership is re-verified live.
+OLLAMA_FREE_PLAN_MODELS: frozenset[str] = frozenset()
 
 # Providers whose every route is free by construction: the free serverless
 # API (NVIDIA), the Free Plan (Groq) and the local Ollama server.
@@ -430,11 +403,12 @@ def is_free_route(provider_id: str, model_name: str | None) -> bool:
         return model_name.endswith(":free")
 
     if provider_id == "google":
-        # The Gemini Developer API free tier covers the Flash, Flash-Lite and
-        # Gemma families.  The Pro families and every image model are billed.
+        # The Gemini Developer API free tier covers the Flash, Flash-Lite,
+        # Gemma and Hydrogen families.  The Pro families and every image
+        # model are billed.
         if any(tag in model_name for tag in _GOOGLE_BILLED_TAGS):
             return False
-        return any(tag in model_name for tag in ("flash", "lite", "gemma"))
+        return any(tag in model_name for tag in ("flash", "lite", "gemma", "hydrogen"))
 
     if provider_id == "ollama":
         # Ollama Cloud meters a Free plan; the models on it were verified by
@@ -499,6 +473,7 @@ SUBAGENT_FALLBACK_LADDER: dict[str, tuple[str, ...]] = {
 # or NVIDIA's free endpoint (HTTP 404 "no provider serves this model anymore").
 TOOL_CALLING_MODELS: dict[str, set[str]] = {
     "openrouter": {
+        "baidu/ernie-5.5-flash-preview:free",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3.5-super-vl:free",
         "nvidia/nemotron-3.5-lightning:free",
@@ -515,6 +490,7 @@ TOOL_CALLING_MODELS: dict[str, set[str]] = {
         "nvidia/nemotron-3-ultra-550b-a55b",
         "nvidia/nemotron-3.5-super-vl-120b-a12b",
         "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "moonshotai/kimi-k3.1-pro",
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
         "nvidia/nemotron-3.5-bolt-e4b",
         "minimaxai/minimax-m3.1-flash",
@@ -544,26 +520,15 @@ TOOL_CALLING_MODELS: dict[str, set[str]] = {
         "gemma-4-31b-it",
         "gemma-4-26b-a4b-it",
     },
-    "ollama": {
-        "beam:cloud",
-        "nemotron-3-ultra:cloud",
-        "nemotron-3-super",
-        "gpt-oss:120b-cloud",
-        "gpt-oss:120b",
-        "gpt-oss:20b",
-        "gemma4:31b-cloud",
-        # gemma4:31b and nemotron-3-nano:30b were already routed by the tiers
-        # and already carried live evidence, but the gate never learned about
-        # them — so the tiers held two models the gate refused to recognise.
-        # Both were re-probed live on 2026-11-03 (free plan, tool call).
-        "gemma4:31b",
-        "nemotron-3-nano:30b",
-    },
 }
 
 # HIGH — the largest and the reasoning-capable models.  Everything that can
 # chew through a hard, multi-step engineering task lives here.
 SUBAGENT_TIERS: dict[str, list[dict]] = {
+    # gemini-4-hydrogen is free-tier served (verified live 2026-11-23) but sat
+    # at 503 "high demand" all day with no tool-call probe possible, so it is
+    # not tiered yet — the tool gate requires a recorded probe.  It serves the
+    # chat rotation from MODEL_SLOTS in the meantime.
     "high": [
         {
             "provider_id": "google",
@@ -580,6 +545,15 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "reasoning": True,
             "free": True,
             "note": "AA intelligence 28.9, mandatory reasoning, 1M context — free NVIDIA endpoint",
+        },
+        {
+            "provider_id": "openrouter",
+            "name": "baidu/ernie-5.5-flash-preview:free",
+            "max_tokens": 32768,
+            "reasoning": True,
+            "free": True,
+            "note": "ERNIE 5.5 Flash preview — verified live 2026-11-23 to answer "
+                    "and to emit a real tool call on the zero-priced OpenRouter route",
         },
         {
             "provider_id": "groq",
@@ -606,28 +580,12 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "note": "the same weights on the zero-priced OpenRouter route",
         },
         {
-            "provider_id": "ollama",
-            "name": "beam:cloud",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "Beam is an open model by Reflection designed to deliver strong performance for areas such as agentic tool use, coding and general reasoning",
-        },
-        {
             "provider_id": "nvidia",
             "name": "nvidia/nemotron-3-ultra-550b-a55b",
             "max_tokens": None,
             "reasoning": True,
             "free": True,
             "note": "Nemotron 3 Ultra — 550B total / 55B active MoE, frontier reasoning",
-        },
-        {
-            "provider_id": "ollama",
-            "name": "nemotron-3-ultra:cloud",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "the same Nemotron 3 Ultra flagship on the Ollama free plan",
         },
         {
             "provider_id": "openrouter",
@@ -664,6 +622,16 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
         },
         {
             "provider_id": "nvidia",
+            "name": "moonshotai/kimi-k3.1-pro",
+            "max_tokens": None,
+            "reasoning": True,
+            "free": True,
+            "note": "Kimi K3.1 Pro — back in NVIDIA's catalogue after 2026-11-06 "
+                    "(HTTP 404 then); verified live 2026-11-23 to emit a real tool "
+                    "call, but slow, so it is tried near the end",
+        },
+        {
+            "provider_id": "nvidia",
             "name": "z-ai/glm-5.3-flash",
             "max_tokens": None,
             "reasoning": True,
@@ -673,36 +641,12 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
     ],
     "medium": [
         {
-            "provider_id": "ollama",
-            "name": "gpt-oss:120b-cloud",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "GPT-OSS 120B on the Ollama free plan — OpenAI's flagship open-weight model",
-        },
-        {
             "provider_id": "groq",
             "name": "openai/gpt-oss-120b",
             "max_tokens": 3072,
             "reasoning": True,
             "free": True,
             "note": "the same GPT-OSS 120B weights on the Groq free plan",
-        },
-        {
-            "provider_id": "ollama",
-            "name": "gpt-oss:120b",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "GPT-OSS 120B on the Ollama free plan (non-cloud alias)",
-        },
-        {
-            "provider_id": "ollama",
-            "name": "nemotron-3-super",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "Nemotron 3 Super — 120B reasoning MoE, AA coding 37.7",
         },
         {
             "provider_id": "google",
@@ -719,14 +663,6 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "reasoning": True,
             "free": True,
             "note": "AA coding 70.1 / agentic 26.0",
-        },
-        {
-            "provider_id": "ollama",
-            "name": "gemma4:31b",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "Gemma 4 31B on the Ollama free plan (AA coding 43.4)",
         },
         {
             "provider_id": "google",
@@ -867,22 +803,6 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "note": "the same weights on the zero-priced OpenRouter route",
         },
         {
-            "provider_id": "ollama",
-            "name": "nemotron-3-nano:30b",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "the 30B Nemotron on the Ollama free plan",
-        },
-        {
-            "provider_id": "ollama",
-            "name": "gpt-oss:20b",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "the small sibling of GPT-OSS (AA coding 20.7)",
-        },
-        {
             "provider_id": "groq",
             "name": "openai/gpt-oss-20b",
             "max_tokens": 3072,
@@ -929,14 +849,6 @@ SUBAGENT_TIERS: dict[str, list[dict]] = {
             "reasoning": True,
             "free": True,
             "note": "a 29B mixture-of-experts model on the zero-priced route",
-        },
-        {
-            "provider_id": "ollama",
-            "name": "beam:cloud",
-            "max_tokens": None,
-            "reasoning": True,
-            "free": True,
-            "note": "a fast model of the Ollama free plan — kept as a last resort",
         },
         {
             "provider_id": "nvidia",
@@ -1054,9 +966,6 @@ VISION_CAPABLE_MODELS: dict[str, set[str]] = {
         "gemini-3.7-flash",
         # The Pro families are deliberately absent: they publish a free-tier
         # quota of 0, so they are paid and a free-AI repo must not route them.
-    },
-    "ollama": {
-        "gemma4:31b",
     },
 }
 

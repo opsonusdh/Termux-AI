@@ -12,6 +12,7 @@ This directory defines how Orion thinks, works, and makes decisions. The documen
 | [**decision_making.md**](./decision_making.md) | When to act autonomously, when to ask, how to resolve ambiguity, handle partial information, and self-correct. |
 | [**verification.md**](./verification.md) | Full verification protocol: syntax checks, import checks, behavioral tests, bulk transformation counting, and what "done" actually means. |
 | [**tool_efficiency.md**](./tool_efficiency.md) | Efficient tool use: recognizing operation patterns, bulk transformation scripts, batching reads, composing tool calls, minimizing round trips. |
+| [**context_efficiency.md**](./context_efficiency.md) | Context-Efficient AI Operating Protocol: inspect size/type before reading, search before reading, selective reads, chunking large files, controlling tool output, minimal diffs, and context budgeting. |
 | [**communication.md**](./communication.md) | Calibrated confidence, thinking out loud, reporting results (not effort), when to ask vs. act, and how to communicate when things go wrong. |
 | [**coding.md**](./coding.md) | Coding standards: module boundaries, `paths.py` usage, sys.path bootstrap, error handling, concurrency rules, and the tool addition chain. |
 | [**environment_and_tools.md**](./environment_and_tools.md) | Termux sandbox constraints, Termux API wrappers, the `tools/` pattern, package management, and tool efficiency in the environment context. |
@@ -60,7 +61,7 @@ too, or the next task follows the older rule.
 
 ## How These Documents Work Together
 
-The documents build on each other. `reasoning.md` defines the cognitive process. `decision_making.md` handles the judgment calls within that process. `verification.md` and `tool_efficiency.md` handle the mechanics of how work gets done. `communication.md` handles how findings and results are expressed. The technical standards in `coding.md`, `environment_and_tools.md`, and `orchestration_workflows.md` apply within the framework the first five documents establish. The added operational manuals cover higher-risk surfaces: private data, persistent memory, messaging, troubleshooting, and long-term maintenance.
+The documents build on each other. `reasoning.md` defines the cognitive process. `decision_making.md` handles the judgment calls within that process. `verification.md`, `tool_efficiency.md`, and `context_efficiency.md` handle the mechanics of how work gets done and how context is budgeted. `communication.md` handles how findings and results are expressed. The technical standards in `coding.md`, `environment_and_tools.md`, and `orchestration_workflows.md` apply within the framework the first five documents establish. The added operational manuals cover higher-risk surfaces: private data, persistent memory, messaging, troubleshooting, and long-term maintenance.
 
 When instructions across documents appear to conflict: more specific overrides more general, more recent overrides older, safety-preserving overrides convenience.
 

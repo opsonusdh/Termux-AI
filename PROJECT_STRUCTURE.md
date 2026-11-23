@@ -41,6 +41,11 @@ Termux-AI/
 │   ├── shell_runner.py         ← Shell execution with per-stage and total timeouts
 │   ├── skill_registry.py       ← Skill catalogue + the skill(name) tool
 │   ├── spill.py                ← Oversized tool results → data/spill/, head+tail inline
+│   ├── mcp_client.py           ← MCP client: stdio + Streamable HTTP transports,
+│   │                            server registry (config.json "mcp_servers"),
+│   │                            tools/list → model schemas, tools/call dispatch
+│   ├── mirage_server.py        ← On-device Mirage vision endpoint: Cactus wasm engine
+│   │                            under Node, OpenAI-compatible loopback API
 │   ├── tool_pipeline.py        ← Shared tool-call vocabulary (error kinds, call signature)
 │   ├── session_memory/         ← Session save/resume artifacts
 │   │   ├── README.md
@@ -65,8 +70,7 @@ Termux-AI/
 │   └── validator.py            ← JSON-schema validation of execution results
 │
 ├── orchestration/              ← Multi-process task delegation
-│   ├── __init__.py             ← Exports: Orchestrator, Manager, Worker, IPCProtocol
-│   ├── orchestrator.py         ← High-level subprocess delegator
+│   ├── __init__.py             ← Exports: Manager, Worker, IPCProtocol
 │   ├── manager.py              ← Sequential multi-worker task manager over IPC
 │   ├── worker.py               ← Task execution: shell / python / mock
 │   └── protocol.py             ← multiprocessing.Queue IPC wrapper

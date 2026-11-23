@@ -50,10 +50,11 @@
     "slack-gif-creator",
     "theme-factory",
     "web-artifacts-builder",
+    "web-login",
     "xlsx"
   ],
-  "imported_skill_count": 32,
-  "total_skill_count": 47,
+  "imported_skill_count": 33,
+  "total_skill_count": 48,
   "routing_index": "instructions/skills/INDEX.md",
   "system_prompt": "core/PROMPT.md"
 }

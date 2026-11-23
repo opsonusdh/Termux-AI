@@ -16,7 +16,7 @@ A modular, self-correcting autonomous AI agent for Termux. Orion runs entirely o
   - `delete_file` - secure file/directory deletion with safety checks
   - `http_request` - HTTP client for API calls with comprehensive headers
   - `get_datetime` - current time information in multiple formats
-- **The app knows its own version** — a single `VERSION` constant in `core/__main__.py` is shown in the startup banner (`v3.4.0`), so the build you are talking to is never a guess.
+- **The app knows its own version** — a single `VERSION` constant in `core/__main__.py` is shown in the startup banner (`v3.5.0`), so the build you are talking to is never a guess.
 - **The permission gate knows what a secret looks like** — a file whose *name* (`api.keys`, `.env`, `id_rsa`, `credentials.json`, anything in `.ssh/`) or whose *content* (a PEM private-key block, a provider token format, a JWT, an `Authorization: Bearer` header) says it holds a credential is gated before it is read. The gate says *why* it is asking. In autonomous mode it **refuses** instead of asking — nobody is at the keyboard to answer. See [Permissions](#permissions).
 - **Big tool output goes to disk, not into your context window** — a tool result over the threshold (4,000 tokens by default) is written to `data/spill/<session>/` and the model gets the head, the tail and a path. `read_file` and `search_in_files` fetch the rest. A read of a spill file is never spilled again.
 - **Skills load on demand** — the prompt lists the fifteen core skills; `skill("name")` returns the manual itself, re-read from disk, so an edited `SKILL.md` is visible on the next call. `skill("")` lists the rest of the catalogue.

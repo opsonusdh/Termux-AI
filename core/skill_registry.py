@@ -56,6 +56,7 @@ REGISTERED_IMPORTED_SKILLS: tuple[str, ...] = (
     "doc-coauthoring",
     "internal-comms",
     "skill-creator",
+    "web-login",
 )
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)

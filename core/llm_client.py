@@ -25,6 +25,7 @@ from core import tool_pipeline as _tool_pipeline
 from core import confidential
 from core.tools import *
 from core.plugin_manager import plugin_manager
+from core import mcp_client
 import context_manager as _cm
 import context_compressor as _cc
 import core.display_state as display_state
@@ -76,9 +77,29 @@ def _load_api_keys() -> dict[str, list[str]]:
                 existing.append(val)
         res[provider] = existing
 
+    # Every key this runtime can use is a secret it holds *by value*.  The
+    # redaction filter is told about them so a tool result that carries one
+    # is scrubbed whatever the key's shape — the shape rules alone were
+    # measured to miss two of the configured keys.
+    for provider, values in res.items():
+        for key in values:
+            confidential.register_secret(key, f"{provider} key")
+
     return res
 
 API_KEYS: dict[str, list[str]] = _load_api_keys()
+
+# The OAuth client secret and the Google refresh tokens are credentials this
+# runtime holds too, so they are registered with the redaction filter as
+# well.  A Google refresh token is an opaque string with no recognisable
+# shape — only the literal value identifies it.
+try:
+    from core import google_oauth as _google_oauth
+    _google_oauth.register_stored_secrets()
+except Exception as _oauth_reg_error:  # noqa: BLE001 — never block start-up
+    print(f"{YELLOW}[WARN] Could not register the stored OAuth secrets "
+          f"with the redaction filter: {_oauth_reg_error}{RESET}")
+
 # Tracks whether we are currently executing an autonomous agent task
 _in_agent_mode = False
 
@@ -578,13 +599,19 @@ def _wants_vision_switch(attachments: list[dict], pid: str,
     for must never change the model underneath the conversation: the model
     would silently stop being the one the user chose, and for a picture
     that was never requested in the first place.
+
+    When Mirage is available the switch is not wanted either: the on-device
+    model describes the picture and the text-only model the user chose
+    keeps the turn.
     """
     if already_switched:
         return False
     wanted = [att for att in attachments if att.get("explicit", True)]
     if not wanted:
         return False
-    return not model_supports_vision(pid, model_name)
+    if model_supports_vision(pid, model_name):
+        return False
+    return _get_mirage() is None
 
 
 def _append_image_message(messages: list[dict], attachments: list[dict]) -> None:
@@ -620,15 +647,126 @@ def _append_image_message(messages: list[dict], attachments: list[dict]) -> None
     messages.append({"role": "user", "content": parts})
 
 
+# ── MIRAGE (on-device eyes for a text-only model) ────────────────────────────
+# Mirage (the ``cactus-compute`` package: ``pip install cactus-compute``,
+# a ~22 MB model) is a vision-to-text model that runs on-device.  When
+# the model serving a turn cannot see images, Mirage describes the picture
+# and the description travels as plain text — the language-only model keeps
+# the turn instead of the conversation being moved to a vision-capable
+# model.  The package is optional.  Where its import fails — notably
+# Termux/Android, which has no Bionic engine wheel — the same model still
+# runs locally through the OpenAI-compatible endpoint in
+# ``core/mirage_server.py`` (the official wasm engine under Node, weights
+# predownloaded under ``data/models/mirage/``); only when that cannot start
+# either does the pipeline fall back to the existing text notes and the
+# vision-model switch.
+
+_mirage_model: object | None = None
+_mirage_state: str = "untried"   # untried | ready | unavailable
+_MIRAGE_DESC_BUDGET = 4000
+
+
+def _get_mirage() -> object | None:
+    """The shared Mirage instance, or ``None`` when it cannot be used.
+
+    Loading is lazy and cached: nothing is started until a picture actually
+    needs describing, and a failure is remembered so a broken setup does
+    not retry on every request.  The instance is either the ``cactus``
+    package's Mirage (desktop) or a client for the local OpenAI-compatible
+    endpoint (:mod:`mirage_server`) — both answer ``describe(image)``.
+    """
+    global _mirage_model, _mirage_state
+    if _mirage_state == "ready":
+        return _mirage_model
+    if _mirage_state == "unavailable":
+        return None
+    try:
+        from cactus import Mirage  # optional: pip install cactus-compute
+        _mirage_model = Mirage()
+        _mirage_state = "ready"
+    except Exception as error:
+        # No cactus package (Termux/Android has no Bionic engine): serve the
+        # same model through the local OpenAI-compatible endpoint.  The
+        # predownloaded weights and the wasm engine live under
+        # data/models/mirage/; the endpoint is loopback-only.
+        from mirage_server import ensure_endpoint
+        _mirage_model = ensure_endpoint()
+        if _mirage_model is not None:
+            _mirage_state = "ready"
+            return _mirage_model
+        _mirage_state = "unavailable"
+        print(f"{GRAY}[mirage] on-device vision unavailable ({error}); "
+              f"images fall back to notes{RESET}")
+    return _mirage_model
+
+
+def _mirage_describe(part: dict) -> str | None:
+    """Describe one image part with Mirage. ``None`` = Mirage cannot help.
+
+    Handles the two shapes an image part takes internally: an
+    ``orion_image`` marker carrying a local path, and an ``image_url`` /
+    ``input_image`` part carrying a data URI.  Remote URLs are left to the
+    vision-model switch — Mirage runs on-device and fetches nothing.
+    """
+    model = _get_mirage()
+    if model is None:
+        return None
+
+    image: str | bytes | None = None
+    ptype = part.get("type")
+    try:
+        if ptype == "orion_image":
+            path = part.get("path", "")
+            if path and os.path.isfile(path):
+                image = path
+        else:
+            url = part.get("image_url", {})
+            url = url.get("url", "") if isinstance(url, dict) else str(url)
+            if url.startswith("data:") and ";base64" in url:
+                import base64
+                image = base64.b64decode(url.partition(",")[2])
+    except Exception:  # noqa: BLE001 — an unreadable part is just not described
+        return None
+    if image is None:
+        return None
+
+    try:
+        result = model.describe(image)
+    except Exception:  # noqa: BLE001 — a failed description falls back to a note
+        return None
+
+    if isinstance(result, str):
+        text = result
+    elif isinstance(result, dict):
+        # ``describe`` returns the parsed JSON with descriptions, OCR text
+        # and geometry mixed in; the common keys carry the prose the model
+        # needs, and anything else is serialised rather than lost.
+        prose = [str(result[k]) for k in ("description", "text", "caption")
+                 if result.get(k)]
+        text = "\n".join(prose) if prose else json.dumps(
+            result, ensure_ascii=False)
+    else:
+        text = str(result)
+    text = text.strip()
+    if not text:
+        return None
+    if len(text) > _MIRAGE_DESC_BUDGET:
+        text = text[:_MIRAGE_DESC_BUDGET] + " …"
+    label = str(part.get("label") or "image")
+    return (f"[Image: {label} — described by Mirage, the on-device "
+            f"vision model]\n{text}")
+
+
 def _sanitize_multimodal_content(content: list, pid: str,
                                  model_name: str | None) -> list | str:
     """Prepare a multimodal content list for the target model.
 
-    Image parts are kept when the model can see images and replaced with a
-    short text note when it cannot — a request that carries an image to a
-    text-only model is rejected outright, whereas a note is merely less
-    useful.  The pixels are *not* inlined here: that happens once per
-    request in :func:`_prepare_messages_for_wire`.
+    Image parts are kept when the model can see images.  When it cannot,
+    Mirage — the on-device vision model — describes each picture and the
+    description travels as text; only when Mirage is unavailable or the
+    picture undescribable does the part become a short text note.  The
+    pixels are *not* inlined here: that happens once per request in
+    :func:`_prepare_messages_for_wire`.
     """
     vision = model_supports_vision(pid, model_name)
     kept: list = []
@@ -643,6 +781,10 @@ def _sanitize_multimodal_content(content: list, pid: str,
         if ptype in ("image_url", "orion_image", "input_image"):
             if vision:
                 kept.append(part)
+                continue
+            described = _mirage_describe(part)
+            if described:
+                texts.append(described)
             else:
                 dropped.append(str(part.get("label") or "image"))
             continue
@@ -1773,9 +1915,26 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
 "toggle_torch":      lambda: toggle_torch(on=_safe_bool(g("on", True))) if toggle_torch else "toggle_torch not available",
         "get_hostname":      lambda: get_hostname(),
         "get_uptime":        lambda: get_uptime() if get_uptime else "get_uptime not available",
+        "manage_mcp":        lambda: manage_mcp(
+                                action      = g("action", "list"),
+                                server      = g("server", ""),
+                                transport   = g("transport", "stdio"),
+                                command     = g("command", ""),
+                                args        = g("args", None),
+                                url         = g("url", ""),
+                                description = g("description", ""),
+                             ),
     }
 
     fn = routes.get(name)
+    if fn is None and name.startswith("mcp__"):
+        # An MCP tool: not in the static route table because the catalogue
+        # is dynamic.  The manager resolves the qualified name to a server
+        # and a tool; the same display/logging path below wraps the call.
+        try:
+            fn = mcp_client.mcp_manager.make_route(name, args)
+        except Exception:
+            fn = None
     if fn:
         expanded = display_state.is_expanded()
         header = _tool_header_lines(name, args, expanded)
@@ -1794,13 +1953,18 @@ def _dispatch_tool(tool_call: dict, voice: bool = False) -> str:
             res = fn()
         except Exception as exc:
             elapsed = time.monotonic() - started
-            runtime_log.log_tool_result(name, str(exc), elapsed, error=True)
+            # The exception text is redacted too: a script that fails *after*
+            # reading a credential can put its value in the message
+            # (``raise ValueError(open("config/api.keys").read())``), and the
+            # exception path used to log and return it untouched.
+            message = confidential.redact_credentials(str(exc))
+            runtime_log.log_tool_result(name, message, elapsed, error=True)
             _print_tool_display(name, args, header, expanded, colors)
             if expanded:
                 print(f"{body_color}[OUTPUT]{RESET}")
-                print(f"{body_color}{exc}{RESET}")
+                print(f"{body_color}{message}{RESET}")
             print(f"{end_color}[TOOL ERROR] ({elapsed:.2f}s){RESET}")
-            return f"[TOOL ERROR] {name} raised an exception: {exc}"
+            return f"[TOOL ERROR] {name} raised an exception: {message}"
 
         elapsed = time.monotonic() - started
         if res is None:
@@ -2194,6 +2358,12 @@ def _ask_with_slots(
 
                 # Filter tools based on enabled plugins
                 available_tools = plugin_manager.filter_tools_description(TOOLS_DESCRIPTION)
+                # MCP servers contribute their tools dynamically: the
+                # schemas come from each server's own tools/list, not
+                # from the static catalogue.  A dead, disabled or
+                # unreachable server contributes nothing — /mcp status
+                # (or manage_mcp) is where the reason shows up.
+                available_tools = available_tools + mcp_client.mcp_manager.tool_schemas()
                 # A provider that counts the prompt counts the schemas too.
                 tool_tokens = _estimate_tool_tokens(available_tools)
 

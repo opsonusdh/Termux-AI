@@ -123,6 +123,50 @@ def _update_config(**kwargs) -> dict:
     return data
 
 
+def _autonomous_level_of(value) -> str:
+    """Normalize the config's ``autonomous`` value to full/semi/off.
+
+    The same shapes :mod:`core.permissions` accepts: booleans keep their
+    old meaning and the string ``"semi"`` (``half``/``ask`` accepted as
+    aliases) selects the middle mode.
+    """
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("semi", "half", "ask"):
+            return "semi"
+        if word in ("true", "on", "yes", "1"):
+            return "full"
+        # Unknown words stay off — a typo must not silently grant autonomy.
+        return "off"
+    return "full" if value else "off"
+
+
+def _autonomous_next_level(current: str) -> str:
+    """The level ``/autonomous toggle`` moves to.
+
+    Cycles off -> semi -> full -> off, so one key reaches the middle mode
+    instead of forcing full autonomy on the way past.
+    """
+    return {"off": "semi", "semi": "full", "full": "off"}.get(current, "semi")
+
+
+def _autonomous_config_value(level: str):
+    """The config.json value that selects *level* (True / "semi" / False)."""
+    return {"full": True, "semi": "semi", "off": False}[level]
+
+
+def _autonomous_status_str(config: dict) -> str:
+    """The human-readable autonomy level for status output."""
+    level = _autonomous_level_of(config.get("autonomous", False))
+    if level == "full":
+        return ("AUTONOMOUS (permission gate bypassed; "
+                "confidential files refused)")
+    if level == "semi":
+        return ("SEMI-AUTONOMOUS (routine actions auto-approved; "
+                "confidential/credential operations stop and ask)")
+    return "NON-AUTONOMOUS (permission layer active)"
+
+
 def _read_config() -> dict:
     """The stored configuration, read fresh from disk.
 
@@ -909,6 +953,186 @@ def _handle_plugin_command(command: str) -> None:
     print(f"{GRAY}Available: list, enable, disable, status, setup, disconnect{RESET}")
 
 
+def _handle_mcp_command(command: str) -> None:
+    """Handle /mcp subcommands: list, status, tools, add, remove,
+    enable, disable, connect, disconnect, refresh."""
+    from core import mcp_client
+    mm = mcp_client.mcp_manager
+
+    parts = command.strip().split()
+    sub = parts[1] if len(parts) > 1 else "list"
+    rest = parts[2:]
+
+    if sub in ("list", ""):
+        configs = mm.configs()
+        if not configs:
+            print(ui.notice("muted", "No MCP servers configured."))
+            print(ui.hint("/mcp add <name> stdio <command> [args...] — "
+                          "launch a local server"))
+            print(ui.hint("/mcp add <name> http <url> — connect to a "
+                          "remote one"))
+            return
+        for name, cfg in configs.items():
+            body = mm.status(name)
+            body = body if body.get("ok") else {"state": "unknown"}
+            state = body.get("state", "unknown")
+            mark = {"connected": f"{GREEN}CONNECTED{RESET}",
+                    "failed": f"{RED}FAILED{RESET}",
+                    "disabled": f"{GRAY}DISABLED{RESET}",
+                    "invalid": f"{RED}INVALID{RESET}"}.get(
+                        state, f"{YELLOW}{state.upper()}{RESET}")
+            print(f"  {CYAN}{name}{RESET}  [{cfg.transport}]  {mark}")
+            if body.get("tools"):
+                print(f"    tools ({len(body['tools'])}): "
+                      f"{', '.join(body['tools'][:8])}"
+                      + (" …" if len(body["tools"]) > 8 else ""))
+            if body.get("error"):
+                print(f"    {RED}error: {body['error']}{RESET}")
+        return
+
+    if sub == "status":
+        if not rest:
+            print(f"{RED}Usage: /mcp status <server>{RESET}")
+            return
+        body = mm.status(rest[0])
+        if not body.get("ok"):
+            print(f"{RED}{body.get('message', 'unknown error')}{RESET}")
+            return
+        import json as _json
+        printable = {k: v for k, v in body.items() if k != "ok"}
+        print(f"  {CYAN}{rest[0]}{RESET}")
+        for key, value in printable.items():
+            if key == "stderr_tail":
+                print(f"  stderr (last lines):")
+                for line in value:
+                    print(f"    {GRAY}{line}{RESET}")
+            else:
+                print(f"  {key}: {value}")
+        return
+
+    if sub == "tools":
+        try:
+            schemas = mm.tool_schemas()
+        except Exception as exc:
+            print(f"{RED}Could not list the MCP tools: {exc}{RESET}")
+            return
+        if rest:
+            prefix = f"mcp__{rest[0]}__"
+            schemas = [s for s in schemas
+                       if s["function"]["name"].startswith(prefix)]
+        if not schemas:
+            print(ui.notice("muted", "No MCP tools are advertised."))
+            return
+        print(ui.heading(f"MCP tools ({len(schemas)})", "info"))
+        for s in schemas:
+            fn = s["function"]
+            first = (fn.get("description") or "").splitlines()[0]
+            print(f"  {CYAN}{fn['name']}{RESET} — {first}")
+        return
+
+    if sub == "add":
+        if len(rest) < 2:
+            print(f"{RED}Usage: /mcp add <name> stdio <command> [args...] "
+                  f"[--desc <text>]  |  /mcp add <name> http <url> "
+                  f"[--desc <text>]{RESET}")
+            return
+        name, transport = rest[0], rest[1].lower()
+        desc = ""
+        if "--desc" in rest:
+            i = rest.index("--desc")
+            if i + 1 < len(rest):
+                desc = " ".join(rest[i + 1:])
+            rest = rest[:i]
+        if transport == "http":
+            if len(rest) < 2:
+                print(f"{RED}Usage: /mcp add <name> http <url>{RESET}")
+                return
+            cfg = mcp_client.MCPServerConfig(
+                name=name, transport="http", url=rest[2],
+                description=desc)
+        elif transport == "stdio":
+            if len(rest) < 3:
+                print(f"{RED}Usage: /mcp add <name> stdio <command> "
+                      f"[args...]{RESET}")
+                return
+            cfg = mcp_client.MCPServerConfig(
+                name=name, transport="stdio", command=rest[2],
+                args=rest[3:], description=desc)
+        else:
+            print(f"{RED}Unknown transport '{transport}' — stdio or http.{RESET}")
+            return
+        result = mm.add_server(cfg)
+        if result.get("ok"):
+            print(ui.notice("ok", result["message"]))
+            print(ui.hint("/mcp connect " + name +
+                          " — start it now and list its tools"))
+        else:
+            print(f"{RED}{result['message']}{RESET}")
+        return
+
+    if sub in ("remove", "rm"):
+        if not rest:
+            print(f"{RED}Usage: /mcp remove <server>{RESET}")
+            return
+        result = mm.remove_server(rest[0])
+        print(ui.notice("ok", result["message"]) if result.get("ok")
+              else f"{RED}{result['message']}{RESET}")
+        return
+
+    if sub in ("enable", "disable"):
+        if not rest:
+            print(f"{RED}Usage: /mcp {sub} <server>{RESET}")
+            return
+        result = mm.set_enabled(rest[0], sub == "enable")
+        print(ui.notice("ok", result["message"]) if result.get("ok")
+              else f"{RED}{result['message']}{RESET}")
+        return
+
+    if sub in ("connect", "start"):
+        if not rest:
+            print(f"{RED}Usage: /mcp connect <server>{RESET}")
+            return
+        try:
+            conn = mm.get_connection(rest[0], force=True)
+        except Exception as exc:
+            print(f"{RED}Could not connect to '{rest[0]}': {exc}{RESET}")
+            tail = []
+            try:
+                tail = mm.status(rest[0]).get("stderr_tail") or []
+            except Exception:
+                pass
+            for line in tail:
+                print(f"  {GRAY}{line}{RESET}")
+            return
+        info = conn.server_info or {}
+        print(ui.notice("ok", f"Connected: {info.get('name', '?')} "
+                               f"{info.get('version', '?')} "
+                               f"(protocol {conn.negotiated_version})"))
+        try:
+            tools = [t.get("name", "?") for t in conn.list_tools(refresh=True)]
+            print(f"  tools ({len(tools)}): {', '.join(tools) or '(none)'}")
+        except Exception as exc:
+            print(f"{YELLOW}Connected, but the tool listing failed: {exc}{RESET}")
+        return
+
+    if sub in ("disconnect", "stop"):
+        if not rest:
+            print(f"{RED}Usage: /mcp disconnect <server>{RESET}")
+            return
+        result = mm.disconnect(rest[0])
+        print(ui.notice("ok", result["message"]))
+        return
+
+    if sub == "refresh":
+        result = mm.refresh(rest[0] if rest else "")
+        print(ui.notice("ok", result.get("message", "cache cleared")))
+        return
+
+    print(f"{RED}Unknown subcommand: {sub}{RESET}")
+    print(f"{GRAY}Available: list, status, tools, add, remove, enable, "
+          f"disable, connect, disconnect, refresh{RESET}")
+
+
 def _show_all_plugins() -> None:
     """Display all plugins with their status."""
     plugins = plugin_manager.list_plugins()
@@ -936,11 +1160,15 @@ def _show_all_plugins() -> None:
 def _show_help() -> None:
     """Display a short help listing of available slash commands."""
     cmds = [
-        "/autonomous [on|off|status|toggle]",
+        "/autonomous [on|off|semi|status|toggle]",
         "/agent [auto|...]",
         "/plugin list | /plugin setup <name> | /plugin status <name>",
         "/plugin enable <name> | /plugin disable <name>",
         "/plugin disconnect <name>",
+        "/mcp [list|status|tools|add|remove|enable|disable|",
+        "     connect|disconnect|refresh]   (Model Context Protocol",
+        "                                      servers; their tools join",
+        "                                      mine as mcp__<server>__<tool>)",
         "/session [list|new|resume|save|delete|draft]",
         "/session new   (fresh conversation — the mode and your settings stay)",
         "/expand /e   (show every tool argument, the full write payload,",
@@ -1122,7 +1350,7 @@ def chat_loop():
 
     # Single status row with the essential settings.
     detail_state = "EXPANDED" if display_state.is_expanded() else "COLLAPSED"
-    ai_mode = "AUTONOMOUS" if config.get("autonomous", False) else "NON-AUTONOMOUS"
+    ai_mode = _autonomous_status_str(config).split(" (")[0]
     tts_mode = "voice" if (HAS_STT and config.get("tts_enabled")) else "text"
     notify_on = bool(config.get("notify", True))
     print(ui.status_row([
@@ -1196,7 +1424,7 @@ def chat_loop():
 
         if not user_input:
             continue
-        if user_input.lower() in ("exit", "quit", "exit.", "quit."):
+        if user_input.lower() in ("exit", "quit", "exit.", "quit.", "/exit", "/quit", "/exit.", "/quit."):
             print(ui.notice("info", "Session ended."))
             break
         if user_input.lower() in ["start voice.", "start voice"]:
@@ -1225,10 +1453,17 @@ def chat_loop():
                 user_input, source="agent" if agent_mode else "chat"
             )
 
-        # Autonomous mode commands
+        # Autonomous mode commands.  One config key holds three levels:
+        # off (gate active) -> semi (gate bypassed, credentials ask) ->
+        # full (gate bypassed, credentials refused).
         if command_low in ("/autonomous on", "autonomous on", "/autonomous enable", "autonomous enable", "/autonomous 1", "/autonomous true"):
             config = _update_config(autonomous=True)
-            print(ui.notice("info", "AI Mode: AUTONOMOUS (Permission layer bypassed)"))
+            print(ui.notice("info", "AI Mode: AUTONOMOUS (permission gate bypassed; confidential files refused)"))
+            continue
+
+        if command_low in ("/autonomous semi", "autonomous semi", "/autonomous half", "autonomous half", "/autonomous ask", "autonomous ask"):
+            config = _update_config(autonomous="semi")
+            print(ui.notice("info", "AI Mode: SEMI-AUTONOMOUS (routine actions auto-approved; confidential/credential operations stop and ask)"))
             continue
 
         if command_low in ("/autonomous off", "autonomous off", "/autonomous disable", "autonomous disable", "/autonomous 0", "/autonomous false"):
@@ -1237,15 +1472,15 @@ def chat_loop():
             continue
 
         if command_low in ("/autonomous status", "autonomous status"):
-            status_str = "AUTONOMOUS (Permission layer bypassed)" if config.get("autonomous", False) else "NON-AUTONOMOUS (Permission layer active)"
-            print(ui.notice("info", f"AI Mode is currently: {status_str}"))
+            print(ui.notice("info", f"AI Mode is currently: {_autonomous_status_str(config)}"))
             continue
 
         if command_low in ("/autonomous", "autonomous", "/autonomous toggle", "autonomous toggle"):
-            new_state = not config.get("autonomous", False)
-            config = _update_config(autonomous=new_state)
-            status_str = "AUTONOMOUS (Permission layer bypassed)" if new_state else "NON-AUTONOMOUS (Permission layer active)"
-            print(ui.notice("info", f"AI Mode toggled to: {status_str}"))
+            level = _autonomous_level_of(config.get("autonomous", False))
+            new_level = _autonomous_next_level(level)
+            new_value = _autonomous_config_value(new_level)
+            config = _update_config(autonomous=new_value)
+            print(ui.notice("info", f"AI Mode toggled to: {_autonomous_status_str(config)}"))
             continue
 
         # Legacy project runner: /agent auto
@@ -1333,6 +1568,10 @@ def chat_loop():
         # Plugin commands
         if command_low.startswith("/plugin"):
             _handle_plugin_command(command)
+            continue
+
+        if command_low.startswith("/mcp"):
+            _handle_mcp_command(command)
             continue
 
         if agent_mode:

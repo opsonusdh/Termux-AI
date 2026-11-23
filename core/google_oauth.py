@@ -57,6 +57,11 @@ if _ROOT_DIR not in sys.path:
 
 import paths
 
+# The OAuth client secret and the refresh tokens are credentials this runtime
+# holds, so they are registered with the redaction filter: a tool result that
+# carries one of them is scrubbed by value, whatever its shape.
+from core import confidential
+
 try:
     import requests
 except ImportError:  # pragma: no cover - requests is a hard dependency elsewhere
@@ -218,6 +223,49 @@ def load_client_config() -> dict:
     return {"client_id": client_id, "client_secret": client_secret}
 
 
+def register_stored_secrets() -> int:
+    """Register every stored OAuth secret with the redaction filter.
+
+    Called once at start-up.  The client secret and the refresh tokens are
+    read from disk by the runtime itself — the same way it reads
+    ``config/api.keys`` — and handed to the redactor so a tool result that
+    carries one of them is scrubbed by value.  A Google refresh token is an
+    opaque string with no recognisable shape, so the shape rules alone would
+    not have caught it.
+
+    Returns the number of secrets registered.
+    """
+    registered = 0
+    client = load_client_config()
+    secret = str(client.get("client_secret") or "").strip()
+    if secret:
+        confidential.register_secret(secret, "Google OAuth secret")
+        registered += 1
+
+    try:
+        names = sorted(os.listdir(paths.GOOGLE_TOKENS_DIR))
+    except OSError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(paths.GOOGLE_TOKENS_DIR, name),
+                      encoding="utf-8") as handle:
+                bundle = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(bundle, dict):
+            continue
+        for field, label in (("refresh_token", "Google OAuth refresh token"),
+                             ("access_token", "Google OAuth access token")):
+            value = str(bundle.get(field) or "").strip()
+            if value:
+                confidential.register_secret(value, label)
+                registered += 1
+    return registered
+
+
 def save_client_config(client_id: str, client_secret: str) -> bool:
     """Persist the OAuth client credentials (0600)."""
     payload = {
@@ -225,6 +273,8 @@ def save_client_config(client_id: str, client_secret: str) -> bool:
         "client_secret": (client_secret or "").strip(),
         "saved_at": time.time(),
     }
+    confidential.register_secret(payload["client_secret"],
+                                "Google OAuth secret")
     return _write_json(paths.GOOGLE_OAUTH_FILE, payload)
 
 
@@ -253,7 +303,14 @@ def token_path(service: str) -> str:
 
 def load_token(service: str) -> dict:
     """Load the stored token bundle for a service."""
-    return _read_json(token_path(service))
+    bundle = _read_json(token_path(service))
+    if isinstance(bundle, dict):
+        for field, label in (("refresh_token", "Google OAuth refresh token"),
+                             ("access_token", "Google OAuth access token")):
+            value = str(bundle.get(field) or "").strip()
+            if value:
+                confidential.register_secret(value, label)
+    return bundle
 
 
 def save_token(service: str, token: dict) -> bool:
@@ -280,6 +337,11 @@ def save_token(service: str, token: dict) -> bool:
     ok = _write_json(token_path(service), payload)
     if ok:
         _invalidate_status_cache()
+        for field, label in (("refresh_token", "Google OAuth refresh token"),
+                             ("access_token", "Google OAuth access token")):
+            value = str(payload.get(field) or "").strip()
+            if value:
+                confidential.register_secret(value, label)
     return ok
 
 

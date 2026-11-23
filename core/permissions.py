@@ -29,7 +29,14 @@ from core import shell_parse
 from core import app_config
 from core import confidential
 from core import notifier
-from core.renderer import render_tool_code
+from core.renderer import (
+    render_tool_code,
+    render_code_snippet,
+    language_for_path,
+    RED,
+    BOLD,
+    RESET,
+)
 
 # Directory roots (dynamically resolved so it works on both Windows and Termux/Linux)
 BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,39 +78,57 @@ if not os.path.exists(CONFIG_PATH):
 DISABLE_AUTONOMOUS_FILE = os.path.join(TEMP_ROOT, "disable_autonomous")
 
 
-def is_autonomous() -> bool:
-    """Check if autonomous mode is enabled in config.json.
+def autonomous_level() -> str:
+    """The autonomy setting as one of ``"full"``, ``"semi"`` or ``"off"``.
 
-    The scratch-directory override flag wins over the config setting.
+    ``config.json`` stores the value under the ``autonomous`` key, which
+    historically held a boolean.  ``true``/``false`` keep their original
+    meaning (full/off) and the string ``"semi"`` selects the middle mode,
+    so an old config file needs no migration.  The scratch-directory
+    override flag wins over every config value.
     """
     if os.path.exists(DISABLE_AUTONOMOUS_FILE):
-        return False
+        return "off"
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        return bool(cfg.get("autonomous", False))
     except Exception:
-        return False
+        return "off"
+    value = cfg.get("autonomous", False)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("semi", "half", "ask"):
+            return "semi"
+        if word in ("true", "on", "yes", "1"):
+            return "full"
+        # Unknown words stay off — a typo in the config must not hand out
+        # full autonomy silently; the gate asks instead.
+        return "off"
+    return "full" if value else "off"
 
 
-def set_autonomous(enabled: bool) -> bool:
-    """Enable or disable autonomous mode in config.json."""
-    try:
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        data = {}
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data = loaded
-        data["autonomous"] = bool(enabled)
-        tmp = CONFIG_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-        os.replace(tmp, CONFIG_PATH)
-        return True
-    except Exception:
-        return False
+def is_autonomous() -> bool:
+    """Check if autonomous mode is enabled in config.json.
+
+    True for both the full and the semi level — every routine check is
+    bypassed either way.  The semi level only changes what happens when a
+    credential shows up: the gate stops and asks the user instead of
+    refusing outright.
+
+    The scratch-directory override flag wins over the config setting.
+    """
+    return autonomous_level() != "off"
+
+
+def is_autonomous_semi() -> bool:
+    """True when autonomous mode runs at the ``semi`` level.
+
+    Semi mode auto-approves the routine like full autonomy, but where the
+    full level *refuses* a confidential file (nobody there to answer), the
+    semi level *asks* the user who chose the mode — the human is the
+    approval boundary.
+    """
+    return autonomous_level() == "semi"
 
 
 def permission_snapshot() -> str:
@@ -115,7 +140,18 @@ def permission_snapshot() -> str:
     prompt says the same thing for free — and because it is rebuilt for
     every request, a mode toggle takes effect on the next turn.
     """
+    # Derived through is_autonomous()/is_autonomous_semi(), not from
+    # autonomous_level() directly: tests (and any other override) patch
+    # those two, and the snapshot must follow the patched gate.
     if is_autonomous():
+        if is_autonomous_semi():
+            return (
+                "[PERMISSIONS] Autonomous semi mode is ON — routine shell "
+                "commands and file writes run without asking, but anything "
+                "that touches a confidential file, a credential or a secret "
+                "stops and asks the user to approve it (the runtime waits "
+                "for the answer)."
+            )
         return (
             "[PERMISSIONS] Autonomous mode is ON — the permission gate is "
             "bypassed: shell commands and file writes run without asking. "
@@ -282,18 +318,6 @@ def _expand_path(path: str) -> str:
     return os.path.normpath(os.path.realpath(os.path.expanduser(path)))
 
 
-def is_inside_root(path: str) -> bool:
-    return _commonpath_is_inside(AI_ROOT, path)
-
-
-def is_inside_core(path: str) -> bool:
-    return _commonpath_is_inside(CORE_DIR, path)
-
-
-def is_inside_workspace(path: str) -> bool:
-    return _commonpath_is_inside(WORKSPACE, path)
-
-
 def _is_protected(path: str) -> bool:
     """True when path is inside core/ or Termux-STT/."""
     p = _expand_path(path)
@@ -365,7 +389,14 @@ def _is_google_secret_file(path: str) -> bool:
 
 
 #: A token that looks like a file path rather than a word or a flag.
-_PATH_LIKE_RE = re.compile(r"^[^\s]*[\\/][^\s]*$|^\S*\.[A-Za-z0-9]{1,8}$")
+#: A token that looks like a file path rather than a word or a flag.
+#: A single backslash is *not* a separator here — on POSIX a backslash
+#: inside a token is far more often a regex escape (``grep \bword\b``)
+#: than a Windows separator, and name-checking a regex as a "file" made
+#: the gate refuse patterns that merely contained a secret-ish word.
+#: Backslash paths are still recognised through the extension rule, which
+#: is the shape every real Windows file argument has (``dir\file.py``).
+_PATH_LIKE_RE = re.compile(r"^[^\s]*/[^\s]*$|^\S*\.[A-Za-z0-9]{1,8}$")
 
 
 def _confidential_finding(path: str, content: bool = True) -> confidential.Finding:
@@ -502,6 +533,224 @@ def _script_references_credential(script_path: str) -> bool:
     return any(pattern in text for pattern in _SECRET_PATH_PATTERNS)
 
 
+# ── finding the program a command runs ────────────────────────────────────────
+#
+# The gate cannot ask "is this command safe" — it can only ask "is this
+# command about to run a file that reads your credentials".  The first
+# version of that check looked at one shape of command: ``python script.py``.
+# Everything else walked past it:
+#
+#     env python3 leak.py            (a wrapper in front)
+#     python3 < leak.py              (the script on stdin)
+#     cat leak.py | python3          (the script on a pipe)
+#     python3 -c "exec(open('leak.py').read())"
+#     bash -c 'python3 leak.py'      (the interpreter one level down)
+#
+# The rule that covers all of them: **a file is scanned when the command
+# would run it as code** — the interpreter's own script argument, the file
+# piped or redirected into an interpreter, or a path named inside inline
+# code.  The first draft went further and scanned *every* file the command
+# named, wherever it stood — which made ``grep pattern core/tools.py``
+# refused as "a script that reads a credential file" whenever the chain
+# happened to contain a ``python3 -c`` segment further along, because the
+# browser tool's source legitimately mentions the credential-path constants
+# it enforces.  A file a command merely *reads* (grep, sed, ls) is data, not
+# code; only the stages that run code, and the stage whose output an
+# interpreter will consume, are scanned.
+
+#: A quoted string inside inline code — the shape a script path takes in
+#: ``exec(open('leak.py').read())``.
+_QUOTED_LITERAL_RE = re.compile(r"(['\"])(.*?)\1", re.S)
+
+
+#: An interpreter named with a version suffix (``python3.11``) is still an
+#: interpreter.
+_VERSIONED_INTERPRETER_RE = re.compile(r"^python[0-9.]*$")
+
+
+def _is_interpreter_word(word: str) -> bool:
+    """True when *word* names a script interpreter."""
+    name = os.path.basename(str(word or "")).lower()
+    if name in INTERPRETER_COMMANDS:
+        return True
+    if _VERSIONED_INTERPRETER_RE.match(name):
+        return True
+    # The Windows Python launcher.
+    return name == "py"
+
+
+def _stage_runs_code(segment: str) -> bool:
+    """True when this one simple command is an interpreter (behind wrappers).
+
+    ``python3 script.py`` runs code; ``cat leak.py | python3`` splits into
+    two stages and only the second one does — the first is what *feeds* it,
+    which :func:`_command_script_paths` handles separately.
+    """
+    tokens = _safe_split(segment)
+    if not tokens:
+        return False
+    wrapped = _wrapped_command(tokens)
+    effective = wrapped if wrapped else tokens
+    if not effective:
+        return False
+    return _is_interpreter_word(_command_word(effective))
+
+
+def _inline_paths(inline: str) -> List[str]:
+    """The file paths named inside a piece of inline code."""
+    found: List[str] = []
+    for token in _safe_split(inline):
+        if _looks_like_path(token):
+            found.append(token)
+    for match in _QUOTED_LITERAL_RE.finditer(inline):
+        candidate = match.group(2).strip()
+        if candidate and _looks_like_path(candidate):
+            found.append(candidate)
+    return found
+
+
+def _inline_runs_code(inline: str) -> bool:
+    """True when a piece of inline code itself runs a program.
+
+    ``bash -c 'python3 leak.py'`` never opens the file by name, but the
+    shell inside it runs the interpreter that does.
+    """
+    return any(_stage_runs_code(stage) for stage in _split_shell_chain(inline))
+
+
+def _interpreter_stage_paths(tokens: List[str]) -> List[str]:
+    """The files one interpreter stage would run *as code*.
+
+    The script file (the first positional argument), the ``<`` stdin
+    redirect target, and any path named inside inline code (``-c "…"``).
+    A module run (``python3 -m …``) names no script file — the module is
+    the code, and its file arguments are the module's data; the dangerous
+    ones are already gated by name wherever they appear.
+    """
+    paths: List[str] = []
+    effective = _wrapped_command(tokens) or tokens
+    index = 1
+    while index < len(effective):
+        tok = effective[index]
+        if tok in {"-c", "-Command", "/C"}:
+            if index + 1 < len(effective):
+                inline = effective[index + 1]
+                # A path inside inline code is code-to-run when the code
+                # opens the file (exec(open('x').read())) or when the code
+                # is itself a script that runs it (bash -c 'python3 x').
+                # Merely naming a file — classify('x.py') — is not running
+                # it, and scanning every named file made the gate refuse
+                # probes of its own source.
+                if "open(" in inline or _inline_runs_code(inline):
+                    paths.extend(_inline_paths(inline))
+            return paths
+        if tok == "-m":
+            return paths
+        if tok == "<":
+            if index + 1 < len(effective):
+                paths.append(effective[index + 1])
+            index += 2
+            continue
+        if tok.startswith("-"):
+            index += 1
+            continue
+        paths.append(tok)  # the script file
+        return paths
+    return paths
+
+
+def _command_script_paths(cmd: str) -> List[str]:
+    """Every file the command could run *as code*, as paths.
+
+    Scoped to the stages that matter, keeping every shape in the comment
+    above covered:
+
+    * an interpreter stage — its script file, its ``<`` redirect target and
+      the paths its inline code opens or runs;
+    * the stage immediately before an interpreter stage — whatever it reads
+      may be exactly what the interpreter executes (``cat leak.py | python3``);
+    * a wrapper's own arguments when the wrapped command is an interpreter
+      (``xargs -a scripts.txt python3`` — the listed files are run).
+
+    A file a non-interpreter stage merely reads — ``grep pattern file``,
+    ``sed … file``, ``ls file`` — is data, not code, and is *not* returned:
+    that over-collection made the gate refuse inspecting this project's own
+    source whenever an unrelated ``python3 -c`` sat elsewhere in the chain.
+    """
+    stages = _split_shell_chain(cmd)
+    runs = [_stage_runs_code(stage) for stage in stages]
+    if not any(runs):
+        return []
+
+    found: List[str] = []
+    seen = set()
+
+    def collect(token: str) -> None:
+        if not _looks_like_path(token) or token in seen:
+            return
+        seen.add(token)
+        found.append(token)
+
+    for index, segment in enumerate(stages):
+        runs_code = runs[index]
+        feeds_code = index + 1 < len(stages) and runs[index + 1]
+        if not (runs_code or feeds_code):
+            continue
+        tokens = _safe_split(segment)
+        if runs_code:
+            for path in _interpreter_stage_paths(tokens):
+                collect(path)
+            wrapped = _wrapped_command(tokens)
+            if wrapped is not None and len(wrapped) < len(tokens):
+                # The wrapper's own arguments can name what the interpreter
+                # will run: xargs -a scripts.txt python3.
+                for token in tokens:
+                    collect(token)
+        if feeds_code:
+            for token in tokens:
+                collect(token)
+    return found
+
+
+def _script_credential_findings(cmd: str) -> List[Tuple[str, str, str]]:
+    """The files the command would run whose body points at a credential.
+
+    Returns ``(path, reason, script_content)`` triples.  The path is the one the
+    command used; the reason never carries the content of the file; the
+    script_content is the full text of the script (or empty string if it
+    cannot be read).
+    """
+    script_paths = _command_script_paths(cmd)
+    if not script_paths:
+        return []
+    findings: List[Tuple[str, str, str]] = []
+    for path in script_paths:
+        if _script_references_credential(path):
+            # Read the full script content for display in the permission prompt.
+            expanded = os.path.expanduser(os.path.expandvars(str(path or "")))
+            if not os.path.isabs(expanded):
+                expanded = os.path.join(AI_ROOT, expanded)
+            script_content = ""
+            try:
+                absolute = os.path.abspath(expanded)
+                size = os.path.getsize(absolute)
+                if size > 0 and size <= 8 * 1024 * 1024:  # same limit as content scan
+                    with open(absolute, "rb") as handle:
+                        raw = handle.read()
+                    if b"\x00" not in raw[:4096]:  # not binary
+                        script_content = raw.decode("utf-8", errors="replace")
+            except OSError:
+                pass
+
+            findings.append((
+                path,
+                f"'{path}' reads a credential file — running it would print "
+                f"or transmit your keys",
+                script_content,
+            ))
+    return findings
+
+
 def _is_owned_path(path: str) -> bool:
     target = _expand_path(path)
     for owned in _load_owned_paths():
@@ -591,20 +840,6 @@ def _save_owned_paths(paths: Iterable[str]) -> None:
     with open(tmp_path, "w") as f:
         json.dump(payload, f, indent=2)
     os.replace(tmp_path, OWNERSHIP_STATE_PATH)
-
-
-def register_owned_path(path: str) -> None:
-    target = _expand_path(path)
-    owned = _load_owned_paths()
-    owned.add(target)
-    _save_owned_paths(owned)
-
-
-def unregister_owned_path(path: str) -> None:
-    target = _expand_path(path)
-    owned = _load_owned_paths()
-    owned.discard(target)
-    _save_owned_paths(owned)
 
 
 # Shell parsing helpers -----------------------------------------------------
@@ -935,13 +1170,12 @@ def _check_interpreter(cmd: str, tokens: List[str]) -> Tuple[bool, str]:
         if needs:
             return True, f"'{cmd}': {reason}"
 
-        # Also scan the script file for references to credential files/constants.
-        # A script that opens config/api.keys or uses paths.API_KEYS_FILE is
-        # an exfiltration attempt.
-        if _script_references_credential(script_path):
-            return True, (
-                f"script '{script_path}' references a credential file or path constant"
-            )
+        # The script's *body* is not checked here.  That check lives in
+        # :func:`_script_credential_findings`, which looks at the whole
+        # command instead of one segment — so it also catches the forms this
+        # per-segment check never saw (``env python f.py``, ``python < f.py``,
+        # ``cat f.py | python``, ``python -c "exec(open('f.py').read())"``)
+        # and, unlike this one, it runs in autonomous mode too.
 
         return False, "OK"
 
@@ -992,6 +1226,19 @@ def _tokens_needs_permission(tokens: List[str], raw: str) -> Tuple[bool, str]:
     # in the shell chain. Require explicit approval instead of pretending we
     # can safely infer arbitrary shell working-directory state here.
     if cmd in {"cd", "pushd", "popd"}:
+        # Allow cd to project root or inside it without permission in non-autonomous mode.
+        # The target is the first non-flag argument (or empty for "cd" = home).
+        target = None
+        for tok in tokens[1:]:
+            if tok.startswith("-"):
+                continue
+            target = tok
+            break
+        if target is not None:
+            expanded = _expand_path(target)
+            if _commonpath_is_inside(AI_ROOT, expanded):
+                return False, "OK"
+        # For "cd" with no args (goes to HOME) or target outside project root, ask.
         return True, f"working-directory change via '{cmd}' requires explicit permission"
 
     if cmd in FORBIDDEN_COMMANDS:
@@ -1078,6 +1325,10 @@ def command_needs_permission(cmd: str) -> bool:
     if _confidential_references(cmd):
         return True
 
+    # A file the command would *run* whose body points at a credential.
+    if _script_credential_findings(cmd):
+        return True
+
     if is_autonomous():
         # Credential files are the one thing that stays gated in autonomous mode.
         return False
@@ -1151,13 +1402,69 @@ def _ask_permission(requests: List[Tuple[str, str]]) -> Tuple[bool, str]:
         print("  Please answer 'y' or 'n'.")
 
 
+def _credential_requests(
+    cmd: str,
+    references_api_keys: bool,
+    references_google_secrets: bool,
+    references_secret_constants: bool,
+    confidential: list,
+    script_findings: list,
+) -> List[Tuple[str, str]]:
+    """The ``(what, why)`` pairs for everything credential-shaped in *cmd*.
+
+    Shared by the interactive gate and semi-autonomous mode, so a semi
+    approval asks about exactly what the interactive gate would have asked
+    about — no more, no less.
+    """
+    requests: List[Tuple[str, str]] = []
+
+    if references_api_keys:
+        requests.append((cmd, (
+            f"command references the api.keys secrets file; "
+            "explicit permission required in all modes"
+        )))
+    if references_google_secrets and not references_api_keys:
+        requests.append((cmd, (
+            "command references a Google OAuth credential file; "
+            "explicit permission required in all modes"
+        )))
+    if references_secret_constants and not references_api_keys:
+        requests.append((cmd, (
+            "inline code references a credential path constant; "
+            "explicit permission required in all modes"
+        )))
+
+    for token, reason in confidential:
+        requests.append((token, f"'{token}' is confidential — {reason}"))
+
+    # A script that reads a credential file is the first half of the attack
+    # the user described: write a file that prints the keys, run it, and the
+    # keys are on the screen and in the log.  The file itself is harmless
+    # until it runs, so the question belongs here.
+    for path, reason, script_content in script_findings:
+        # Build a detailed reason with the full script content and a warning.
+        detailed_reason = (
+            f"{RED}{BOLD}! WARNING: This script could potentially reveal your credentials{RESET}\n"
+            f"{reason}\n"
+        )
+        if script_content:
+            # Include the full script content, syntax-highlighted.
+            lang = language_for_path(path)
+            highlighted = render_code_snippet(script_content, lang)
+            if highlighted:
+                detailed_reason += "\n" + "\n".join(highlighted)
+        requests.append((f"run {path}", detailed_reason))
+
+    return requests
+
+
 def validate_command(cmd: str) -> Tuple[bool, str]:
     """Validate a complete shell command and obtain explicit approval when needed.
 
     In autonomous mode everything is auto-approved **except** references to
-    confidential files, which are refused outright: there is nobody at the
-    keyboard to answer a question about a secret, and a gate that waits for
-    an answer that cannot come would hang a background worker.
+    confidential files.  The full level refuses them outright — nobody at
+    the keyboard to answer a question about a secret — while the semi level
+    stops and asks the user, exactly like the interactive gate.
     """
     segments = _split_shell_chain(cmd)
 
@@ -1174,9 +1481,30 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
     # Every path in the command that points at a confidential file.
     confidential = _confidential_references(cmd)
 
+    # Every file the command would *run* whose body points at a credential.
+    # This is computed before the mode branch on purpose: the script scan
+    # used to live inside the per-segment check, which the autonomous branch
+    # returns before it ever reaches — so in autonomous mode
+    # ``python3 leak.py`` ran unchallenged and printed the keys.
+    script_findings = _script_credential_findings(cmd)
+
     if is_autonomous():
-        if not references_secrets and not confidential:
+        if not references_secrets and not confidential and not script_findings:
             return True, "Autonomous mode active (permission gate bypassed)"
+
+        if is_autonomous_semi():
+            # Semi-autonomous: the routine is still auto-approved, but a
+            # credential is neither waved through nor refused — the gate
+            # stops and puts the question to the user, exactly like the
+            # interactive gate does.  Semi mode is chosen in an interactive
+            # session, so the ask is the whole point.
+            requests = _credential_requests(
+                cmd, references_api_keys, references_google_secrets,
+                references_secret_constants, confidential, script_findings,
+            )
+            if not requests:
+                return True, "OK"
+            return _ask_permission(requests)
 
         # Refuse rather than ask.  Asking in autonomous mode would either
         # block a background worker on stdin or silently consume the user's
@@ -1184,6 +1512,11 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
         detail = "; ".join(
             f"{token} ({reason})" for token, reason in confidential
         )
+        if script_findings:
+            script_detail = "; ".join(
+                f"{path} (reads a credential file)" for path, _, _ in script_findings
+            )
+            detail = (f"{detail}; " if detail else "") + script_detail
         if not detail:
             detail = "the command references a credential file"
         return False, (
@@ -1192,23 +1525,10 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
             f"approve this by hand."
         )
 
-    requests: List[Tuple[str, str]] = []
-
-    if references_api_keys:
-        requests.append((cmd, (
-            "command references the api.keys secrets file; "
-            "explicit permission required in all modes"
-        )))
-    if references_google_secrets and not references_api_keys:
-        requests.append((cmd, (
-            "command references a Google OAuth credential file; "
-            "explicit permission required in all modes"
-        )))
-    if references_secret_constants and not references_api_keys:
-        requests.append((cmd, (
-            "inline code references a credential path constant; "
-            "explicit permission required in all modes"
-        )))
+    requests = _credential_requests(
+        cmd, references_api_keys, references_google_secrets,
+        references_secret_constants, confidential, script_findings,
+    )
 
     for segment in segments:
         if references_secrets and (
@@ -1222,13 +1542,67 @@ def validate_command(cmd: str) -> Tuple[bool, str]:
         if needs:
             requests.append((segment, reason))
 
-    for token, reason in confidential:
-        requests.append((token, f"'{token}' is confidential — {reason}"))
-
     if not requests:
         return True, "OK"
 
     return _ask_permission(requests)
+
+
+#: Extensions whose files are *run*: a file with one of these is a program,
+#: so code in it that points at a credential store is worth a question.
+#: Prose is not — a manual that mentions ``config/api.keys`` is documentation,
+#: not an exfiltration script.
+_CODE_EXTENSIONS = frozenset({
+    ".py", ".pyw", ".pyi", ".sh", ".bash", ".zsh", ".ksh", ".fish",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".rb", ".pl", ".php",
+    ".ps1", ".psm1", ".bat", ".cmd", ".vbs", ".lua", ".r", ".jl", ".swift",
+    ".go", ".rs", ".c", ".h", ".cpp", ".java", ".cs", ".sql", ".awk",
+})
+
+
+def _is_code_file(path: str) -> bool:
+    """True when *path* names a file that could be run as a program."""
+    extension = os.path.splitext(str(path or ""))[1].lower()
+    return extension in _CODE_EXTENSIONS
+
+
+def request_content_permission(operation: str, path: str,
+                               content: str) -> Tuple[bool, str]:
+    """Ask before writing content that points at a credential store.
+
+    This closes the *first* half of the chain the user described: writing a
+    program that reads ``config/api.keys``.  The file itself is harmless — a
+    text file that names a path leaks nothing — but it is the thing the next
+    step executes, so the gate asks while the intent is still visible.
+
+    Only code files are asked about.  Documentation that mentions the path is
+    not a threat, and gating it would make an ordinary edit noisy.
+
+    In full-autonomous mode there is nobody to answer, so the write is
+    refused — the same answer the shell gate gives for a credential
+    reference.  Semi-autonomous mode stops and asks instead.
+    """
+    if not content or not confidential.references_credential_path(content):
+        return True, "OK"
+    if not _is_code_file(path):
+        return True, "OK"
+
+    p = _expand_path(path)
+    rel = os.path.relpath(p, AI_ROOT)
+    detail = ("the content points at a credential store "
+              "(config/api.keys or the Google OAuth token files)")
+
+    if is_autonomous() and not is_autonomous_semi():
+        return False, (
+            f"[PERMISSION DENIED] '{rel}' would contain code that reads a "
+            f"credential — {detail}. Refused in autonomous mode; switch the "
+            f"permission gate back on to write it."
+        )
+
+    approved, reason = _ask_permission([(f"{operation} {rel}", detail)])
+    if not approved:
+        return False, f"[PERMISSION DENIED] '{rel}': {reason}"
+    return True, "OK"
 
 
 def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
@@ -1239,8 +1613,8 @@ def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
 
     A confidential file — a credential, a token, personal memory — is asked
     about directly, whatever the mode: the user is told what the file is and
-    why it is sensitive, and decides.  In autonomous mode there is nobody to
-    answer, so the read is refused.
+    why it is sensitive, and decides.  In full-autonomous mode there is
+    nobody to answer, so the read is refused; semi-autonomous mode asks.
 
     All other paths defer to the existing ``validate_command`` logic so that
     nothing is *automatically* rejected — the user is always asked first.
@@ -1254,7 +1628,7 @@ def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
     # over a file does not leak what was in it.
     finding = _confidential_finding(path, content=(operation == "read"))
     if finding.confidential:
-        if is_autonomous():
+        if is_autonomous() and not is_autonomous_semi():
             return False, (
                 f"[PERMISSION DENIED] '{rel}' is confidential — "
                 f"{finding.reason}. Confidential files stay gated in every "
@@ -1284,8 +1658,3 @@ def request_file_permission(operation: str, path: str) -> Tuple[bool, str]:
     if not approved:
         return False, f"[PERMISSION DENIED] '{rel}': {reason}"
     return True, "OK"
-
-
-def temp_path(name: str, session_id: str | None = None) -> str:
-    sid = session_id or os.environ.get("TERMUX_AI_SESSION_ID") or "default"
-    return os.path.join(TEMP_ROOT, sid, name)

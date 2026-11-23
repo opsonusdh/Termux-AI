@@ -72,3 +72,27 @@ CONTEXT_SESSION_FILE  = os.path.join(DATA_DIR,   "context_session.json")
 # tool outputs) are replaced by a digest and the raw text is written here.
 # Append-only; the model pulls the raw text back with retrieve_archive(id).
 CONTEXT_ARCHIVE_FILE  = os.path.join(LOGS_DIR,   "context_archive.jsonl")
+
+# ── Local model store (predownloaded on-device engines and weights) ──────
+# Mirage — the on-device vision-to-text model — lives here with the engine
+# that runs it.  The official Cactus 4.1.4 wasm engine (cactus.js + cactus.wasm)
+# executes under Node and exposes the full cactus_* C ABI, including
+# cactus_describe; mirage.cact is the pinned 21.6 MB vision model.  On desktop
+# platforms the cactus-compute package manages its own engine instead and this
+# store only supplies the weights (see core/mirage_server.py).
+MODELS_DIR        = os.path.join(DATA_DIR, "models")
+MIRAGE_DIR        = os.path.join(MODELS_DIR, "mirage")
+MIRAGE_MODEL      = os.path.join(MIRAGE_DIR, "mirage.cact")
+MIRAGE_WASM_JS    = os.path.join(MIRAGE_DIR, "cactus.js")
+MIRAGE_WASM       = os.path.join(MIRAGE_DIR, "cactus.wasm")
+# Node bridge written next to the engine at first start (generated code, not
+# hand-maintained state, hence not under data/ state management).
+MIRAGE_BRIDGE     = os.path.join(MIRAGE_DIR, "mirage_bridge.js")
+MIRAGE_LOG        = os.path.join(LOGS_DIR, "mirage_server.log")
+# MCP (Model Context Protocol) client.  Server definitions live in
+# config/config.json under the "mcp_servers" key; this log holds the
+# stderr of stdio servers and the client-side transport errors, so a
+# server that fails to start can be diagnosed from one file.
+MCP_LOG           = os.path.join(LOGS_DIR, "mcp.log")
+# The OpenAI-compatible endpoint the engine serves on (loopback only).
+MIRAGE_PORT       = 8471

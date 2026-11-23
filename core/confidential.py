@@ -311,6 +311,94 @@ _DEMO_WORDS = (
 #: A long random-looking run of characters — key material with no label.
 _GIBBERISH_RE = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
 
+#: Key material broken up by dots.  The plain rule above stops at a dot, so a
+#: credential that contains one was split into two halves that were each too
+#: short to be recognised — and the value walked straight through the
+#: redaction.  Two of this repository's own configured keys are exactly that
+#: shape, so this is not a hypothetical: the rule is here because real keys
+#: were measured slipping past it.
+#:
+#: Each dotted part has to be long enough to be key material rather than a
+#: word, and the whole run still has to pass :func:`_looks_like_key_material`
+#: (length, character classes, entropy), so a dotted path or a version string
+#: does not match.
+_DOTTED_GIBBERISH_RE = re.compile(
+    r"[A-Za-z0-9+/=_-]{8,}(?:\.[A-Za-z0-9+/=_-]{8,})+"
+)
+
+# ── addresses are not secrets ──────────────────────────────────────────────────
+#
+# A URL path or a file path is an *address*: it says where something lives,
+# it is not the thing itself.  Both shapes are built from the very characters
+# a key is made of (letters, digits, ``/``, ``-``, ``.``) and a UUID or a
+# timestamp inside them is random enough to pass the entropy test — so the
+# blob rules above swallow them.  Measured on this runtime, that ate the
+# devtools URL the browser tooling needs (the ``ws://127.0.0.1:<port>/…``
+# endpoint under /json/version) and every screenshot file name the browser
+# tool prints.  A redaction that destroys the address protects nothing —
+# anyone who can read the tool output is already on this device — and it
+# breaks the workflow that produced the output.  Four shapes are therefore
+# exempt, each anchored so a key cannot wear them as a disguise:
+#
+# * the path part of a **loopback URL** — unreachable from outside the
+#   device, regenerated on every browser launch;
+# * a run that a **non-credential file extension** anchors as a file name
+#   (``…/b3_20261116_014057.jpg``) — media, code and data files are named,
+#   not secret; credential-bearing extensions (.pem, .key, .env, …) stay
+#   redacted;
+# * a run that joins a flag to an **absolute path** (``--user-data-dir=/…``)
+#   — ``=/`` does not occur inside a key (base64 padding only terminates);
+# * a run that starts at a **filesystem root** right after a token boundary
+#   (``/data/…``, ``/home/…``, ``C:\…``) — a listing of where things live.
+
+_LOOPBACK_URL_PREFIX_RE = re.compile(
+    r"(?:ws|wss|http|https|ftp)://"
+    r"(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0|\[::ffff:127\.0\.0\.1\])"
+    # the port digits are part of the run itself, so the lookback may end
+    # at the authority's bare colon
+    r"(?::\d{1,5})?/?:?$",
+    re.IGNORECASE,
+)
+
+_NON_SECRET_FILE_EXT_RE = re.compile(
+    r"\.(?:jpg|jpeg|jpe|png|gif|webp|bmp|svg|ico|avif|heic|pdf|ps"
+    r"|mp[1-5]|m4[ab]|aac|wav|ogg|opus|flac|mkv|webm|avi|mov"
+    r"|zip|gz|tgz|bz2|xz|zst|7z|rar|tar|apk|ipa|deb|rpm|iso|img|whl"
+    r"|db|sqlite|sqlite3|db3|parquet|jsonl"
+    r"|txt|md|rst|adoc|log|csv|tsv|lock|map"
+    r"|json|ya?ml|toml|ini|cfg|conf|xml|xsd|xsl|xslt|dtd|html?|css"
+    r"|js|mjs|cjs|jsx|ts|tsx|py|pyc|pyi|ipynb|sh|bash|zsh|fish"
+    r"|onnx|safetensors|gguf|pt|pth|ckpt|pb|tflite"
+    r"|so|dylib|dll|exe|bin|o|a|obj|jar|class|wasm"
+    r"|woff2?|ttf|otf|eot)\b",
+    re.IGNORECASE,
+)
+
+_URL_IN_CONTEXT_RE = re.compile(
+    r"https?:(?://)?[^\s<>\"'`)\]]*$",
+    re.IGNORECASE,
+)
+
+_IDENTIFIER_PART_RE = re.compile(
+    r"^(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)*"
+    r"|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*"
+    r"|[A-Z][a-z]{1,}(?:[A-Z][a-z]{1,})*)$"
+)
+
+_READABLE_PATH_SEG_RE = re.compile(
+    r"^(?:\.?[a-z0-9][a-z0-9._-]*"
+    r"|\.?[A-Z0-9][A-Z0-9._-]*"
+    r"|(?:[a-z]+|[A-Z][a-z]{1,})(?:[A-Z][a-z]{1,})*[0-9._-]*"
+    r"|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$"
+)
+
+#: Filesystem roots a path in tool output starts with.  A key does not.
+_FS_ROOT_PREFIX_RE = re.compile(
+    r"^(?:/data/|/home/|/Users/|/root/|/tmp/|/var/|/etc/|/usr/|/opt/"
+    r"|/srv/|/run/|/media/|/mnt/|/storage/|/sdcard/|/system/|/vendor/"
+    r"|/proc/|/sys/|/dev/|[A-Za-z]:[\\/])"
+)
+
 #: A blob that says what it is.  An integrity hash in a lock file is random
 #: and long, but it is not a credential.
 _HASH_LABEL_RE = re.compile(
@@ -389,9 +477,42 @@ def _entropy(text: str) -> float:
     )
 
 
+def _is_non_secret_structured_token(token: str) -> bool:
+    """True when *token* is clearly a code identifier, slug, or query phrase."""
+    if "/" not in token and "+" not in token and "=" not in token:
+        if "." in token:
+            parts = token.split(".")
+            has_digits = any(c.isdigit() for c in token)
+            if len(parts) >= 2 and all(_IDENTIFIER_PART_RE.match(p) for p in parts):
+                # e.g. skill_registry.REGISTERED_IMPORTED_SKILLS or mod_v2.CONST_NAME
+                if not has_digits or all("_" in p for p in parts):
+                    return True
+        elif not any(c.isupper() for c in token):
+            # Kebab-case / snake-case slugs (e.g. blog-post-2026-financial-results)
+            parts = re.split(r"[-_]", token)
+            word_parts = sum(1 for p in parts if re.fullmatch(r"[a-z]{3,}", p))
+            if len(parts) >= 3 and word_parts >= 2:
+                return True
+
+    # URL-encoded '+' search queries (e.g. q=Gemini+4+Hydrogen+MiniMax+M3.1+Flash)
+    val = token.split("=", 1)[1] if "=" in token else token
+    if "+" in val and "/" not in val and "=" not in val:
+        parts = val.split("+")
+        if (
+            len(parts) >= 3
+            and all(re.fullmatch(r"[A-Za-z0-9._-]{1,24}", p) for p in parts)
+            and sum(1 for p in parts if re.fullmatch(r"[A-Za-z]{2,}", p)) >= 2
+        ):
+            return True
+
+    return False
+
+
 def _looks_like_key_material(token: str) -> bool:
     """True when *token* is long, random and mixed enough to be a key."""
     if len(token) < 40:
+        return False
+    if _is_non_secret_structured_token(token):
         return False
     classes = 0
     if any(c.islower() for c in token):
@@ -405,6 +526,101 @@ def _looks_like_key_material(token: str) -> bool:
     if classes < 3:
         return False
     return _entropy(token) >= _GIBBERISH_MIN_ENTROPY
+
+
+def _is_address_not_secret(text: str, start: int, end: int, token: str) -> bool:
+    """True when the run at *text[start:end]* names a place, not a value.
+
+    Exempts loopback URL paths, non-secret URL structures (where no individual
+    path/query segment is key material), non-credential file extensions,
+    flag-assigned paths, and absolute/relative filesystem paths with readable
+    directory components.
+    """
+    # The path part of a loopback URL (ws://127.0.0.1:9222/devtools/…).
+    lookback = text[max(0, start - 256):start]
+    if _LOOPBACK_URL_PREFIX_RE.search(lookback[-64:]):
+        return True
+
+    # A file name anchored by a non-credential extension (…/shot.jpg).
+    if _NON_SECRET_FILE_EXT_RE.match(text[end:end + 16]):
+        return True
+
+    # A flag joined to an absolute path (--user-data-dir=/data/…).
+    if "=/" in token:
+        return True
+
+    # A path rooted at a filesystem directory (/data/data/…/Cookies).
+    if _FS_ROOT_PREFIX_RE.match(token):
+        before = text[start - 1] if start > 0 else ""
+        if not before or before in " \t\n\r\"'=(<>":
+            return True
+
+    # Inside an HTTP/WS/FTP URL: a multi-segment URL path or hostname is an
+    # address unless an individual slash/equals-delimited segment itself looks
+    # like key material.
+    if _URL_IN_CONTEXT_RE.search(lookback):
+        if "/" in token:
+            parts = [p for p in re.split(r"[/=]", token) if p]
+            if parts and not any(_looks_like_key_material(p) for p in parts):
+                return True
+        elif re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.[a-z]{2,12}", token):
+            return True
+
+    # A relative filesystem path (e.g. workspace/.browser/session_1/Default/...):
+    # standard base64 with '/' never uses '.' or '_', and multi-segment paths
+    # have readable directory components rather than 40-char secret segments.
+    # Never exempt non-loopback scheme URLs (e.g. remote ws:// endpoints) here.
+    if (
+        "/" in token
+        and "+" not in token
+        and "=" not in token
+        and not re.search(r"(?:^|[\s\"'(=<])(?:[a-z][a-z0-9+.-]*:)?//[^\s<>\"'`)\]]*$", lookback, re.IGNORECASE)
+    ):
+        segs = [s for s in token.split("/") if s]
+        if len(segs) >= 3 and not any(_looks_like_key_material(s) for s in segs):
+            readable = sum(1 for s in segs if _READABLE_PATH_SEG_RE.match(s))
+            if readable >= 2:
+                return True
+
+    return False
+
+
+def _key_material_spans(text: str) -> list[tuple[int, int, str]]:
+    """The key-material runs in *text*, as ``(start, end, token)`` triples.
+
+    Two shapes are looked for: a long unbroken run, and a long run broken up
+    by dots.  Overlapping matches keep the earliest one, so the plain run
+    inside a dotted run is not counted twice.
+
+    Runs that are *addresses* rather than values — loopback URL paths, file
+    names, flag-assigned paths — are consumed but not reported, so a nested
+    run inside an excluded one is not reported either.
+    """
+    if not text:
+        return []
+    candidates: list[tuple[int, int, str]] = []
+    for match in _GIBBERISH_RE.finditer(text):
+        candidates.append((match.start(), match.end(), match.group(0)))
+    for match in _DOTTED_GIBBERISH_RE.finditer(text):
+        candidates.append((match.start(), match.end(), match.group(0)))
+    candidates.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+
+    spans: list[tuple[int, int, str]] = []
+    last = -1
+    for start, end, token in candidates:
+        if start < last:
+            continue  # inside a match that was already taken
+        if _HASH_LABEL_RE.match(token):
+            last = end
+            continue
+        if not _looks_like_key_material(token):
+            continue
+        if _is_address_not_secret(text, start, end, token):
+            last = end  # consume the region: a path is not redacted piecemeal
+            continue
+        spans.append((start, end, token))
+        last = end
+    return spans
 
 
 def _content_reason(path: str) -> str | None:
@@ -466,12 +682,7 @@ def _blob_share(text: str) -> tuple[float, int]:
     """
     blobs = 0
     blob_chars = 0
-    for match in _GIBBERISH_RE.finditer(text):
-        token = match.group(0)
-        if _HASH_LABEL_RE.match(token):
-            continue
-        if not _looks_like_key_material(token):
-            continue
+    for _start, _end, token in _key_material_spans(text):
         blobs += 1
         blob_chars += len(token)
     total = sum(1 for char in text if not char.isspace())
@@ -481,6 +692,87 @@ def _blob_share(text: str) -> tuple[float, int]:
 
 
 # ── redaction ──────────────────────────────────────────────────────────────────
+
+# ── the secrets this runtime knows by value ───────────────────────────────────
+#
+# Shape detection can never be complete.  It was measured to be incomplete
+# here: two of the configured keys in ``config/api.keys`` carry a dot, the
+# plain "long random run" rule stopped at the dot, and both values passed
+# through :func:`redact_credentials` untouched.
+#
+# The runtime already *holds* every credential it can use — the API keys are
+# in memory, the OAuth tokens are on disk.  So the strongest redaction is not
+# a shape rule at all: it is the literal value.  Whatever this runtime knows
+# as a secret is scrubbed by value, whatever its shape, and whatever provider
+# it belongs to.
+#
+# The registry lives in memory only.  It is never written to disk, never
+# logged, and a value that comes out of it is always replaced by a label.
+
+#: Known secrets as ``(value, label)`` pairs.
+_KNOWN_SECRETS: list[tuple[str, str]] = []
+
+#: The shortest value worth scrubbing literally.  A real API key is never
+#: this short, and a short value would occur by chance in ordinary text —
+#: scrubbing it would replace half the output with redaction tags.
+_MIN_LITERAL_SECRET = 16
+
+
+def register_secret(value: str, label: str = "credential") -> None:
+    """Remember a secret *value* so it can be scrubbed by value.
+
+    *label* says what kind of secret it is ("ollama key", "Google OAuth
+    secret"); it never carries the value itself.
+    """
+    text = str(value or "").strip()
+    if len(text) < _MIN_LITERAL_SECRET:
+        return
+    for existing, _existing_label in _KNOWN_SECRETS:
+        if existing == text:
+            return
+    _KNOWN_SECRETS.append((text, str(label or "credential")))
+
+
+def known_secret_count() -> int:
+    """How many secret values this runtime knows by value."""
+    return len(_KNOWN_SECRETS)
+
+
+def _scrub_known_secrets(text: str) -> str:
+    """Replace every known secret value in *text* with a redaction tag."""
+    if not text or not _KNOWN_SECRETS:
+        return text
+    for value, label in _KNOWN_SECRETS:
+        if value in text:
+            text = text.replace(value, f"[REDACTED:{label}]")
+    return text
+
+
+#: The credential stores this runtime knows about.  Text that names one of
+#: them is *arming* something: a script that opens ``api.keys`` is a script
+#: that will print your keys.
+_CREDENTIAL_PATH_RES = (
+    re.compile(r"(?<![\w.])api\.keys(?![\w.])"),
+    re.compile(r"(?<![\w.-])google_oauth\.json(?![\w.-])"),
+    re.compile(r"(?<![\w.-])google_pending_auth\.json(?![\w.-])"),
+    re.compile(r"(?<![\w.-])google_tokens(?![\w-])"),
+    re.compile(r"\bAPI_KEYS_FILE\b"),
+    re.compile(r"\bGOOGLE_OAUTH_FILE\b"),
+    re.compile(r"\bGOOGLE_TOKENS_DIR\b"),
+)
+
+
+def references_credential_path(text: str) -> bool:
+    """True when *text* names a credential store.
+
+    This is the signal the write gate uses: a file whose *content* points at
+    ``config/api.keys`` is a script that will read your keys, and writing it
+    is the first half of the attack.  ``api.keys.template`` does not match —
+    it is a template, not the secrets file.
+    """
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _CREDENTIAL_PATH_RES)
 
 #: A short, stable label for each credential shape, used in redaction tags.
 _REDACT_LABELS = {
@@ -521,6 +813,11 @@ def redact_credentials(text: str) -> str:
     if not text:
         return text
 
+    # The secrets this runtime knows *by value* are scrubbed first, whatever
+    # their shape.  A shape rule can be incomplete — and was, here — but the
+    # literal value never is.
+    text = _scrub_known_secrets(text)
+
     matches: list[tuple[int, int, str]] = []
 
     for label, pattern in _CONTENT_PATTERNS:
@@ -536,13 +833,8 @@ def redact_credentials(text: str) -> str:
         matches.append((match.start(1), match.end(1), "[REDACTED]"))
 
     # key material with no label at all.
-    for match in _GIBBERISH_RE.finditer(text):
-        token = match.group(0)
-        if _HASH_LABEL_RE.match(token):
-            continue
-        if not _looks_like_key_material(token):
-            continue
-        matches.append((match.start(), match.end(), "[REDACTED:key material]"))
+    for start, end, _token in _key_material_spans(text):
+        matches.append((start, end, "[REDACTED:key material]"))
 
     matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
 

@@ -109,7 +109,7 @@ try:
         # do not exist turns a typo into a message silently sent to the model.
         commands = [
             '/agent', '/autonomous', '/chat', '/collapse', '/details',
-            '/e', '/expand', '/c', '/normal', '/notify',
+            '/e', '/expand', '/c', '/normal', '/notify', '/mcp',
         ]
         
         # Filter commands that start with current word

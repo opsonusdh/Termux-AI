@@ -147,7 +147,11 @@ def test_forbidden_system_commands_are_gated():
 
 def test_a_working_directory_change_is_still_gated():
     """Pre-existing policy, pinned so the refactor cannot quietly drop it."""
-    assert needs("cd workspace && ls")
+    # cd to outside project root should still be gated
+    assert needs("cd /tmp && ls")
+    # cd to inside project root should NOT be gated (new behavior)
+    assert not needs("cd workspace && ls")
+    assert not needs("cd ~/Termux-AI && ls")
 
 
 # ── api.keys stays gated inside blocks too ───────────────────────────────────
@@ -197,3 +201,65 @@ def test_interpreter_windows_slash_flag_skipped(monkeypatch):
     cmd = "some_interpreter /flag arg"
     # Should not crash and should handle /flag as a flag
     assert isinstance(needs(cmd), bool)
+
+
+# ── the script-body scan runs only where code runs ───────────────────────────
+#
+# Regression (2026-11-16, workspace/problem.txt era): the scan collected
+# every path-like token of a command that contained an interpreter
+# *anywhere*, so `grep pattern core/tools.py` was refused as "a script that
+# reads a credential file" — the browser tool's source legitimately mentions
+# the credential-path constants it enforces.  Reading a file is not running
+# it; only the stages that run code (and the stage feeding them) are scanned.
+
+import shutil
+
+_CRED_CONST = "API" + "_KEYS" + "_FILE"
+
+
+@pytest.fixture()
+def gate_fixtures():
+    """Scripts inside the project root — outside-root would gate for its
+    own reason and hide which check fired."""
+    base = os.path.join(REPO_ROOT, "workspace", ".tmp", "gate_fixtures")
+    os.makedirs(base, exist_ok=True)
+    leak = os.path.join(base, "leak_test.py")
+    mentions = os.path.join(base, "mentions_test.py")
+    with open(leak, "w", encoding="utf-8") as fh:
+        fh.write("import paths\nprint(open(paths." + _CRED_CONST + ").read())\n")
+    with open(mentions, "w", encoding="utf-8") as fh:
+        fh.write('X = 1\nMENTION = "' + _CRED_CONST + '"\n')
+    yield leak, mentions
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def test_running_a_script_that_reads_the_secrets_file_is_gated(gate_fixtures):
+    leak, _ = gate_fixtures
+    assert needs("python3 " + leak)
+    assert needs("env python3 " + leak)
+    assert needs("python3 < " + leak)
+    assert needs("cat " + leak + " | python3")
+    assert needs("python3 -c \"exec(open('" + leak + "').read())\"")
+    assert needs("bash -c 'python3 " + leak + "'")
+
+
+def test_inspecting_a_source_file_is_not_running_it(gate_fixtures):
+    _, mentions = gate_fixtures
+    assert not needs("grep -n needle " + mentions)
+    assert not needs("grep -n needle " + mentions + " | head -40")
+    assert not needs("grep -n needle " + mentions + "; echo hi; python3 -c 'print(1)'")
+    assert not needs("python3 -m py_compile " + mentions)
+
+
+def test_a_regex_escaping_token_is_not_a_file_name(gate_fixtures):
+    """A single backslash is a regex escape on POSIX, not a path separator;
+    a pattern may not be refused because a word inside it is secret-ish."""
+    _, mentions = gate_fixtures
+    assert not needs("grep -n 'needle\\b' " + mentions)
+
+
+def test_inline_code_that_merely_names_a_file_is_not_running_it(gate_fixtures):
+    """A probe like classify('src.py') names a file; only open()/exec run it."""
+    _, mentions = gate_fixtures
+    probe = "python3 -c \"import sys; print('" + mentions + "')\""
+    assert not needs(probe)

@@ -141,18 +141,27 @@ It is acceptable to rely on a recent read for conceptual understanding, but not 
 
 ## 7. Context Budget Discipline
 
-Preserve context for information that changes decisions.
+Preserve context for information that changes decisions. See [**context_efficiency.md**](./context_efficiency.md) for the full Context-Efficient AI Operating Protocol.
+
+Retention priority order:
+1. Current user request and explicit constraints
+2. Information directly relevant to the current task
+3. Findings needed to reason about the solution
+4. Important decisions, test results, and unresolved issues
+5. General background information
 
 Prefer:
 
-- Short summaries of long files after reading them
-- Exact snippets only for affected sections
-- Grep results for location discovery
-- Raw chunk retrieval only when details matter
+- Inspecting file size/type and searching (`grep`, `search_in_files`, `jq`) before reading
+- Selective line/segment reads instead of dumping full files
+- Short technical summaries of long files after reading them (preserving exact errors, paths, symbols, and config values)
+- Checking `git diff`, timestamps, or hashes instead of re-reading unchanged files
+- Concise, filtered tool output and shallow directory listings
+- Raw chunk/archive retrieval only when details matter
 
 Avoid:
 
-- Pasting entire files into conversation when a section is enough
+- Pasting entire files or multi-megabyte logs into conversation when a filtered section is enough
 - Re-reading unchanged files repeatedly
 - Carrying old command output forward as if it were current state
 - Saving long diagnostic dumps to persistent memory

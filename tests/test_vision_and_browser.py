@@ -10,10 +10,18 @@ Three things are covered:
      tool message), and a text-only model gets a note instead of a picture.
   3. The browser session manager — sessions survive between calls, are
      addressed by id, and are cleaned up.
+  4. Mirage — when the serving model cannot see, the on-device
+     vision-to-text model describes the picture as text, and the
+     vision-model switch is held while Mirage is available.
+  5. The Mirage endpoint — the OpenAI-compatible loopback service that
+     runs the same model where the cactus package cannot load (served
+     over real HTTP in-process, with the engine faked).
 
 No network access and no real API keys are used here.
 """
 import base64
+import json
+import io
 import os
 import sys
 import types
@@ -55,7 +63,9 @@ class TestVisionRegistry:
         assert model_supports_vision("nvidia",
                                      "nvidia/nemotron-3.5-super-vl-120b-a12b")
         assert model_supports_vision("nvidia", "minimaxai/minimax-m3.1-flash")
-        assert model_supports_vision("ollama", "gemma4:31b")
+        # ollama is currently commented out of the registry, so its models
+        # are treated as text-only again.
+        assert not model_supports_vision("ollama", "gemma4:31b")
 
     def test_text_only_models_are_excluded(self):
         # Each of these was seen rejecting an image payload with a 400.
@@ -123,6 +133,304 @@ class TestMultimodalSanitizer:
     def test_strip_images_reports_no_change_when_there_are_no_images(self):
         messages = [{"role": "user", "content": "plain"}]
         assert llm_client._strip_images(messages) is messages
+
+
+class TestMirageEyes:
+    """Mirage turns a picture into text when the serving model cannot see."""
+
+    @staticmethod
+    def _fake(describe):
+        return types.SimpleNamespace(describe=describe)
+
+    def test_text_only_model_gets_the_mirage_description(self, monkeypatch,
+                                                         tmp_path):
+        calls = []
+
+        def describe(image, **kw):
+            calls.append(image)
+            return {"description": "a red square on white"}
+
+        monkeypatch.setattr(llm_client, "_get_mirage",
+                            lambda: self._fake(describe))
+        content = [{"type": "text", "text": "look"},
+                   {"type": "orion_image", "path": _write_png(tmp_path),
+                    "label": "shot"}]
+        out = llm_client._sanitize_multimodal_content(
+            content, "groq", "openai/gpt-oss-120b")
+        assert isinstance(out, str)
+        assert "a red square on white" in out
+        assert "Mirage" in out
+        assert "shot" in out
+        # the local path reached the describer
+        assert calls and os.path.isfile(calls[0])
+
+    def test_a_failed_description_still_leaves_the_note(self, monkeypatch):
+        def describe(image, **kw):
+            raise RuntimeError("engine crashed")
+
+        monkeypatch.setattr(llm_client, "_get_mirage",
+                            lambda: self._fake(describe))
+        content = [{"type": "orion_image", "path": "/tmp/x.png",
+                    "label": "shot"}]
+        out = llm_client._sanitize_multimodal_content(
+            content, "groq", "openai/gpt-oss-120b")
+        assert isinstance(out, str)
+        assert "cannot view images" in out
+
+    def test_mirage_unavailable_keeps_the_old_note(self, monkeypatch):
+        monkeypatch.setattr(llm_client, "_get_mirage", lambda: None)
+        content = [{"type": "orion_image", "path": "/tmp/x.png",
+                    "label": "shot"}]
+        out = llm_client._sanitize_multimodal_content(
+            content, "groq", "openai/gpt-oss-120b")
+        assert isinstance(out, str)
+        assert "cannot view images" in out
+
+    def test_data_uri_is_decoded_into_bytes(self, monkeypatch):
+        seen = {}
+
+        def describe(image, **kw):
+            seen["image"] = image
+            return {"text": "ocr says hello"}
+
+        monkeypatch.setattr(llm_client, "_get_mirage",
+                            lambda: self._fake(describe))
+        uri = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+        content = [{"type": "image_url", "image_url": {"url": uri},
+                    "label": "paste"}]
+        out = llm_client._sanitize_multimodal_content(
+            content, "groq", "openai/gpt-oss-120b")
+        assert seen["image"] == PNG_BYTES
+        assert "ocr says hello" in out
+
+    def test_a_remote_url_is_not_described(self, monkeypatch):
+        def describe(image, **kw):
+            raise AssertionError("a remote URL must not reach the describer")
+
+        monkeypatch.setattr(llm_client, "_get_mirage",
+                            lambda: self._fake(describe))
+        content = [{"type": "image_url",
+                    "image_url": {"url": "https://example.com/x.png"},
+                    "label": "web"}]
+        out = llm_client._sanitize_multimodal_content(
+            content, "groq", "openai/gpt-oss-120b")
+        assert isinstance(out, str)
+        assert "cannot view images" in out
+
+    def test_vision_switch_holds_when_mirage_serves(self, monkeypatch):
+        monkeypatch.setattr(llm_client, "_get_mirage", lambda: object())
+        atts = [{"path": "/tmp/x.png", "explicit": True}]
+        assert not llm_client._wants_vision_switch(
+            atts, "groq", "openai/gpt-oss-120b", False)
+
+    def test_vision_switch_still_happens_without_mirage(self, monkeypatch):
+        monkeypatch.setattr(llm_client, "_get_mirage", lambda: None)
+        atts = [{"path": "/tmp/x.png", "explicit": True}]
+        assert llm_client._wants_vision_switch(
+            atts, "groq", "openai/gpt-oss-120b", False)
+
+    def test_switch_rules_are_unchanged_otherwise(self, monkeypatch):
+        monkeypatch.setattr(llm_client, "_get_mirage", lambda: None)
+        atts = [{"path": "/tmp/x.png", "explicit": True}]
+        # a model that sees images is never switched away from
+        assert not llm_client._wants_vision_switch(
+            atts, "google", "gemini-3.5-flash", False)
+        # an already-switched turn never switches again
+        assert not llm_client._wants_vision_switch(
+            atts, "groq", "openai/gpt-oss-120b", True)
+        # an unasked-for picture never changes the model
+        implicit = [{"path": "/tmp/x.png", "explicit": False}]
+        assert not llm_client._wants_vision_switch(
+            implicit, "groq", "openai/gpt-oss-120b", False)
+
+
+class TestMirageEndpoint:
+    """The local OpenAI-compatible endpoint that carries Mirage on Termux."""
+
+    @staticmethod
+    def _png_bytes():
+        from PIL import Image
+        image = Image.new("RGB", (8, 8), (200, 30, 30))
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG")
+        return buffer.getvalue()
+
+    @classmethod
+    def _data_uri(cls):
+        return ("data:image/png;base64,"
+                + base64.b64encode(cls._png_bytes()).decode())
+
+    @staticmethod
+    def _server(engine_result=None, engine_error=None):
+        """A real loopback HTTP server whose engine is a stub."""
+        import threading
+        from http.server import ThreadingHTTPServer
+        import mirage_server
+
+        def describe(rgb, width, height, options):
+            if engine_error is not None:
+                raise mirage_server.BridgeError(engine_error)
+            return engine_result if engine_result is not None else {}
+
+        state = mirage_server._ServerState(
+            types.SimpleNamespace(describe=describe))
+        server = ThreadingHTTPServer(("127.0.0.1", 0),
+                                     mirage_server._make_handler(state))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_health_and_model_list(self):
+        import urllib.request
+        server, base = self._server()
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=5) as r:
+                health = json.loads(r.read().decode())
+            assert health["status"] == "ok"
+            with urllib.request.urlopen(base + "/v1/models", timeout=5) as r:
+                models = json.loads(r.read().decode())
+            assert models["object"] == "list"
+            assert models["data"][0]["id"] == "mirage"
+        finally:
+            server.shutdown()
+
+    def test_openai_completion_shape_with_a_data_uri(self):
+        import urllib.request
+        engine = {"scene": {"background": "red"},
+                  "objects": [{"name": "yellow rectangle",
+                               "color": "yellow", "shape": "rectangular",
+                               "position": "center"}]}
+        server, base = self._server(engine_result=engine)
+        try:
+            body = json.dumps({
+                "model": "mirage",
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url", "image_url": {"url": self._data_uri()}},
+                ]}],
+            }).encode()
+            request = urllib.request.Request(
+                base + "/v1/chat/completions", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=10) as r:
+                payload = json.loads(r.read().decode())
+            assert payload["object"] == "chat.completion"
+            message = payload["choices"][0]["message"]
+            assert message["role"] == "assistant"
+            assert "yellow rectangle" in message["content"]
+            assert payload["mirage_raw"] == engine
+            assert payload["usage"]["completion_tokens"] >= 1
+        finally:
+            server.shutdown()
+
+    def test_stream_returns_sse_chunks(self):
+        import urllib.request
+        server, base = self._server(engine_result={"text": "hi"})
+        try:
+            body = json.dumps({
+                "model": "mirage", "stream": True,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": self._data_uri()}},
+                ]}],
+            }).encode()
+            request = urllib.request.Request(
+                base + "/v1/chat/completions", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=10) as r:
+                assert r.headers.get("Content-Type") == "text/event-stream"
+                raw = r.read().decode()
+            assert raw.count("data: ") == 4          # role, content, stop, [DONE]
+            assert raw.rstrip().endswith("[DONE]")
+        finally:
+            server.shutdown()
+
+    def test_a_request_without_an_image_is_an_openai_error(self):
+        import urllib.error
+        import urllib.request
+        server, base = self._server()
+        try:
+            body = json.dumps({
+                "model": "mirage",
+                "messages": [{"role": "user", "content": "plain text"}],
+            }).encode()
+            request = urllib.request.Request(
+                base + "/v1/chat/completions", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(request, timeout=10)
+            assert excinfo.value.code == 400
+            payload = json.loads(excinfo.value.read().decode())
+            assert payload["error"]["type"] == "invalid_request_error"
+        finally:
+            server.shutdown()
+
+    def test_an_engine_failure_is_a_502(self):
+        import urllib.error
+        import urllib.request
+        server, base = self._server(engine_error="bridge died")
+        try:
+            body = json.dumps({
+                "model": "mirage",
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": self._data_uri()}},
+                ]}],
+            }).encode()
+            request = urllib.request.Request(
+                base + "/v1/chat/completions", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with pytest.raises(urllib.error.HTTPError) as excinfo:
+                urllib.request.urlopen(request, timeout=10)
+            assert excinfo.value.code == 502
+        finally:
+            server.shutdown()
+
+    def test_prose_from_engine_result(self):
+        import mirage_server
+        prose = mirage_server.prose_from_result({
+            "scene": {"background": "red", "style": "minimalist"},
+            "objects": [{"name": "yellow rectangle", "color": "yellow",
+                         "shape": "rectangular", "position": "center"}],
+            "text": [{"text": "EXIT"}],
+        })
+        assert "red" in prose and "yellow rectangle" in prose
+        assert "EXIT" in prose
+
+    def test_decode_image_accepts_bytes_and_data_uri(self):
+        import mirage_server
+        rgb, width, height = mirage_server.decode_image(self._data_uri())
+        assert len(rgb) == width * height * 3
+        rgb2, w2, h2 = mirage_server.decode_image(self._png_bytes())
+        assert (w2, h2) == (width, height)
+
+    def test_ensure_endpoint_reuses_a_running_server(self, monkeypatch):
+        import mirage_server
+        monkeypatch.setattr(mirage_server, "_health_ok",
+                            lambda port, timeout=0.5: True)
+
+        def fail(*args, **kwargs):
+            raise AssertionError("must not spawn a server")
+
+        monkeypatch.setattr(mirage_server.subprocess, "Popen", fail)
+        client = mirage_server.ensure_endpoint()
+        assert isinstance(client, mirage_server.MirageEndpointClient)
+
+    def test_ensure_endpoint_returns_none_without_node(self, monkeypatch):
+        import mirage_server
+        monkeypatch.setattr(mirage_server, "_health_ok",
+                            lambda port, timeout=0.5: False)
+        monkeypatch.setattr(mirage_server.shutil, "which", lambda name: None)
+        assert mirage_server.ensure_endpoint() is None
+
+    def test_endpoint_client_returns_the_package_shape(self):
+        import mirage_server
+        server, base = self._server(
+            engine_result={"scene": {"background": "red"}})
+        try:
+            client = mirage_server.MirageEndpointClient(base)
+            result = client.describe(self._data_uri())
+            assert result["description"]            # the prose key llm_client reads
+            assert result["raw"]["scene"] == {"background": "red"}
+        finally:
+            server.shutdown()
 
 
 class TestWirePreparation:

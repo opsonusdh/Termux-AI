@@ -225,7 +225,10 @@ class TestScreenshotsAreOptIn:
             [{"path": "/tmp/x.png", "explicit": False}],
             "openrouter", "some/text-model", False) is False
 
-    def test_an_asked_for_picture_does_move_the_turn(self):
+    def test_an_asked_for_picture_does_move_the_turn(self, monkeypatch):
+        # The switch rule applies when nothing else can see the picture;
+        # pin Mirage to unavailable, since the local endpoint may be up.
+        monkeypatch.setattr(llm_client, "_get_mirage", lambda: None)
         assert llm_client._wants_vision_switch(
             [{"path": "/tmp/x.png", "explicit": True}],
             "openrouter", "some/text-model", False) is True

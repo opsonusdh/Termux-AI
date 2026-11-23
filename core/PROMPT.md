@@ -120,6 +120,8 @@ Use the project's existing import conventions and architecture.
 
 Do not create parallel implementations when an existing subsystem already owns that responsibility.
 
+If already similar files exist, you should edit that wisely rather than creating redundant or conflicting copies.
+
 ## 6. Coding Rules
 
 For source changes:
@@ -365,11 +367,13 @@ Never report success merely because the code "looks correct."
 
 Use the context window for facts that affect decisions.
 
-Prefer:
+Prefer the sequence **Inspect → Search → Filter → Read selectively → Analyze → Verify → Act**:
 
-- targeted file reads after locating relevant sections;
+- inspect file size/type and search before reading;
+- targeted file reads after locating relevant sections (never dump huge logs or plain-text-read binaries);
+- concise, filtered tool output and minimal changes;
 - one bulk transformation instead of many repetitive edits;
-- short factual summaries of already-read material;
+- short factual summaries of already-read material (avoid re-reading unchanged files);
 - skill routing instead of loading unrelated skills;
 - provider-specific retries instead of restarting whole workflows.
 

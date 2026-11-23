@@ -88,15 +88,15 @@ def test_tier_ordering_follows_capability():
     for expected in [
         ("nvidia", "minimaxai/minimax-m3.1-flash"),
         ("nvidia", "nvidia/nemotron-3-ultra-550b-a55b"),
-        ("ollama", "nemotron-3-ultra:cloud"),
         ("groq", "qwen/qwen3.8-27b"),
         ("google", "gemini-3.8-flash"),
+        ("openrouter", "baidu/ernie-5.5-flash-preview:free"),
+        ("nvidia", "moonshotai/kimi-k3.1-pro"),
     ]:
         assert expected in high, f"{expected} must be in the high tier"
 
     # GPT-OSS 120B is a tier down, Gemini 2.5 Flash is the cheap end.
     assert ("groq", "openai/gpt-oss-120b") in medium
-    assert ("ollama", "gpt-oss:120b-cloud") in medium
     assert ("google", "gemini-2.5-flash") in low
 
     # And the strongest models must come first inside their tier.
@@ -107,13 +107,15 @@ def test_tier_ordering_follows_capability():
     # needs minutes for its first token would otherwise stall every delegation.
     assert high[0] == ("google", "gemini-3.8-flash")
     assert high[1] == ("nvidia", "minimaxai/minimax-m3.1-flash")
-    assert high[2] == ("groq", "qwen/qwen3.8-27b")
-    # The slowest route (measured > 140 s for the first token) comes last.
+    assert high[2] == ("openrouter", "baidu/ernie-5.5-flash-preview:free")
+    assert high[3] == ("groq", "qwen/qwen3.8-27b")
+    # The slow routes (measured > 140 s for the first token) come last.
     assert high[-1] == ("nvidia", "z-ai/glm-5.3-flash")
+    assert high[-2] == ("nvidia", "moonshotai/kimi-k3.1-pro")
 
     # The cheap end of the pool starts with the smallest Gemini.
     assert low[0] == ("google", "gemini-2.5-flash")
-    assert medium[0] == ("ollama", "gpt-oss:120b-cloud")
+    assert medium[0] == ("groq", "openai/gpt-oss-120b")
 
     # A frontier model must never sit in the medium or low tier.
     frontier = {("google", "gemini-3.8-flash"),
@@ -157,8 +159,6 @@ def test_the_free_check_accepts_every_registered_free_route():
     for provider_id, name in [
         ("openrouter", "cohere/north-mini-code:free"),
         ("openrouter", "nvidia/nemotron-3.ultra-550b-a55b:free"),
-        ("ollama", "gpt-oss:120b-cloud"),
-        ("ollama", "nemotron-3-ultra:cloud"),
         ("google", "gemini-3.8-flash"),
         ("google", "gemma-4-31b-it"),
         ("nvidia", "z-ai/glm-5.3-flash"),

@@ -37,6 +37,14 @@ def test_the_line_says_the_gate_is_bypassed(monkeypatch):
     assert "bypassed" in line
 
 
+def test_the_line_says_semi_mode_asks(monkeypatch):
+    monkeypatch.setattr(permissions, "is_autonomous", lambda: True)
+    monkeypatch.setattr(permissions, "is_autonomous_semi", lambda: True)
+    line = permissions.permission_snapshot()
+    assert "semi" in line.lower()
+    assert "asks" in line
+
+
 def test_the_line_is_one_line(monkeypatch):
     monkeypatch.setattr(permissions, "is_autonomous", lambda: False)
     assert "\n" not in permissions.permission_snapshot()

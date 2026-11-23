@@ -55,7 +55,9 @@ Before writing a single line, identify whether this is:
 
 - **A targeted change** — one specific location, one specific edit → read → edit → verify
 - **A bulk transformation** — the same change in N places → read → write a script → run once → verify
-- **Adding a new component** — new function, new tool, new wrapper → plan the full addition chain first
+- **Adding a new component** — new function, new tool, new wrapper → check existing files first and plan the full addition chain
+
+**Reuse and consolidation rule:** If already similar files exist, you should edit that wisely instead of creating duplicate or conflicting files. Make the smallest relevant change that preserves existing functionality and architecture.
 
 **The bulk rule:** If the same pattern needs to change in more than three places in a file, do not make three individual edits. Write a Python script or use `sed` to make all changes in one pass. It is faster, more consistent, and does not consume round trips.
 

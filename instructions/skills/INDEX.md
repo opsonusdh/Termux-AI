@@ -16,7 +16,8 @@ A skill is active only after its current `SKILL.md` has been read with the file 
 | Task surface | Read first | Add when relevant |
 |---|---|---|
 | Every task | `core/bootstrap` | `core/communication` |
-| Coding/editing/refactoring/new tools | `core/coding` | `core/verification`, `core/reasoning` for diagnosis, `core/tool_efficiency` for bulk work |
+| Coding/editing/refactoring/new tools | `core/coding` | `core/verification`, `core/reasoning` for diagnosis, `core/tool_efficiency` for bulk work & context efficiency |
+| Large files/repos/logs/context-efficiency | `core/tool_efficiency` | `core/memory_and_context`; full manual: `instructions/context_efficiency.md` |
 | Runtime/import/tool failure | `core/troubleshooting` | `core/reasoning`, `core/verification` |
 | Secrets/private data/external side effects | `core/security_and_privacy` | `core/capabilities` |
 | History/context/continuation | `core/memory_and_context` | `core/reasoning` |
@@ -61,6 +62,7 @@ execution/verification by the core skills.
 - `pdf-reading` → `skills/imported/pdf-reading/SKILL.md` — document/artifact; use when trigger matches.
 - `pptx` → `skills/imported/pptx/SKILL.md` — document/artifact; use when trigger matches.
 - `skill-creator` → `skills/imported/skill-creator/SKILL.md` — domain; use when trigger matches.
+- `web-login` → `skills/imported/web-login/SKILL.md` — domain; use when the user wants to sign into a website in the browser tool without exposing credentials.
 - `xlsx` → `skills/imported/xlsx/SKILL.md` — document/artifact; use when trigger matches.
 
 ## Selection rules
