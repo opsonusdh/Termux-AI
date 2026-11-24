@@ -927,8 +927,9 @@ TOOLS_DESCRIPTION = [
                 "When the wake word is detected, a lightweight AI relevance "
                 "check determines whether the speaker is actually addressing "
                 "the assistant.  The check uses the free decision chain: "
-                "OpenRouter's respan/span-01-lite:free on the Decisions API, "
-                "with gemini-2.5-flash as the fallback."
+                "OpenRouter's pplx-decider on the Decisions API, with "
+                "respan/span-01-lite:free and gemini-2.5-flash as the "
+                "fallbacks."
             ),
             "parameters": {
                 "type": "object",
@@ -945,16 +946,15 @@ TOOLS_DESCRIPTION = [
                 "Use this when you need to answer a yes/no question, choose "
                 "between options, rate something on a scale, or evaluate a "
                 "situation against criteria, instead of guessing or asking "
-                "the user.  A yes/no question is answered by OpenRouter's "
-                "respan/span-01-lite:free on the Decisions API and comes back "
-                "with a real probability.  A scale question is derived from "
-                "cumulative yes/no questions on that same model and comes "
-                "back with the distribution over the scale.  A choice "
-                "question is answered by the chat routes (NVIDIA's "
-                "nemotron-3.5-bolt-e4b, then gemini-2.5-flash), because the "
-                "free decision model answers yes/no questions only.  Returns "
-                "the answer, a one-line rationale, the model that served it, "
-                "and the confidence that was actually measured."
+                "the user.  A yes/no question is answered natively by "
+                "OpenRouter's pplx-decider on the Decisions API and comes "
+                "back with a real probability.  A choice question is answered "
+                "natively too, with the full probability distribution over "
+                "the options.  A scale question is answered natively with the "
+                "distribution over the rubric; when no typed model answers, "
+                "it is derived from cumulative yes/no questions instead.  "
+                "Returns the answer, a one-line rationale, the model that "
+                "served it, and the confidence that was actually measured."
             ),
             "parameters": {
                 "type": "object",
@@ -9111,10 +9111,12 @@ def _decision_call_questions(slot: dict, state: str, questions: dict,
             _decision_log(provider_id, model, f"HTTP {exc.code}: {body}")
             if exc.code == 400:
                 # A bad request is a property of the *request*, not of the key:
-                # the same payload to the next key fails the same way.  This
-                # is what a typed question sent to a noul-only model looks
-                # like ("Respan only accepts noul questions ..."), and every
-                # key tried would burn a request on the identical refusal.
+                # the same payload to the next key fails the same way.  The
+                # error text is boilerplate ("Respan only accepts noul
+                # questions ...") — it names Respan whatever model the request
+                # carried, so it is not evidence about the model itself — and
+                # every key tried would burn a request on the identical
+                # refusal.
                 break
             reset_at = _decision_reset_at(body)
             _decision_park_key(provider_id, model, key, exc.code, now, reset_at)
@@ -9176,12 +9178,12 @@ def _decision_call_native_choice(slot: dict, state: str, question: str,
         {"answers": {"choice": {"type": "choice", "choice": "billing",
                                  "probabilities": {"billing": 0.96,
                                                    "technical": 0.04},
-                                 "confidence": 0.92}}}
+                                  "confidence": 0.92}}}
 
-    The only model that implements it is paid (``typesafe/jev-1.13``), so no
-    registered free route reaches this path today.  It is written anyway so
-    the chain speaks the documented protocol and starts using the typed path
-    the moment a free typed model appears.
+    The free ``perplexity/pplx-decider-v1.3:free`` (and its flash sibling)
+    implements it — verified live on 2026-11-28 — and is the primary choice
+    route in ``DECISION_MODEL_SLOTS``.  ``typesafe/jev-1.13`` also implements
+    it but is paid, so it stays out of the registry.
 
     Returns None when the route cannot answer.
     """
@@ -9227,8 +9229,9 @@ def _decision_call_native_score(slot: dict, state: str, question: str,
                                 timeout: float) -> dict | None:
     """Ask a decision model a native *score* question.
 
-    The documented contract for a score is an ordered list of labels; the
-    answer carries the position, the legend and the distribution::
+    The documented contract for a score is an ordered list of level
+    descriptions; the answer carries the position, the legend and the
+    distribution::
 
         {"answers": {"score": {"type": "score", "score": 1.99,
                                "legend": {"0": "Calm", "1": "Frustrated",
@@ -9236,8 +9239,10 @@ def _decision_call_native_score(slot: dict, state: str, question: str,
                                "probabilities": {"0": 0, "1": 0.01, "2": 0.99},
                                "confidence": 0.99}}}
 
-    Like the native choice, this is served by the paid ``typesafe/jev-1.13``
-    only; the free route answers noul questions and nothing else.
+    The free ``perplexity/pplx-decider`` models implement it — verified live
+    on 2026-11-28 — and are the primary score route.  When no typed model
+    answers, Respan (noul-only) serves the derived emulation instead (see
+    ``_decision_score_via_noul``).
 
     Returns None when the route cannot answer.
     """
@@ -9246,7 +9251,9 @@ def _decision_call_native_score(slot: dict, state: str, question: str,
         {"score": {
             "type": "score",
             "instructions": (
-                f"Place the state on the scale ({', '.join(scale)}). {question}"),
+                f"Place the state on the scale ({', '.join(scale)}). "
+                f"{question}"
+                + (f" {criteria}" if criteria else "")),
             "criteria": list(scale),
         }},
         timeout)
@@ -9284,9 +9291,9 @@ def _decision_score_via_noul(slot: dict, state: str, question: str,
                              timeout: float) -> dict | None:
     """Derive a score distribution from cumulative *noul* questions.
 
-    The free decision model answers noul questions only, so an ordered scale
-    is served by asking "is the level at least k?" for every level above the
-    bottom and differencing the answers::
+    Respan answers noul questions only, so when no typed model answers the
+    scale is served by asking "is the level at least k?" for every level above
+    the bottom and differencing the answers::
 
         P(level = 0) = 1 - P(>=1)
         P(level = k) = P(>=k) - P(>=k+1)
@@ -9297,8 +9304,9 @@ def _decision_score_via_noul(slot: dict, state: str, question: str,
     Measured live on 2026-11-06
     (workspace/research/audit_2026/probe_score_scale.py): the extremes land
     cleanly, the middle bands are fuzzy — 4/6 on a hand-labelled set, and
-    both misses were mid-level cases.  The result is therefore reported as a
-    *distribution*, not as one confident number.
+    both misses were mid-level cases.  A native score (the pplx-decider
+    models, verified 2026-11-28) measured better and is preferred; this
+    emulation is the fallback.
 
     Returns None when the route cannot answer.
     """
@@ -9494,11 +9502,11 @@ def is_wake_relevant(text: str) -> bool:
     """True when the utterance after the wake word addresses Orion.
 
     The check uses the free decision model chain: OpenRouter's
-    ``respan/span-01-lite:free`` on the Decisions API first, its noul-only
-    fallback ``perplexity/pplx-decider-v1.3:free`` second, then the Gemini
-    2.5 Flash fallback.  When every route fails the function fails closed —
-    Orion keeps sleeping, which is the safe reading of "I said the name but
-    did not mean you".
+    ``perplexity/pplx-decider-v1.3:free`` on the Decisions API first, the
+    noul-only ``respan/span-01-lite:free`` second, then the Gemini 2.5 Flash
+    fallback.  When every route fails the function fails closed — Orion keeps
+    sleeping, which is the safe reading of "I said the name but did not mean
+    you".
     """
     relevant, _probability, _model = _wake_relevance(text)
     return relevant
@@ -9509,9 +9517,11 @@ def _decision_choice_via_chat(state: str, question: str,
     """Pick one of ``labels`` with the chat routes.
 
     The chat routes answer in words: NVIDIA's nemotron-3.5-bolt-e4b first,
-    gemini-2.5-flash as the fallback.  The confidence is reported only when
-    the route itself stated one — a route that answered in words has not
-    measured a probability.
+    gemini-2.5-flash as the fallback.  They are the choice and scale
+    *fallback*: the typed pplx-decider models answer both natively and are
+    preferred, so this runs only when no typed model could answer.  The
+    confidence is reported only when the route itself stated one — a route
+    that answered in words has not measured a probability.
 
     Returns None when no chat route could answer.
     """
@@ -9566,27 +9576,25 @@ def make_decision(question: str, options: list[str] | None = None,
                   scale: list[str] | None = None) -> dict:
     """Ask the free decision chain for a verdict.
 
-    Three kinds of question, three different routes:
+    Three kinds of question.  The typed model answers all of them natively:
 
-    * **yes/no** — the decision model answers a *noul* question, and the
+    * **yes/no** — the typed decision model answers a *noul* question, and the
       result carries its own calibrated probability.
-    * **a scale** (``scale=[...]``) — the free decision model answers noul
-      questions only, so the scale is *derived*: one cumulative noul question
-      per level ("is the level at least k?"), differenced into a
-      distribution.  The distribution travels with the answer, so a fuzzy
-      middle band is visible instead of hidden behind one label.
-    * **a choice** (``options=[...]``) — the chat routes pick the option
-      (NVIDIA's nemotron-3.5-bolt-e4b, then gemini-2.5-flash).  The free
-      decision model is deliberately *not* asked to choose: measured live on
-      2026-11-06, asking it one noul question per option picked the wrong
-      option in 1 of 3 cases, and using it to verify the chat route's pick
-      rated a wrong pick at P=0.92.  Its opinion on a choice question is not
-      trustworthy, so it is not used.
-
-    A decision model that implements OpenRouter's documented *choice* and
-    *score* types answers those natively when one is registered.  The only
-    such model is paid (``typesafe/jev-1.13``), so the free chain emulates
-    what it can and says which way the answer was derived.
+    * **a choice** (``options=[...]``) — a native *choice* question to the
+      typed model, answered with the full probability distribution over the
+      options.  Measured on 9 hand-labelled routing cases (2026-11-28,
+      workspace/research/audit_2026/probe_pplx_typed3.py): native choice 8/9,
+      the chat routes 8/9 — equal accuracy, but the native answer is ~4x
+      faster and states a measured confidence for every option.  The chat
+      routes pick only when no typed model answers.  An older idea — one
+      *noul* question per option, differenced — measured 2/3 and is not used.
+    * **a scale** (``scale=[...]``) — a native *score* question to the typed
+      model: one request, the model's own distribution over the rubric.  When
+      no typed model answers, Respan (noul-only) gets the *derived*
+      emulation: one cumulative noul question per level ("is the level at
+      least k?"), differenced into a distribution.  The emulated version
+      measured 4/6 on a hand-labelled set with fuzzy middle bands, which is
+      why a native score is preferred and the emulation is the fallback.
 
     Args:
         question: The decision question in plain language.
@@ -9624,10 +9632,10 @@ def make_decision(question: str, options: list[str] | None = None,
     scale_labels = [str(s).strip() for s in scale if str(s).strip()] if scale else []
 
     # ── A scale question ─────────────────────────────────────────────────────
-    # The free decision model answers noul questions only, so an ordered scale
-    # is derived from cumulative noul questions — one request, one
-    # distribution.  A decision model that implements the documented "score"
-    # type answers it natively instead.
+    # The typed pplx-decider models answer a native score question with the
+    # model's own distribution over the rubric.  Respan answers noul only, so
+    # when no typed model answers the scale is derived from cumulative noul
+    # questions — one request, one distribution.
     if scale_labels:
         for slot in DECISION_MODEL_SLOTS:
             if slot.get("api") != "decisions":
@@ -9637,6 +9645,16 @@ def make_decision(question: str, options: list[str] | None = None,
                 native = _decision_call_native_score(
                     slot, state, question, scale_labels, criteria, timeout)
                 if native:
+                    # The wire format keys the distribution by level index;
+                    # relabel it with the caller's scale labels so a native
+                    # and an emulated answer carry the same shape.
+                    relabelled = {}
+                    for key, value in native.get("probabilities", {}).items():
+                        try:
+                            label = scale_labels[int(str(key))]
+                        except (ValueError, IndexError):
+                            label = str(key)
+                        relabelled[label] = value
                     return {
                         "answer": native["answer"],
                         "why": (f"level {native['score']} on "
@@ -9646,7 +9664,7 @@ def make_decision(question: str, options: list[str] | None = None,
                         "confidence": (native["confidence"]
                                        if native["confidence"] is not None else 0.0),
                         "score": native["score"],
-                        "probabilities": native.get("probabilities", {}),
+                        "probabilities": relabelled,
                     }
             if "noul" in slot.get("question", ()):
                 emulated = _decision_score_via_noul(
@@ -9672,12 +9690,13 @@ def make_decision(question: str, options: list[str] | None = None,
             return chat
         return {"answer": "", "why": "every decision route failed",
                 "model": "none", "confidence": 0.0}
-
     # ── A choice question ────────────────────────────────────────────────────
     # A decision model that implements the documented "choice" type answers
-    # natively, with the full distribution.  Otherwise the chat routes pick
-    # the option: the free decision model is noul-only, and its opinion on a
-    # choice question was measured to be untrustworthy (see the docstring).
+    # natively, with the full distribution — the free pplx-decider models do
+    # (verified 2026-11-28), so they are the primary choice route.  The chat
+    # routes pick the option only when no typed model answers.  (An older
+    # idea — one noul question per option, differenced — measured 2/3 and is
+    # not used; see the docstring.)
     if choice_labels:
         for slot in DECISION_MODEL_SLOTS:
             if slot.get("api") != "decisions":

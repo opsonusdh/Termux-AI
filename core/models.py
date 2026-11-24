@@ -150,36 +150,42 @@ AGENT_MODEL_SLOTS: list[dict] = [
 #     /v1/alpha/decisions and /v1/decision all answer HTTP 404, and the
 #     free catalogue (84 ids) serves chat and text models only.  There is no
 #     NVIDIA route in the *decision* part of the chain.
-#   * OpenRouter serves two free decision models:
-#       - respan/span-01-lite:free — the API answers usage.cost = 0, so it is
-#         genuinely zero-priced, and a noul question comes back in ~0.8 s with
-#         a probability.  Verified live on 2026-11-06.
-#       - perplexity/pplx-decider-v1.3:free — *unlisted*: absent from
-#         /api/v1/models (checked against all 474 catalogue ids on 2026-11-24)
-#         yet served by the Decisions API under the revision
-#         perplexity/pplx-decider-v1.3-20261112, provider "Perplexity".
-#         usage.cost = 0, a noul question takes ~1 s.  On an identical 8-case
-#         wake-relevance probe it answered 6/8 where respan answered 5/8
-#         (positives near-certain, weak on negatives that are generic
-#         imperatives).  It therefore sits in the chain as respan's fallback.
-#   * Both accept *noul* questions only: "Respan only accepts noul questions
-#     whose instructions and criteria are present, plain strings".  Verified
-#     live on 2026-11-06 against respan/span-01-lite:free, respan/span-01-lite
-#     *and the paid respan/span-01* — a "choice" or a "score" question is
-#     answered with HTTP 400 by every one of them (pplx-decider included,
-#     2026-11-24).  The limit belongs to the model family, not to the free
-#     tier.
-#   * The Decisions API itself does implement the full typed contract
-#     (noul + choice + score): typesafe/jev-1.13 answered a choice question
-#     and a score question live on 2026-11-06, each with a full probability
-#     distribution.  It is *paid* (usage.cost = 1.29e-05) and
-#     typesafe/jev-1.13:free answers HTTP 404 "This model is unavailable for
-#     free", so the free-only rule keeps it out of the registry — see
-#     PAID_TYPED_DECISION_MODELS below.
+#   * The decision-model catalogue is enumerable:
+#     GET /api/v1/models?output_modalities=decisions listed 44 ids on
+#     2026-11-28, three of them free.  The full typed contract (noul + choice
+#     + score) is served free today:
+#       - perplexity/pplx-decider-v1.3:free — the primary.  Answers noul,
+#         choice AND score natively, each with calibrated probabilities,
+#         usage.cost = 0, ~1 s.  Verified live on 2026-11-28 with the
+#         documented shapes (choice: criteria keyed by option label; score:
+#         criteria as a list of level descriptions).  Served under revision
+#         perplexity/pplx-decider-v1.3-20261112, provider "Perplexity".  On an
+#         8-case wake-relevance probe it answered 6/8 where respan answered
+#         5/8; on 9 hand-labelled routing cases its native choice picked 8/9 —
+#         equal to the chat routes, ~4x faster, with a measured confidence per
+#         option.
+#       - perplexity/pplx-decider-flash-v1.3:free — the smaller, lower-cost
+#         sibling with the same typed contract (verified live 2026-11-28),
+#         ~0.9 s.
+#       - respan/span-01-lite:free — noul only (see below), ~1 s.
+#         (parallel/decisions-fast also answers the full contract but reports
+#         usage.cost = 0.001 per request — not actually free, so the
+#         free-only rule keeps it out of the registry.)
+#   * The noul-only limit belongs to the RESPAN family:
+#     respan/span-01-lite:free, respan/span-01-lite and the paid
+#     respan/span-01 answer HTTP 400 for a "choice" or a "score" question
+#     ("Respan only accepts noul questions whose instructions and criteria are
+#     present, plain strings").  Verified live on 2026-11-06, re-verified
+#     2026-11-28 with the documented shapes.  The message is OpenRouter
+#     boilerplate — it names Respan whatever model the request carried — which
+#     is how the 2026-11-24 audit wrongly concluded that pplx-decider was
+#     noul-only too: the 400 was read as a model limit when the request shape
+#     was the problem.  The shapes the current code sends are the documented
+#     ones, and Perplexity answers them.
 #   * One request may carry *several* questions, and they count as a single
 #     request: three noul questions in one call came back with three
-#     probabilities, usage.cost = 0, in ~1 s.  That is what makes an emulated
-#     score (one cumulative noul question per level) affordable.
+#     probabilities, usage.cost = 0, in ~1 s.  The pplx models answer a mixed
+#     request (noul + choice) the same way, verified live 2026-11-28.
 #   * The noul contract, read off the live API: `instructions` is a plain
 #     string, `criteria` is an object of plain strings keyed "true"/"false",
 #     and `state` is the content to evaluate.  Respan accepts a string or an
@@ -208,22 +214,34 @@ DECISION_API_URL = "https://openrouter.ai/api/alpha/decisions"
 DECISION_MODEL_SLOTS: list[dict] = [
     {
         "provider_id": "openrouter",
+        "name": "perplexity/pplx-decider-v1.3:free",
+        "api": "decisions",
+        "question": ("noul", "choice", "score"),
+        "max_tokens": 0,
+        "timeout": 12.0,
+        "note": ("the primary free decision model — answers the full typed "
+                 "contract natively (noul, choice, score), zero-priced, ~1 s"),
+    },
+    {
+        "provider_id": "openrouter",
         "name": "respan/span-01-lite:free",
         "api": "decisions",
         "question": ("noul",),
         "max_tokens": 0,
         "timeout": 12.0,
-        "note": "the primary free decision model — noul questions only, zero-priced",
+        "note": ("noul-only fallback — rejects choice/score with HTTP 400, so "
+                 "typed questions never reach it; serves the emulated scale "
+                 "when no typed model answers"),
     },
     {
         "provider_id": "openrouter",
-        "name": "perplexity/pplx-decider-v1.3:free",
+        "name": "perplexity/pplx-decider-flash-v1.3:free",
         "api": "decisions",
-        "question": ("noul",),
+        "question": ("noul", "choice", "score"),
         "max_tokens": 0,
         "timeout": 12.0,
-        "note": ("unlisted in the catalogue yet served by the Decisions API — "
-                 "noul only, zero-priced, ~1 s; respan's fallback"),
+        "note": ("the smaller, lower-cost sibling with the same typed "
+                 "contract — the third fallback, ~0.9 s"),
     },
     {
         "provider_id": "nvidia",
@@ -233,7 +251,8 @@ DECISION_MODEL_SLOTS: list[dict] = [
         "max_tokens": 128,
         "timeout": 12.0,
         "enable_thinking": False,
-        "note": "a text model used as the choice classifier — ~0.5 s, free",
+        "note": ("a text model used as the choice fallback when no typed "
+                 "decision model answers — ~0.5 s, free"),
     },
     {
         "provider_id": "google",
@@ -248,9 +267,11 @@ DECISION_MODEL_SLOTS: list[dict] = [
 
 
 #: Decision models that answer OpenRouter's *full* typed contract — noul,
-#: choice and score, each with a probability distribution.
+#: choice and score, each with a probability distribution — and are PAID.
 #:
-#: None of them is registered, because every one of them is paid:
+#: Free typed models exist now: the two perplexity/pplx-decider variants
+#: answer choice and score natively for usage.cost = 0 (verified live
+#: 2026-11-28) and ARE registered in DECISION_MODEL_SLOTS.
 #: ``typesafe/jev-1.13`` answered a choice question and a score question live
 #: on 2026-11-06 (usage.cost = 1.29e-05), while ``typesafe/jev-1.13:free``
 #: answers HTTP 404 "This model is unavailable for free.  The paid version is

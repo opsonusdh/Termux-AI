@@ -212,7 +212,7 @@ def test_is_wake_relevant_uses_the_decision_model_first(monkeypatch):
 
     assert tools_mod.is_wake_relevant("orion, what is the weather?") is True
     assert order[0][0] == "decisions"
-    assert order[0][1] == "respan/span-01-lite:free"
+    assert order[0][1] == "perplexity/pplx-decider-v1.3:free"
 
 
 def test_wake_falls_back_to_gemini_when_the_decision_model_fails(monkeypatch):
@@ -234,33 +234,67 @@ def test_wake_falls_back_to_gemini_when_the_decision_model_fails(monkeypatch):
 
 def test_make_decision_yes_no_reports_the_real_probability(monkeypatch):
     def fake_decisions(slot, state, instructions, criteria, timeout):
-        return 0.82, "respan/span-01-lite-20260925"
+        return 0.82, "perplexity/pplx-decider-v1.3-20261112"
 
     monkeypatch.setattr(tools_mod, "_decision_call_decisions", fake_decisions)
 
     result = tools_mod.make_decision("Is the build green?")
     assert result["answer"] == "YES"
-    assert result["model"] == "respan/span-01-lite-20260925"
+    assert result["model"] == "perplexity/pplx-decider-v1.3-20261112"
     assert result["confidence"] == pytest.approx(0.82)
 
 
-def test_make_decision_choice_never_uses_the_decisions_api(monkeypatch):
-    """Respan answers noul questions only — a choice must not go there."""
+def test_make_decision_choice_uses_the_typed_route_not_the_noul_only_one(monkeypatch):
+    """A choice goes to the typed slot natively; Respan never sees it."""
+    seen = {"questions": [], "slots": []}
+
+    def fake_questions(slot, state, questions, timeout):
+        seen["slots"].append(slot["name"])
+        seen["questions"].append(dict(questions))
+        return {
+            "choice": {"type": "choice", "choice": "option B",
+                       "probabilities": {"option A": 0.25, "option B": 0.75},
+                       "confidence": 0.75},
+        }, "perplexity/pplx-decider-v1.3-20261112"
+
     def boom(*args, **kwargs):
-        raise AssertionError("the decisions API cannot answer a choice")
+        raise AssertionError("the chat routes must not answer a typed choice")
 
-    def fake_chat(slot, messages, max_tokens, timeout):
-        return ("ANSWER: option B\nWHY: it is cheaper\nCONFIDENCE: 0.7",
-                slot["name"])
-
-    monkeypatch.setattr(tools_mod, "_decision_call_questions", boom)
-    monkeypatch.setattr(tools_mod, "_decision_call_chat", fake_chat)
+    monkeypatch.setattr(tools_mod, "_decision_call_questions", fake_questions)
+    monkeypatch.setattr(tools_mod, "_decision_call_chat", boom)
 
     result = tools_mod.make_decision(
         "Which option?", options=["option A", "option B"])
     assert result["answer"] == "option B"
-    assert result["why"] == "it is cheaper"
-    assert result["confidence"] == pytest.approx(0.7)
+    assert result["confidence"] == pytest.approx(0.75)
+    assert result["probabilities"]["option B"] == pytest.approx(0.75)
+    # The first (typed) slot answered, so nothing else was asked.
+    assert seen["slots"] == ["perplexity/pplx-decider-v1.3:free"]
+    assert seen["questions"][0]["choice"]["type"] == "choice"
+
+
+def test_a_choice_question_never_reaches_the_noul_only_slot(monkeypatch):
+    """Respan answers noul questions only — the choice skips it entirely."""
+    seen = {"slots": []}
+
+    def fake_questions(slot, state, questions, timeout):
+        seen["slots"].append(slot["name"])
+        return None, slot["name"]
+
+    def fake_chat(slot, messages, max_tokens, timeout):
+        return ("ANSWER: option A\nWHY: typed models failed\n"
+                "CONFIDENCE: 0.5", slot["name"])
+
+    monkeypatch.setattr(tools_mod, "_decision_call_questions", fake_questions)
+    monkeypatch.setattr(tools_mod, "_decision_call_chat", fake_chat)
+
+    result = tools_mod.make_decision(
+        "Which option?", options=["option A", "option B"])
+    assert result["answer"] == "option A"
+    # Only the typed decisions slots were asked a choice question; Respan is
+    # noul-only and must not appear.
+    assert seen["slots"] == ["perplexity/pplx-decider-v1.3:free",
+                             "perplexity/pplx-decider-flash-v1.3:free"]
 
 
 def test_make_decision_without_a_question_says_so():
@@ -347,14 +381,24 @@ def test_one_request_can_carry_several_questions(monkeypatch):
     assert served == "respan/span-01-lite-20260925"
 
 
-def test_the_free_route_is_never_sent_a_typed_question():
+def test_the_noul_only_route_never_advertises_typed_questions():
     """Respan answers noul questions only — the registry must say so."""
     decisions_slots = [s for s in models_mod.DECISION_MODEL_SLOTS
                        if s.get("api") == "decisions"]
     assert decisions_slots
-    for slot in decisions_slots:
-        assert "choice" not in slot.get("question", ())
-        assert "score" not in slot.get("question", ())
+    respan = [s for s in decisions_slots
+              if s["name"].startswith("respan/")]
+    assert respan
+    for slot in respan:
+        assert slot.get("question") == ("noul",)
+    # The typed routes advertise the full contract and are free.
+    typed = [s for s in decisions_slots
+             if "choice" in s.get("question", ())
+             or "score" in s.get("question", ())]
+    assert typed
+    for slot in typed:
+        assert slot["name"].endswith(":free")
+        assert {"noul", "choice", "score"} <= set(slot.get("question", ()))
 
 
 def test_a_bad_request_is_not_retried_on_every_key(monkeypatch):
@@ -464,6 +508,7 @@ def test_make_decision_uses_a_native_choice_when_a_route_has_one(monkeypatch):
 # ── 4. a scale is derived from cumulative noul questions ─────────────────────
 
 def test_a_scale_is_derived_from_cumulative_noul_questions(monkeypatch):
+    """When only a noul-only route is available, the scale is derived."""
     captured = {}
 
     def fake_questions(slot, state, questions, timeout):
@@ -474,6 +519,8 @@ def test_a_scale_is_derived_from_cumulative_noul_questions(monkeypatch):
         }, "respan/span-01-lite-20260925"
 
     monkeypatch.setattr(tools_mod, "_decision_call_questions", fake_questions)
+    monkeypatch.setattr(models_mod, "DECISION_MODEL_SLOTS",
+                        [_typed_slot("noul")])
 
     result = tools_mod.make_decision(
         "How angry is the customer?",
@@ -495,6 +542,37 @@ def test_a_scale_is_derived_from_cumulative_noul_questions(monkeypatch):
     assert result["score"] == 2
     assert result["model"] == "respan/span-01-lite-20260925"
 
+
+def test_a_native_score_is_preferred_over_the_derivation(monkeypatch):
+    """The typed model's own score answer wins; no cumulative questions run."""
+    calls = []
+
+    def fake_questions(slot, state, questions, timeout):
+        calls.append(dict(questions))
+        return {
+            "score": {"type": "score", "score": 1.02,
+                      "legend": {"0": "Calm", "1": "Frustrated",
+                                 "2": "Very angry"},
+                      "probabilities": {"0": 0.03, "1": 0.91, "2": 0.06},
+                      "confidence": 0.87},
+        }, "perplexity/pplx-decider-v1.3-20261112"
+
+    monkeypatch.setattr(tools_mod, "_decision_call_questions", fake_questions)
+
+    result = tools_mod.make_decision(
+        "How angry is the customer?",
+        scale=["Calm", "Frustrated", "Very angry"])
+
+    # The typed slot is asked one score question and nothing else.
+    assert len(calls) == 1
+    assert set(calls[0]) == {"score"}
+    assert result["answer"] == "Frustrated"
+    assert result["score"] == 1
+    assert result["model"] == "perplexity/pplx-decider-v1.3-20261112"
+    # The wire format keys probabilities by level index; make_decision
+    # relabels them with the caller's scale labels.
+    assert result["probabilities"]["Frustrated"] == pytest.approx(0.91)
+    assert "native score question" in result["why"]
 
 def test_a_derived_scale_reports_no_confidence_it_did_not_measure(monkeypatch):
     """A missing band means a failed derivation, not a zero probability."""

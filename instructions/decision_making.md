@@ -129,63 +129,82 @@ generating prose.
 Termux-AI routes these tasks through a dedicated chain in
 `core.models.DECISION_MODEL_SLOTS`, separate from the chat and agent rotations:
 
-1. **OpenRouter `respan/span-01-lite:free`** on the Decisions API
-   (`POST /api/alpha/decisions`) — the only **free** decision model.  It is
-   zero-priced (the API answers `usage.cost = 0`), answers in ~1 s, and
-   returns a probability in [0, 1] for a *noul* question.  It is **not**
-   reachable through `/chat/completions` — OpenRouter refuses it there
-   ("is a decisions model and cannot be used with the chat/completions
-   endpoint") — so it has its own caller.
-2. **NVIDIA `nvidia/nemotron-3.5-bolt-e4b`** (4B, thinking off) — a fast free
-   text model used as the *choice* classifier.
-3. **Google `gemini-2.5-flash`** — the free-tier fallback for every question
+1. **OpenRouter `perplexity/pplx-decider-v1.3:free`** on the Decisions API
+   (`POST /api/alpha/decisions`) — the primary **free** decision model.  It
+   answers the *full typed contract*: `noul`, `choice` and `score`, each with
+   calibrated probabilities (`usage.cost = 0`, ~1 s).  Decision models are
+   **not** reachable through `/chat/completions` — OpenRouter refuses them
+   there ("is a decisions model and cannot be used with the chat/completions
+   endpoint") — so they have their own caller.
+2. **OpenRouter `respan/span-01-lite:free`** — the noul-only fallback: a
+   probability in [0, 1] for a *noul* question, and an HTTP 400 for
+   `choice`/`score`, so a typed question never reaches it.
+3. **OpenRouter `perplexity/pplx-decider-flash-v1.3:free`** — the smaller,
+   lower-cost sibling with the same typed contract; the third fallback.
+4. **NVIDIA `nvidia/nemotron-3.5-bolt-e4b`** (4B, thinking off) — a fast free
+   text model used as the *choice* fallback.
+5. **Google `gemini-2.5-flash`** — the free-tier fallback for every question
    type.
-
 **There is no NVIDIA decision model.**  NVIDIA exposes no decisions endpoint
 (`/v1/decisions`, `/v1/alpha/decisions` and `/v1/decision` all answer HTTP
 404) and its free catalogue serves chat and text models only.
 
-### The three question types, and what the free model actually does
+### The three question types, and what the free models actually do
 
-OpenRouter's Decisions API documents three question types — `noul` (yes/no,
+OpenRouter's Decisions API documents the question types — `noul` (yes/no,
 answered with a probability), `choice` (a pick from named options, with a
-distribution) and `score` (a position on an ordered scale, with a
-distribution) — and one request may carry several questions at once.
+distribution), `score` (a position on an ordered scale, with a distribution)
+and, newer, `box` — and one request may carry several questions at once.
 
-| Type | What it asks | What the free model does |
+| Type | What it asks | What the chain does |
 |---|---|---|
-| `noul` | a yes/no question, answered with a probability | **native** — the only type Respan implements |
-| `choice` | a pick from named options, with a distribution | **not supported**: HTTP 400, "Respan only accepts noul questions whose instructions and criteria are present, plain strings" |
-| `score` | a position on an ordered scale, with a distribution | **not supported**: the same HTTP 400 |
+| `noul` | a yes/no question, answered with a probability | **native** — `pplx-decider` first, Respan fallback |
+| `choice` | a pick from named options, with a distribution | **native** on the pplx models; chat routes fallback |
+| `score` | a position on an ordered scale, with a distribution | **native** on the pplx models; Respan gets a *derived* emulation; chat routes fallback |
 
-The 400 was verified live on 2026-11-06 against `respan/span-01-lite:free`,
-`respan/span-01-lite` *and the paid `respan/span-01`*: the limit belongs to
-the model family, not to the free tier.  The API itself does implement the
-full typed contract — `typesafe/jev-1.13` answered both a choice question and
-a score question live, each with a full distribution — but it is **paid**
-(`usage.cost = 1.29e-05`) and `typesafe/jev-1.13:free` answers HTTP 404 "This
-model is unavailable for free".  The free-only rule keeps it out of the
-registry; it is recorded in `core.models.PAID_TYPED_DECISION_MODELS` so nobody
-re-adds it by accident.  The typed code path in `core/tools.py` is written
-against that contract and starts working the moment a free typed model
-appears.
+The full typed contract is served **free** today.  Verified live on
+2026-11-28 with the documented shapes (choice: `criteria` keyed by option
+label; score: `criteria` as a list of level descriptions):
+`perplexity/pplx-decider-v1.3:free` and `pplx-decider-flash-v1.3:free`
+answered noul, choice AND score — HTTP 200, `usage.cost = 0` — while Respan
+answered HTTP 400 for choice and score.  The catalogue filter
+`GET /api/v1/models?output_modalities=decisions` lists 44 decision models,
+three of them free: the two pplx variants plus `parallel/decisions-fast`,
+which also answers the full contract but reports `usage.cost = 0.001` per
+request — not actually free, so the free-only rule keeps it out of the
+registry.
 
-So the chain serves what the free model can, and says how the answer was
-reached:
+A caution from the audit trail: the 2026-11-24 audit recorded pplx-decider
+as "noul only", because a typed question answered HTTP 400 with the text
+"Respan only accepts noul questions…".  That message is OpenRouter
+boilerplate — it names Respan whatever model the request carried — and the
+audit had read a request-shape refusal as a model limit.  The shapes above
+are the documented ones, and Perplexity answers them.
+`typesafe/jev-1.13` also implements the full contract but is paid
+(`usage.cost = 1.29e-05`; `typesafe/jev-1.13:free` answers HTTP 404), so the
+free-only rule keeps it out of the registry — it is recorded in
+`core.models.PAID_TYPED_DECISION_MODELS`.
+
+So the chain answers every type natively when a typed model is available,
+and says how the answer was reached:
 
 - **yes/no** → one `noul` question → the model's own probability.
-- **a scale** (`scale=[...]`) → *derived*: one cumulative `noul` question per
+- **a choice** (`options=[...]`) → a **native choice question**, answered
+  with the full distribution over the options.  Measured on 9 hand-labelled
+  routing cases (2026-11-28, workspace/research/audit_2026/
+  probe_pplx_typed3.py): native pplx choice 8/9, the chat routes 8/9 — equal
+  accuracy, but the native answer is ~4x faster and states a measured
+  confidence for every option, so the chat routes pick only when no typed
+  model answers.  An older idea — one *noul* question per option,
+  differenced — measured 2/3 and is not used.
+- **a scale** (`scale=[...]`) → a **native score question**: one request, the
+  model's own distribution over the rubric.  When no typed model answers,
+  Respan gets the *derived* emulation: one cumulative `noul` question per
   level ("is the level at least k?"), differenced into a distribution —
-  `P(0) = 1 - P(>=1)`, `P(k) = P(>=k) - P(>=k+1)`.  All the questions travel
-  in **one request**, so a whole scale costs one request against the daily
-  allowance.  Measured live: the extremes land cleanly, the middle bands are
-  fuzzy (4/6 on a hand-labelled set, both misses mid-level), so the result is
-  reported as a *distribution*, not as one confident number.
-- **a choice** (`options=[...]`) → the **chat routes** pick the option.  The
-  free decision model is deliberately *not* asked to choose: measured live,
-  one `noul` question per option picked the wrong option in 1 of 3 cases, and
-  using it to verify the chat route's pick rated a wrong pick at **P=0.92**.
-  Its opinion on a choice question is not trustworthy, so it is not used.
+  `P(0) = 1 - P(>=1)`, `P(k) = P(>=k) - P(>=k+1)`.  All of those questions
+  travel in **one request**.  The emulated version measured 4/6 on a
+  hand-labelled set with fuzzy middle bands, which is why a native score is
+  preferred and the emulation is the fallback.
 
 ### Consumers
 
@@ -203,6 +222,12 @@ reached:
   evaluate — a string, or an object of the shape {input: [messages], output:
   message}.  An arbitrary object ({"customer_tier": ...}) is rejected with
   HTTP 400, so the chain always sends a string.
+- The `choice` contract: `criteria` is an object keyed by the option label
+  with plain-string descriptions; the answer carries the chosen label, the
+  full `probabilities` map and a `confidence`.
+- The `score` contract: `criteria` is a list of level descriptions, lowest
+  first; the answer carries the expected `score` (a float over the level
+  indices), the `legend`, the `probabilities` per level and a `confidence`.
 - Several questions in one request are answered in one call and count as one
   request: three `noul` questions in a single call came back with three
   probabilities, `usage.cost = 0`, in ~1 s.

@@ -198,14 +198,19 @@ When working with providers/models:
 Termux-AI uses a dedicated **decision chain** for lightweight classification
 tasks, separate from the main chat/agent rotations.  The chain is:
 
-1. **OpenRouter `respan/span-01-lite:free`** on the Decisions API
-   (`POST /api/alpha/decisions`) — the only **free** decision model.  Zero-priced
-   (`usage.cost = 0`), ~1 s, and it answers a *noul* question with a
-   probability in [0, 1].  OpenRouter refuses it on `/chat/completions`, so it
-   has its own caller.
-2. **NVIDIA `nvidia/nemotron-3.5-bolt-e4b`** (4B, thinking off) — a fast free
-   text model used as the *choice* classifier.
-3. **Google `gemini-2.5-flash`** — the free-tier fallback for every question
+1. **OpenRouter `perplexity/pplx-decider-v1.3:free`** on the Decisions API
+   (`POST /api/alpha/decisions`) — the primary **free** decision model.  It
+   answers the full typed contract natively: `noul`, `choice` and `score`,
+   each with calibrated probabilities.  Zero-priced (`usage.cost = 0`), ~1 s.
+   OpenRouter refuses decision models on `/chat/completions`, so they have
+   their own caller.
+2. **OpenRouter `respan/span-01-lite:free`** — noul-only fallback: a
+   probability in [0, 1] for a yes/no question; HTTP 400 for `choice`/`score`.
+3. **OpenRouter `perplexity/pplx-decider-flash-v1.3:free`** — smaller sibling
+   with the same typed contract.
+4. **NVIDIA `nvidia/nemotron-3.5-bolt-e4b`** (4B, thinking off) — fast free
+   text model, the *choice* fallback.
+5. **Google `gemini-2.5-flash`** — the free-tier fallback for every question
    type.
 
 **There is no NVIDIA decision model**: NVIDIA exposes no decisions endpoint
@@ -215,27 +220,28 @@ and its free catalogue serves chat and text models only.
 **The three question types.**  The Decisions API documents `noul` (yes/no with
 a probability), `choice` (a pick with a distribution) and `score` (a position
 on a scale with a distribution), and one request may carry several questions.
-The free Respan model implements **noul only** — a `choice` or `score` question
-is answered with HTTP 400 ("Respan only accepts noul questions…"), for the
-free model and for the paid one alike (verified live 2026-11-06).  The API
-itself does implement the full contract (`typesafe/jev-1.13` answered both,
-with full distributions), but that model is **paid** and its `:free` alias
-answers HTTP 404, so the free-only rule keeps it out of the registry
+The free pplx-decider models implement **all three natively** — verified live
+2026-11-28 with the documented shapes, `usage.cost = 0`.  Respan implements
+**noul only** (a `choice` or `score` question answers HTTP 400 "Respan only
+accepts noul questions…" — boilerplate that names Respan whatever model the
+request carried, which is how a 2026-11-24 audit wrongly recorded
+pplx-decider as noul-only).  `typesafe/jev-1.13` also implements the full
+contract but is paid, so it stays out of the registry
 (`core.models.PAID_TYPED_DECISION_MODELS` records it).
 
-So the chain serves what the free model can, and says how the answer was
-reached:
+So the chain answers every type natively when a typed model is available:
 
 - **yes/no** → one `noul` question → the model's own probability.
-- **a scale** (`scale=[…]`) → *derived*: one cumulative `noul` question per
-  level ("is the level at least k?"), differenced into a distribution
-  (`P(0)=1−P(≥1)`, `P(k)=P(≥k)−P(≥k+1)`).  All the questions travel in **one
-  request**, so a whole scale costs one request.  The extremes land cleanly,
-  the middle bands are fuzzy, so the result is reported as a distribution.
-- **a choice** (`options=[…]`) → the **chat routes** pick the option.  The
-  free decision model is deliberately not asked to choose: measured live, one
-  `noul` question per option picked the wrong option in 1 of 3 cases, and
-  using it to verify the chat route's pick rated a wrong pick at **P=0.92**.
+- **a choice** (`options=[…]`) → a **native choice question** with the full
+  distribution.  Measured on 9 hand-labelled routing cases: native 8/9, the
+  chat routes 8/9 — equal accuracy, but native is ~4x faster with a measured
+  confidence per option, so the chat routes pick only when no typed model
+  answers.
+- **a scale** (`scale=[…]`) → a **native score question** (one request, the
+  model's own distribution over the rubric); when no typed model answers,
+  the scale is *derived* from cumulative `noul` questions on Respan — one
+  per level, differenced into a distribution.  All the questions travel in
+  **one request**, so a whole scale costs one request.
 
 Two consumers use this chain:
 
