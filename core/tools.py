@@ -9494,7 +9494,8 @@ def is_wake_relevant(text: str) -> bool:
     """True when the utterance after the wake word addresses Orion.
 
     The check uses the free decision model chain: OpenRouter's
-    ``respan/span-01-lite:free`` on the Decisions API first, then the Gemini
+    ``respan/span-01-lite:free`` on the Decisions API first, its noul-only
+    fallback ``perplexity/pplx-decider-v1.3:free`` second, then the Gemini
     2.5 Flash fallback.  When every route fails the function fails closed —
     Orion keeps sleeping, which is the safe reading of "I said the name but
     did not mean you".

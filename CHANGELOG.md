@@ -6,6 +6,18 @@ All notable changes to Termux-AI will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **A second free decision model** (`core/models.py`): `perplexity/pplx-decider-v1.3:free` is *unlisted* — absent from OpenRouter's model catalogue (all 474 ids checked on 2026-11-24) yet served by the Decisions API under the revision `perplexity/pplx-decider-v1.3-20261112` (provider "Perplexity"), zero-priced (`usage.cost = 0`), ~1 s, and noul-only: a `choice` or a `score` question answers HTTP 400, exactly like Respan. On an identical 8-case wake-relevance probe it answered 6/8 where respan answered 5/8 — positives near-certain (P > 0.99), weak on negatives that are generic imperatives ("turn on the lights please"). It joins `DECISION_MODEL_SLOTS` as the second decisions/noul slot: respan first, pplx its fallback, then the NVIDIA and Gemini chat routes. `free_route_violations()` stays empty.
+
+### Fixed
+
+- **A send failure no longer prints during a gateway restart** (`core/whatsapp_manager.py`): while the Termux-WP node gateway comes back up, its HTTP API answers 500 and every queued send printed `[WhatsApp] Send error: 500 Server Error: Internal Server Error for url: http://localhost:3000/api/send` in red — one line per queued message, in the middle of the chat. The print is now gated behind `self.debug` like every other send-path message; the failure itself is unchanged (the call still returns `False`).
+
+### Documentation
+
+- **The README was slimmed to what a user needs** (`README.md`, `CHANGELOG.md`): the general description, the usage guide (requirements, setup, commands, voice, WhatsApp, plugins, notifications, configuration, API keys) and the license line stay; the long feature narratives, the permission-gate and tool-display deep dives, the browser internals, the session-log walkthrough, the plugin/Google-OAuth walkthrough and the directory tree moved to the [Appendix](#appendix--guides-moved-from-the-readme) below — the directory tree had drifted next to `PROJECT_STRUCTURE.md` anyway, which remains its canonical home. The README gained an index and now weighs ~150 lines instead of 789.
+
 ## [3.5.0] - 2026-11-24
 
 ### Added
@@ -363,3 +375,427 @@ All notable changes to Termux-AI will be documented in this file.
 
 ### Security
 - Security improvements
+
+---
+
+## Appendix — Guides moved from the README
+
+The README carries the general description, the usage guide and the license.
+The detailed guides below were moved here from it and describe how the
+current release behaves.
+
+**Index**
+
+- [Notifications](#notifications)
+- [Permissions](#permissions)
+- [Autonomous mode](#autonomous-mode)
+- [Tool call display](#tool-call-display)
+- [Browser & web](#browser--web)
+- [Session log](#session-log)
+- [Sessions](#sessions)
+- [Context memory](#context-memory)
+- [Plugins](#plugins)
+  - [Pairing WhatsApp](#pairing-whatsapp)
+  - [Connecting a Google account](#connecting-a-google-account)
+  - [Where the credentials live](#where-the-credentials-live)
+
+### Notifications
+
+When `notify: true` in `config/config.json`, a system notification is sent via `termux-notification`.
+
+**When the AI waits for you** — the runtime blocks on `input()`, and on a phone
+the terminal is usually in the background, so nothing on screen says that
+something is being asked. Each of those moments pushes its own notification:
+
+| The AI is… | Notification title | The body carries |
+|---|---|---|
+| asking for permission to run something | `Termux-AI: Permission needed` | every command in the batch and the reason for it |
+| waiting for a yes/no confirmation | `Termux-AI: Confirmation needed` | the question and which key Enter answers |
+| waiting for an answer to a question | `Termux-AI: Question` | the question and the options, if there are any |
+
+The permission prompt, the `confirm` tool and the `ask_user` tool are the three
+places that block, so those are the three places that notify.
+
+**When an agent task finishes** — after `/agent auto` completes its loop,
+`/agent [prompt]` finishes an inline task, or persistent agent mode completes
+a task, the notification says "Termux-AI Agent — Agent task completed".
+
+Switch it without touching the file:
+
+```
+YOU > /notify true      # on — and a test notification proves the plumbing
+YOU > /notify false     # off — the AI stops pinging you while it waits
+YOU > /notify toggle    # flip it (reads the current state from disk first)
+YOU > /notify status    # what is it doing right now?
+```
+
+`/notify status` reads `config/config.json` at that moment, so it reports the
+state the runtime is actually in — even if the file was edited by hand while
+the session was running. An unrecognised argument (`/notify wat`) shows the
+usage instead of being sent to the model as a chat message.
+
+To disable it permanently: set `"notify": false` in `config/config.json`.
+A missing Termux:API package is not an error — the notification is simply
+skipped, and the runtime carries on.
+
+### Permissions
+
+Every shell command is checked before it runs, and anything the checker is not sure about is put to you first:
+
+```
+[PERMISSION] The AI wants to run:
+  cd /tmp
+  Reason: working-directory change via 'cd' requires explicit permission
+  Allow all listed actions? [y/n]
+```
+
+The gate knows two kinds of thing:
+
+**Commands.** Writes into `core/` or `Termux-STT/`, changes of working directory, commands on the forbidden list, and anything else the checker flags.
+
+**Files that hold a secret.** `core/confidential.py` decides this from two independent signals — the **name** (`api.keys`, `credentials.json`, `.env`, `id_rsa`, `secrets.yaml`, anything inside `.ssh/` or a folder called `keys/`) and the **content** (a PEM private-key block, a provider token format, a JWT, an `Authorization: Bearer` header, a secret-shaped name bound to a real value, a file that is mostly high-entropy blobs). The gate tells you *which* signal fired and where, so the question is answerable:
+
+```
+[PERMISSION] Reading core/secret-notes.txt needs approval:
+  its content holds a Google API key (line 97)
+```
+
+The content signal detects the **shape** of a credential, not the words around it — a manual that mentions `--password=secret123`, a template with `your-api-key-here`, and a file that calls itself *public* are all left alone.
+
+Two rules keep it honest:
+
+- **In autonomous mode the gate refuses instead of asking.** There is nobody at the keyboard to answer, and a prompt that waits forever would hang a background worker. A refusal is the same answer without the trap.
+- **A *write* is judged by the file's name only.** Overwriting a scratch file that happens to hold an old key is not a leak.
+
+`search_in_files` and `index_files` skip confidential files and report how many they skipped, so a grep is not a way around the gate — and uploads and shares go through it too, so a credential cannot leave the device unnoticed.
+
+The mode is stated at the top of every request ("Autonomous mode is OFF — the gate is active"), so the model knows the rules before it hits them.
+
+### Autonomous mode
+
+```
+YOU > /autonomous on       # bypass the permission layer entirely
+YOU > /autonomous off      # restore normal permission gating (default)
+YOU > /autonomous status   # check which mode is currently active
+```
+
+While autonomous mode is on, `run_code` never asks for approval — not for writes into `core/`, not for commands on the forbidden list, nothing. It's **off by default**, and the setting persists in `config/config.json`. Turn it on only when you trust what you're about to have the agent do: there's no per-action confirmation left to catch a mistake once it's on.
+
+### Tool call display
+
+Every tool call prints to the terminal as it runs. Collapsed (the default) gives a one-line status per call; `Ctrl+O` / `/expand` reveals the full command or path plus the complete output.
+
+The code a call shows is **syntax-highlighted**, with the same Pygments highlighter the markdown renderer uses for code blocks. A file's contents are highlighted with the lexer of *that file's* extension; a shell command — and the permission prompt — are always highlighted as **bash**.
+
+The colour comes **without** the gutter box a fenced code block gets. That frame (`╭── lang ──` … `╰──`) belongs to the markdown renderer, where a code block is a self-contained object and the frame says where it begins and ends. Inside the running transcript it would repeat itself on every single call — and it would hide the very indentation the highlighter is there to show.
+
+Running a command (`shell`) — collapsed:
+
+```
+[EXEC]
+echo "step 1"
+echo "step 2"
+echo "step 3"
+[TOOL DONE] (0.34s)
+```
+
+only the first three lines of the command are shown, and expanded shows the rest plus the full output:
+
+```
+[EXEC] | timeout=30
+echo "step 1"
+echo "step 2"
+echo "step 3"
+[OUTPUT]
+step 1
+step 2
+step 3
+[TOOL DONE] (0.34s)
+```
+
+Editing a file (`write_file`) / reading one (`read_file`) — collapsed shows nothing but the bare tag:
+
+```
+[EDITING FILE]
+[TOOL DONE] (0.08s)
+```
+
+expanded — the content that is about to be written is highlighted with the lexer of the **target file**:
+
+```
+[EDITING FILE] core/llm_client.py | mode: overwrite | lines: 10-25
+content:
+def ask_ai(prompt):
+    return client.chat(...)
+[OUTPUT]
+Successfully wrote 42 characters to core/llm_client.py.
+[TOOL DONE] (0.08s)
+```
+
+A read brings the file's own source back, highlighted with the lexer of **that file**. The line numbers stay outside the colouring, so the indentation of the source survives the highlighter:
+
+```
+[READING FILE] core/llm_client.py | lines: all
+[OUTPUT]
+10| def ask_ai(prompt):
+11|     return client.chat(...)
+[TOOL DONE] (0.08s)
+```
+
+Replacing text in a file (`find_replace`) is coloured the same way: the two patterns are highlighted with the lexer of the **target file**, and the lines the edit actually changed come back in colour underneath the result:
+
+```
+[FIND REPLACE] core/llm_client.py | case-sensitive: True
+find:
+old_name = 1
+replace:
+new_name = 1
+[OUTPUT]
+Successfully replaced 1 occurrence in core/llm_client.py (at lines 42).
+42| new_name = 1
+[TOOL DONE] (0.08s)
+```
+
+The permission prompt highlights the command it is asking about the same way:
+
+```
+[PERMISSION] The AI wants to run:
+  cd /tmp
+  Reason: working-directory change via 'cd' requires explicit permission
+  Allow all listed actions? [y/n]
+```
+
+Every other tool follows the same shape — `[TOOL_NAME]` collapsed, every one of its arguments plus a full `[OUTPUT]` block expanded — and a failed call closes with `[TOOL ERROR] (Xs)` instead of `[TOOL DONE]`. This is presentation only: the model always receives the complete tool output regardless of what the terminal happens to be showing.
+
+Expanded shows **all** of a call, not a summary:
+
+- `write_file` shows the path, the mode, the affected line range **and the content being written**.
+- `find_replace` shows the path, the **complete** find and replace text, and the changed lines.
+- `shell` shows the whole command and the timeout budget.
+- Every other tool shows all of its arguments, one per line.
+
+#### Delegation
+
+A delegated sub-task shows the whole hand-over in expanded mode — the manager's command, the context it supplied, the tools the sub-AI may use, the iteration budget and the system prompt — followed by every tool call the sub-AI makes (with its arguments) and the output each call returned:
+
+```
+[DELEGATE COMMAND] intelligence=high iterations=5
+[DELEGATE TASK]
+    Audit the shell parser
+[DELEGATE CONTEXT]
+    core/shell_parse.py holds the parser
+[DELEGATE TOOLS] read_file, search_in_files, shell
+[DELEGATE TOOL] shell
+    {
+      "bash": "grep -n parse core/shell_parse.py"
+    }
+[DELEGATE RESULT] shell
+    42:def parse(command):
+```
+
+### Browser & web
+
+Two tools read the web:
+
+| Tool | What it does |
+|---|---|
+| `browse_web` | One-shot: open a URL, read it, close it. |
+| `browser` | A **persistent session** — `open` returns a short id (`b1`), and every later call works on the same live page (scroll position, cookies, half-filled forms). |
+
+The page comes back as **Markdown**, not a wall of text: headings stay headings, lists stay lists, tables stay tables, links keep their target, and the furniture nobody reads — nav bars, footers, cookie banners, hidden panels — is dropped before the conversion starts.
+
+The `search` argument finds **one** element and returns it together with everything inside it. The query may be a class name (a class written with spaces, `weather data`, matches an element carrying all of those classes), an id, a tag name (`div`, `a`) or a full CSS selector (`#results .row`).
+
+**The page is read when it is ready.** Both tools wait for the DOM to settle (1.5 s of quiet, hard cap 10 s) instead of trusting the load event — a search engine reports "loaded" while the results are still arriving.
+
+**Screenshots are opt-in.** `screenshot=true` (default false) captures the viewport. An unasked-for screenshot is never taken, never attached to the reply, and can never move the turn to a different model.
+
+**Never guess where a button is.** The `find` action lists every visible button, link and form field with the label a human would read and a ready-to-use CSS selector. A click is then aimed by `text`, `index` or `selector`, and the position is resolved against the live DOM at the moment of the click.
+
+Requires Chromium (`pkg install chromium`). Without it the tools fall back to a no-JS scraper that answers in the same Markdown shape.
+
+The Chromium profile and the screenshots live under `workspace/` (`.browser/`, `screenshots/`) — `/tmp` is not writable on Termux. Only the 60 most recent screenshots are kept.
+
+### Session log
+
+Everything the runtime does is appended to `logs/log.txt` **as it happens** — the user's message, the model's reasoning, every tool call with its full arguments, every tool result with its full output, the delegation traffic and the final replies.
+
+Each write is flushed immediately, so a tool call is in the log *while it is still running*, not after the turn ends:
+
+```
+$ tail -f logs/log.txt
+[2026-11-03 16:57:19] [session]
+    session started (pid 24460) — live log: .../logs/log.txt
+[2026-11-03 16:57:19] [user] input | chat
+    Use the get_datetime tool to tell me the current date and time
+[2026-11-03 16:57:26] [reasoning] ollama/beam:cloud
+    I need to call the get_datetime tool to find out the current date and time.
+[2026-11-03 16:57:26] [tool:call] get_datetime
+[2026-11-03 16:57:26] [tool:result] get_datetime (0.00s)
+    Local Time : 2026-11-03 16:57:26
+    Day of Week: Tuesday
+[2026-11-03 16:57:28] [reply] final
+    It's Tuesday, November 03, 2026 at 4:57 PM IST.
+```
+
+If the session is cut short mid-turn, the log still shows exactly what was being done — the last tool call is on disk with its arguments, and the result is simply missing.
+
+The file is capped at **1,000,000 lines**. When it grows past that, the oldest lines are dropped, oldest first, so the log keeps the most recent history instead of eating the device's storage. The trim streams the file through a temporary copy and swaps it in atomically, so a reader tailing the log never sees a half-written file.
+
+### Sessions
+
+```
+YOU > /session list         # saved sessions, rendered as a readable list
+YOU > /session save         # save the current conversation
+YOU > /session resume <id>  # continue a saved session
+YOU > /session new          # close the current conversation, keep everything else
+YOU > /session delete <id>  # remove a saved session
+```
+
+`/session new` is the `/clear` of Termux-AI: the chat history, the agent history and the chunk context the model is fed go away, and the next message starts from a blank slate. It deliberately does **not** re-run the startup UI (no banner, no status row) and does not touch the mode (`/agent` stays in agent mode), the preferences, the display state or the plugins.
+
+The wipe is durable: the chunk store is not deleted, a **context boundary** is moved forward and persisted (`data/context_session.json`), so the closed conversation stops being injected into every request and does not come back after a restart — while the chunks themselves stay retrievable with `retrieve_chunk`, so the model can still dig out earlier work when you ask about it. The session draft is archived as a normal saved session rather than dropped.
+
+### Context memory
+
+Every conversation turn is stored as a numbered chunk in `logs/chunks.jsonl`. The active context window always stays small:
+
+```
+[system] Chunk 1: <one-line summary>
+[system] Chunk 2: <micro summary>
+[system] Chunk 3: <short summary>
+[user / assistant / tool]  ← raw chunk N-1
+[user / assistant / tool]  ← raw chunk N  (most recent)
+```
+
+Older chunks are compressed progressively in a background thread. The model can call `list_chunks` and `retrieve_chunk` to pull full raw history when needed.
+
+When the assembled context no longer fits the model's window, the oldest passes are compressed into a digest and the **raw text is archived on disk** (`logs/context_archive.jsonl`). A marker in the conversation names the archive id, so the model can pull the original back with `retrieve_archive` and `list_archives` — the digest is a summary, the archive is the evidence.
+
+### Plugins
+
+Plugins add whole capability groups, and each one can be switched on or off
+independently. Two kinds exist:
+
+- **Local plugins** — `whatsapp` pairs on the device, so it needs no account
+  handshake. Enabling it also **starts what it needs to run**: the Termux-WP
+  node gateway (`bot.js`) is launched for you, so the WhatsApp tools work
+  right away instead of failing with "connection refused". A gateway that
+  dies is restarted automatically, and an orphaned browser holding the
+  WhatsApp profile is cleared before the next start.
+- **Account plugins** — `gmail`, `google_calendar`, `google_drive`. Enabling
+  one is only *half* the job: the account still has to grant access before the
+  tools become usable.
+
+```bash
+/plugin                      # show every plugin and its state
+/plugin status gmail         # one plugin in detail
+/plugin status whatsapp      # …including whether this device is paired
+/plugin setup gmail          # connect the account (shows the URL to approve)
+/plugin setup whatsapp       # pair this device (shows the QR — once)
+/plugin enable gmail         # enable — and start the permission request
+/plugin enable whatsapp      # enable — and start the Termux-WP gateway
+/plugin disable gmail        # stop offering its tools
+/plugin disconnect gmail     # revoke the stored Google access
+```
+
+The plugin manager itself (`manage_plugin`) is always in the assistant's tool
+list, and a plugin's tools join that list the moment it is enabled — no
+restart, no repeat of the request.
+
+You can also just ask: *"turn on Gmail"* — the assistant calls `manage_plugin`
+and hands you the link.
+
+#### Pairing WhatsApp
+
+The WhatsApp session is paired by scanning a QR code, and that code is a live
+secret — whoever scans it gets read/write access to your account. So the
+plugin never prints it on its own: it is captured, and drawn **only** when you
+ask for it.
+
+```bash
+/plugin setup whatsapp       # the pairing code appears on your screen, once
+```
+
+If the device is **already paired** and you ask for the code again, there is no
+code to give — a re-pair is what you are after — so the plugin stops the
+gateway and switches itself off instead. Run `/plugin enable whatsapp` to bring
+it back.
+
+An unpaired gateway is silent: it does not reprint the code while you are
+chatting, and it does not announce that it connected or print your number.
+`/plugin status whatsapp` tells you the pairing state when you ask for it.
+
+#### Connecting a Google account
+
+```bash
+/plugin setup gmail
+```
+
+That prints a URL. Open it **in the browser on this device**, sign in with the
+account you want to connect, and approve the permissions:
+
+```
+┌─ Gmail setup — Google OAuth ─────────────┐
+  Open this URL in the browser on this device —
+  the approval is sent straight back to Termux-AI:
+  https://accounts.google.com/o/oauth2/v2/auth?...
+  Sign in and approve the requested permissions.
+  (waiting for the approval… press Ctrl+C to abort)
+```
+
+Termux-AI runs a throwaway local web server and Google sends the approval
+straight back to it, so nothing has to be copied. If you approve on another
+device instead, the redirect cannot reach this one — copy the address-bar URL
+(it contains `?code=…`) and paste it back; that works too.
+
+Once you approve, the token is stored and the Gmail tools become visible to
+the model.
+
+**You need a Google OAuth client first (about 2 minutes, one time):**
+
+1. **OAuth consent screen** — <https://console.cloud.google.com/auth/overview>.
+   Choose **External**, fill in the app name and a support email, and add your
+   own Google account as a **test user** (test users can approve sensitive
+   scopes without waiting for a review).
+2. **Enable the API** in the API library:
+   - Gmail — <https://console.cloud.google.com/apis/library/gmail.googleapis.com>
+   - Drive — <https://console.cloud.google.com/apis/library/drive.googleapis.com>
+   - Calendar — <https://console.cloud.google.com/apis/library/calendar-json.googleapis.com>
+3. **Create the client** — <https://console.cloud.google.com/auth/clients> →
+   *Create credentials → OAuth client ID* → application type **Desktop app**.
+   > **Do not pick "TVs and Limited Input devices".** That client type only
+   > supports the device-code flow, which cannot request the Gmail, Calendar or
+   > Drive scopes, and Google blocks the local redirect for it — you get
+   > *"Access blocked: … request is invalid"*. A **Desktop app** client is the
+   > one that supports the local redirect Termux-AI uses.
+4. **Copy the Client ID and Client secret** from the same page
+   (<https://console.cloud.google.com/auth/clients>). The next
+   `/plugin setup gmail` asks for them, or you can export them instead so they
+   never touch the repo:
+
+```bash
+export GOOGLE_CLIENT_ID="..."
+export GOOGLE_CLIENT_SECRET="..."
+```
+
+Reference: [Desktop app flow](https://developers.google.com/identity/protocols/oauth2/native-app) ·
+[device flow for TVs](https://developers.google.com/identity/protocols/oauth2/limited-input-device) ·
+[all scopes](https://developers.google.com/identity/protocols/oauth2/scopes) ·
+[why the local redirect works for Desktop clients only](https://developers.google.com/identity/protocols/oauth2/resources/loopback-migration)
+
+#### Where the credentials live
+
+| File | Contents | Permissions |
+|---|---|---|
+| `config/google_oauth.json` | OAuth client id + secret | `0600`, permission-gated |
+| `data/google_tokens/<service>.json` | access + refresh tokens | `0600`, permission-gated |
+| `data/google_pending_auth.json` | in-flight PKCE verifier | `0600`, permission-gated |
+
+All three are treated like `config/api.keys`: they are protected in every
+permission mode, including autonomous, and are git-ignored. Tokens are never
+printed — `/plugin status` reports the connected *account*, not the token.
+
+If a plugin is enabled but the account is not connected, the tools stay hidden
+from the model and a call returns an explicit message naming the command to
+run — instead of failing in a way that looks like a bug.

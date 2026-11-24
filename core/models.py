@@ -150,15 +150,25 @@ AGENT_MODEL_SLOTS: list[dict] = [
 #     /v1/alpha/decisions and /v1/decision all answer HTTP 404, and the
 #     free catalogue (84 ids) serves chat and text models only.  There is no
 #     NVIDIA route in the *decision* part of the chain.
-#   * OpenRouter's respan/span-01-lite:free is the only free decision model.
-#     The API answers usage.cost = 0, so it is genuinely zero-priced, and a
-#     noul question comes back in ~0.8 s with a probability.
-#   * Respan accepts *noul* questions only: "Respan only accepts noul questions
+#   * OpenRouter serves two free decision models:
+#       - respan/span-01-lite:free — the API answers usage.cost = 0, so it is
+#         genuinely zero-priced, and a noul question comes back in ~0.8 s with
+#         a probability.  Verified live on 2026-11-06.
+#       - perplexity/pplx-decider-v1.3:free — *unlisted*: absent from
+#         /api/v1/models (checked against all 474 catalogue ids on 2026-11-24)
+#         yet served by the Decisions API under the revision
+#         perplexity/pplx-decider-v1.3-20261112, provider "Perplexity".
+#         usage.cost = 0, a noul question takes ~1 s.  On an identical 8-case
+#         wake-relevance probe it answered 6/8 where respan answered 5/8
+#         (positives near-certain, weak on negatives that are generic
+#         imperatives).  It therefore sits in the chain as respan's fallback.
+#   * Both accept *noul* questions only: "Respan only accepts noul questions
 #     whose instructions and criteria are present, plain strings".  Verified
 #     live on 2026-11-06 against respan/span-01-lite:free, respan/span-01-lite
 #     *and the paid respan/span-01* — a "choice" or a "score" question is
-#     answered with HTTP 400 by every one of them.  The limit belongs to the
-#     model family, not to the free tier.
+#     answered with HTTP 400 by every one of them (pplx-decider included,
+#     2026-11-24).  The limit belongs to the model family, not to the free
+#     tier.
 #   * The Decisions API itself does implement the full typed contract
 #     (noul + choice + score): typesafe/jev-1.13 answered a choice question
 #     and a score question live on 2026-11-06, each with a full probability
@@ -203,7 +213,17 @@ DECISION_MODEL_SLOTS: list[dict] = [
         "question": ("noul",),
         "max_tokens": 0,
         "timeout": 12.0,
-        "note": "the only free decision model — noul questions only, zero-priced",
+        "note": "the primary free decision model — noul questions only, zero-priced",
+    },
+    {
+        "provider_id": "openrouter",
+        "name": "perplexity/pplx-decider-v1.3:free",
+        "api": "decisions",
+        "question": ("noul",),
+        "max_tokens": 0,
+        "timeout": 12.0,
+        "note": ("unlisted in the catalogue yet served by the Decisions API — "
+                 "noul only, zero-priced, ~1 s; respan's fallback"),
     },
     {
         "provider_id": "nvidia",

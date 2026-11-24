@@ -1603,7 +1603,11 @@ class WhatsAppManager:
                     self._orion_echo_expected.add(jid)
             return ok
         except Exception as e:
-            print(f"{RED}[WhatsApp] Send error: {e}{RESET}")
+            # Send failures are routine while the gateway restarts (the HTTP
+            # API answers 500 until the socket is up again); stay quiet unless
+            # debugging, like every other send-path print.
+            if self.debug:
+                print(f"{RED}[WhatsApp] Send error: {e}{RESET}")
             return False
 
     def set_typing(self, to_jid, duration_ms=15000):
