@@ -134,7 +134,7 @@ With `"notify": true` (the default), a system notification is pushed whenever th
 | `tts_enabled` | boolean | `false` | Start in voice mode |
 | `use_groq` | boolean | `false` | Use Groq TTS |
 | `show_details` | boolean | `false` | Expanded tool output by default |
-| `autonomous` | boolean \| `"semi"` | `false` | Permission-gate level |
+| `autonomous` | `false` \| `"semi"` \| `true` | `false` | Permission-gate level (`false` = ask, `"semi"` = ask on secrets only, `true` = full) |
 | `notify` | boolean | `true` | Notify when the AI waits for you |
 | `spill_trigger_tokens` | integer | `4000` | Tool results above this go to `data/spill/` |
 | `spill_enabled` | boolean | `true` | Set `false` to keep every result inline |
